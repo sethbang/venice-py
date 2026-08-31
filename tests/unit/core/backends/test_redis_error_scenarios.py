@@ -25,11 +25,10 @@ class TestRedisBackendConnectionPoolManagement:
         # Mock the first event loop
         with patch("asyncio.get_running_loop") as mock_get_loop:
             mock_loop1 = MagicMock()
-            mock_loop1_id = 12345
+            mock_loop1_id = id(mock_loop1)
             mock_get_loop.return_value = mock_loop1
 
             with (
-                patch("builtins.id", return_value=mock_loop1_id),
                 patch("venice_ai.core.backends.redis.Redis") as mock_redis_class,
                 patch("venice_ai.core.backends.redis.ConnectionPool") as mock_pool_class,
             ):
@@ -49,13 +48,12 @@ class TestRedisBackendConnectionPoolManagement:
 
                 # Simulate event loop change
                 mock_loop2 = MagicMock()
-                mock_loop2_id = 67890
+                mock_loop2_id = id(mock_loop2)
                 mock_get_loop.return_value = mock_loop2
 
-                with patch("builtins.id", return_value=mock_loop2_id):
-                    # This should trigger the event loop change branch (lines 148-154)
-                    await backend._ensure_connected()
-                    assert backend._event_loop_id == mock_loop2_id
+                # This should trigger the event loop change branch (lines 148-154)
+                await backend._ensure_connected()
+                assert backend._event_loop_id == mock_loop2_id
 
     @pytest.mark.asyncio
     async def test_fallback_redis_connection_creation(self):
@@ -67,7 +65,6 @@ class TestRedisBackendConnectionPoolManagement:
             mock_get_loop.return_value = mock_loop
 
             with (
-                patch("builtins.id", return_value=12345),
                 patch("venice_ai.core.backends.redis.ConnectionPool", None),
                 patch("venice_ai.core.backends.redis.Redis", None),
                 patch("venice_ai.core.backends.redis.redis") as mock_redis_module,
@@ -93,14 +90,13 @@ class TestRedisBackendConnectionPoolManagement:
         mock_existing_redis.ping = AsyncMock(side_effect=ConnectionError("Connection lost"))
         backend._redis = mock_existing_redis
         backend._connected = True
-        backend._event_loop_id = 12345
 
         with patch("asyncio.get_running_loop") as mock_get_loop:
             mock_loop = MagicMock()
             mock_get_loop.return_value = mock_loop
+            backend._event_loop_id = id(mock_loop)  # Same loop: no pool switch
 
             with (
-                patch("builtins.id", return_value=12345),  # Same loop ID
                 patch("venice_ai.core.backends.redis.Redis") as mock_redis_class,
                 patch("venice_ai.core.backends.redis.ConnectionPool") as mock_pool_class,
             ):

@@ -48,7 +48,6 @@ class TestClusterModeConnection:
             mock_get_loop.return_value = mock_loop
 
             with (
-                patch("builtins.id", return_value=12345),
                 patch("venice_ai.core.backends.redis.RedisCluster") as mock_cluster,
             ):
                 mock_cluster_instance = AsyncMock()
@@ -83,7 +82,6 @@ class TestClusterModeConnection:
             mock_get_loop.return_value = mock_loop
 
             with (
-                patch("builtins.id", return_value=99999),  # New loop ID
                 patch("venice_ai.core.backends.redis.Redis") as mock_redis,
                 patch("venice_ai.core.backends.redis.ConnectionPool") as mock_pool_class,
             ):
@@ -122,7 +120,6 @@ class TestPingTimeoutHandling:
             mock_get_loop.return_value = mock_loop
 
             with (
-                patch("builtins.id", return_value=12345),
                 patch("venice_ai.core.backends.redis.Redis") as mock_redis_class,
                 patch("venice_ai.core.backends.redis.ConnectionPool") as mock_pool_class,
             ):
@@ -199,7 +196,6 @@ class TestRuntimeErrorHandling:
             mock_get_loop.return_value = mock_loop
 
             with (
-                patch("builtins.id", return_value=12345),
                 patch.object(RedisBackend, "_connection_pools", {}),
                 patch("venice_ai.core.backends.redis.ConnectionPool") as mock_pool_class,
             ):
@@ -221,7 +217,6 @@ class TestRuntimeErrorHandling:
             mock_get_loop.return_value = mock_loop
 
             with (
-                patch("builtins.id", return_value=12345),
                 patch.object(RedisBackend, "_connection_pools", {}),
                 patch("venice_ai.core.backends.redis.ConnectionPool") as mock_pool_class,
             ):
@@ -1058,37 +1053,36 @@ class TestEventLoopSwitchingBranches:
             mock_loop = MagicMock()
             mock_get_loop.return_value = mock_loop
 
-            with patch("builtins.id", return_value=22222):  # New loop ID
-                # Use a real create_task but track it
-                original_create_task = asyncio.create_task
+            # Use a real create_task but track it
+            original_create_task = asyncio.create_task
 
-                def tracking_create_task(coro, **kwargs):
-                    task = original_create_task(coro, **kwargs)
-                    created_tasks.append(task)
-                    return task
+            def tracking_create_task(coro, **kwargs):
+                task = original_create_task(coro, **kwargs)
+                created_tasks.append(task)
+                return task
 
-                with (
-                    patch("asyncio.create_task", side_effect=tracking_create_task),
-                    patch("venice_ai.core.backends.redis.Redis") as mock_redis,
-                    patch("venice_ai.core.backends.redis.ConnectionPool") as mock_pool_class,
-                ):
-                    mock_pool = MagicMock()
-                    mock_pool_class.from_url.return_value = mock_pool
+            with (
+                patch("asyncio.create_task", side_effect=tracking_create_task),
+                patch("venice_ai.core.backends.redis.Redis") as mock_redis,
+                patch("venice_ai.core.backends.redis.ConnectionPool") as mock_pool_class,
+            ):
+                mock_pool = MagicMock()
+                mock_pool_class.from_url.return_value = mock_pool
 
-                    new_redis = AsyncMock()
-                    new_redis.ping = AsyncMock(return_value=True)
-                    mock_redis.return_value = new_redis
+                new_redis = AsyncMock()
+                new_redis.ping = AsyncMock(return_value=True)
+                mock_redis.return_value = new_redis
 
-                    await backend._ensure_connected()
+                await backend._ensure_connected()
 
-                    # Verify cleanup task was created for old connection
-                    # (covers lines 125-131)
-                    assert len(created_tasks) >= 1
+                # Verify cleanup task was created for old connection
+                # (covers lines 125-131)
+                assert len(created_tasks) >= 1
 
-                    # Wait for cleanup tasks to complete
-                    for task in created_tasks:
-                        with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
-                            await asyncio.wait_for(task, timeout=1.0)
+                # Wait for cleanup tasks to complete
+                for task in created_tasks:
+                    with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                        await asyncio.wait_for(task, timeout=1.0)
 
 
 class TestPartialBranchCoverage:
@@ -1107,7 +1101,6 @@ class TestPartialBranchCoverage:
             mock_get_loop.return_value = mock_loop
 
             with (
-                patch("builtins.id", return_value=12345),
                 patch.object(RedisBackend, "_connection_pools", {}),
                 patch("venice_ai.core.backends.redis.ConnectionPool") as mock_pool_class,
             ):
@@ -1140,7 +1133,6 @@ class TestPartialBranchCoverage:
             mock_get_loop.return_value = mock_loop
 
             with (
-                patch("builtins.id", return_value=12345),
                 patch("venice_ai.core.backends.redis.Redis") as mock_redis_class,
                 patch("venice_ai.core.backends.redis.ConnectionPool") as mock_pool_class,
             ):

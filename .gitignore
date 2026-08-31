@@ -162,6 +162,7 @@ tests/integration/cassettes
 tests/e2e/cassettes
 tests/e2e/audio_helper_outputs
 tests/benchmarks/vcr_cassettes
+tests/benchmarks/vcr_benchmark_report.txt
 tests/profiling/.baselines.json
 test_output
 examples/results

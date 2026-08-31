@@ -43,7 +43,6 @@ from typing import Any
 
 import pytest
 import vcr
-from vcr.record_mode import RecordMode
 
 from tests.benchmarks.metrics import BenchmarkResults, MetricsCollector
 from tests.benchmarks.reporters import BenchmarkReporter
@@ -51,6 +50,7 @@ from tests.benchmarks.scenarios import (
     BenchmarkScenario,
     RequestPattern,
 )
+from tests.vcr_policy import resolve_record_mode
 from venice_ai import VeniceAIConfig
 from venice_ai.core.config import (
     BackendConfig,
@@ -68,7 +68,10 @@ VCR_CASSETTE_DIR.mkdir(exist_ok=True)
 # Configure VCR for Venice API
 vcr_config = vcr.VCR(
     cassette_library_dir=str(VCR_CASSETTE_DIR),
-    record_mode=RecordMode.ONCE,  # Only record if cassette doesn't exist
+    # Resolved centrally. This instance shadows the root ``vcr_config`` fixture
+    # name, so a mode hardcoded here would bypass VENICE_CI_MODE entirely and
+    # record — and therefore bill — whenever a cassette is absent.
+    record_mode=resolve_record_mode(),
     match_on=["method", "uri", "body"],
     filter_headers=["Authorization", "X-API-Key"],  # Hide sensitive data
     decode_compressed_response=True,
