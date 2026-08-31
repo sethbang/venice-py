@@ -20,14 +20,14 @@ rust = ["abnf-rust (>=2.5,<3)"]
 
 [[package]]
 name = "adaptive-rate-limiter"
-version = "1.1.0"
+version = "1.2.1"
 description = "Adaptive rate limiting for API clients with multi-provider support"
 optional = false
 python-versions = "<4.0,>=3.10"
 groups = ["main", "dev"]
 files = [
-    {file = "adaptive_rate_limiter-1.1.0-py3-none-any.whl", hash = "sha256:d2c6c4c0fb8eae45be1abe5d1341b08cccdfd801237073b3d07cd222f0f447c9"},
-    {file = "adaptive_rate_limiter-1.1.0.tar.gz", hash = "sha256:52ba723cab0e76436b1d7c231e0259fe29252a0ee9db63c5352eec96516599b8"},
+    {file = "adaptive_rate_limiter-1.2.1-py3-none-any.whl", hash = "sha256:71ebcfb70e4bf9998e8ce3937e44d6b41998876f6fafc7c5d9cb331dd7ba649a"},
+    {file = "adaptive_rate_limiter-1.2.1.tar.gz", hash = "sha256:a1a792e5308a778d05bee6e4c2f61d437970d127fb3891465664db23d259daa9"},
 ]
 markers = {main = "extra == \"adaptive\" or extra == \"all\" or extra == \"enterprise\""}
 
