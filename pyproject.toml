@@ -168,7 +168,7 @@ beautifulsoup4 = "^4.14.3"
 Pillow = "^12.2.0"                   # For image processing (e.g., dimension checks)
 numpy = "^2.4.6"                     # For numerical operations, required by some tests
 pypandoc = "^1.17"
-tiktoken = "^0.13.0"                 # For token estimation in tests
+tiktoken = ">=0.13,<0.15"                 # For token estimation in tests
 freezegun = "^1.5.5"
 python-dotenv = "^1.2.2"
 pyyaml = "^6.0.3"
