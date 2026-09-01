@@ -73,6 +73,10 @@ questionary = { version = "^2.1.1", optional = true }   # Interactive CLI prompt
 # x402 (SIWE wallet auth) dependencies — install with pip install venice-py[x402]
 eth-account = { version = "^0.13.7", optional = true }  # Ethereum account signing
 siwe = { version = "^4.4.0", optional = true }          # EIP-4361 SIWE message builder
+# Transitive via siwe, constrained here because siwe allows >=2.2,<3 and abnf
+# 2.9.0 made redefining an RFC 5234 core rule an error. siwe's own rfc5234
+# grammar redefines ALPHA, so 2.9.0 breaks `import siwe` outright.
+abnf = { version = ">=2.2,<2.9", optional = true }
 # x402 Solana (SIWS wallet auth + settlement) — install with pip install venice-py[x402-solana]
 solders = { version = ">=0.28,<0.30", optional = true }      # Solana ed25519 signing / base58 / tx build
 # TEE client-side E2EE (secp256k1 ECDH + HKDF + AES-GCM) — install with pip install venice-py[e2ee]
@@ -98,7 +102,7 @@ cli = [
 ]
 redis = ["redis"]
 adaptive = ["adaptive-rate-limiter", "redis"]
-x402 = ["eth-account", "siwe"]
+x402 = ["eth-account", "siwe", "abnf"]
 x402-solana = ["solders"]
 e2ee = ["cryptography"]
 e2ee-verify = ["dcap-qvl", "cryptography"]
@@ -127,6 +131,7 @@ all = [
     "filelock",
     "eth-account",
     "siwe",
+    "abnf",
     "solders",
     "cryptography",
     "dcap-qvl",

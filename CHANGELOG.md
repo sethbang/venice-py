@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`abnf` is now capped at `<2.9`** on the `x402` extra. `siwe` accepts `abnf >=2.2,<3`,
+  but `abnf` 2.9.0 made redefining an RFC 5234 core rule a hard error, and `siwe`'s own
+  `rfc5234` grammar redefines `ALPHA`. The result was that `import siwe` raised
+  `GrammarError` outright, taking the whole SIWE and x402 authentication path with it.
+  Constrained here rather than waiting on `siwe`, which is already at its latest release.
+
+- **Dependencies refreshed.** 34 packages moved, notably `cryptography` 50.0.1, `click`
+  8.5.0, `idna` 3.19, `pydantic` 2.13.5, `dcap-qvl` 0.6.3 and `filelock` 3.32.5.
+
+  `hexbytes`, `eth-abi`, `rlp` and `eth-rlp` crossed major versions because `web3` 7.16.0
+  and `eth-account` 0.13.7 declare them with no upper bound. That mixed cohort is safe
+  here for a specific reason rather than by luck: this SDK imports nothing from `web3`,
+  `hexbytes`, `eth_abi` or `rlp` directly, and the one `hexbytes` 2.0 behaviour change
+  that does reach it — `.hex()` no longer returning a `0x` prefix — is already normalised
+  at every call site. EIP-712 typed-data signing and SIWE verification were both checked
+  end to end against the new cohort.
+
+  `web3` 8, `eth-account` 0.14, `websockets` 17 and `chardet` 7 stay where they are:
+  `siwe` 4.4.0 pins `web3 <8` and `eth-account <0.14`, `web3` 7 pins `websockets <16`, and
+  `cyclonedx-bom` 7.3.1 pins `chardet <6`. All three are already at their latest releases,
+  so these are ecosystem ceilings, not deferred work.
+
 - **`adaptive-rate-limiter` now requires `>=1.3.0`** (was `>=1.1.0`). Venice meters requests
   but not tokens, and the limiter could not represent that. Two layers had to change for the
   adaptive path to work against this API at all.
@@ -43,6 +65,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   step of the distribution rename, and it changes nothing about what gets built or installed.
 
 ### Fixed
+
+- **Dict-form multimodal content is coerced into typed content objects again.** Passing
+  `UserMessage(content=[{"type": "text", ...}])` returned plain `dict` parts instead of
+  `TextContent`/`ImageContent`/`AudioContent`/`VideoContent`/`FileContent`, so attribute
+  access such as `msg.content[0].text` raised `AttributeError`. Serialization — and
+  therefore the request sent to the API — was unaffected.
+
+  `MessageContentPartParam` unions the discriminated `MessageContentPart` with `TypedDict`
+  mirrors of the same shapes, which exist purely so callers can pass plain dicts without
+  type-checker complaints. Pydantic's smart mode picks a union member by score rather than
+  by order, and the mirrors describe the same shapes by construction, so the two members
+  were only ever separated by a scoring tiebreak; `pydantic` 2.13.5 adjusted that scoring
+  and the `TypedDict` members began winning. The union is now pinned to
+  `union_mode="left_to_right"`, which removes the dependency on scoring entirely and
+  behaves identically on 2.13.4 and 2.13.5.
 
 - **Local test runs no longer record cassettes — and no longer spend API credit — by
   default.** The VCR record mode defaulted to `NEW_EPISODES` outside CI, which replays what

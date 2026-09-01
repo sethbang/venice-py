@@ -36,7 +36,9 @@ def runner():
     return CliRunner()
 
 
-def _invoke_capture(runner, patch_target: str, argv: list[str], files: dict | None = None) -> dict:
+def _invoke_capture(
+    runner, patch_target: str, argv: list[str], files: dict[Path, bytes] | None = None
+) -> dict:
     """Invoke ``argv`` with ``patch_target`` (the fully-qualified
     ``resolve_default_model`` reference for this command) patched to capture the
     ``kind``. Returns the captured dict.
@@ -47,9 +49,9 @@ def _invoke_capture(runner, patch_target: str, argv: list[str], files: dict | No
     """
     captured: dict = {}
     env = {"VENICE_API_KEY": "test-key-1234567890"}
-    with patch(patch_target, _capturing_resolve(captured)), runner.isolated_filesystem():
-        for name, data in (files or {}).items():
-            Path(name).write_bytes(data)
+    for path, data in (files or {}).items():
+        path.write_bytes(data)
+    with patch(patch_target, _capturing_resolve(captured)):
         runner.invoke(cli, argv, env=env)
     return captured
 
@@ -75,12 +77,13 @@ def test_audio_speak_resolves_tts_kind(runner):
     assert captured.get("kind") == "tts"
 
 
-def test_audio_transcribe_resolves_stt_kind(runner):
+def test_audio_transcribe_resolves_stt_kind(runner, tmp_path):
+    sample = tmp_path / "sample.mp3"
     captured = _invoke_capture(
         runner,
         _SRC,
-        ["audio", "transcribe", "sample.mp3"],
-        files={"sample.mp3": b"\x00\x01\x02\x03"},
+        ["audio", "transcribe", str(sample)],
+        files={sample: b"\x00\x01\x02\x03"},
     )
     assert captured.get("kind") == "stt"
 
@@ -90,12 +93,13 @@ def test_video_generate_resolves_video_t2v_kind(runner):
     assert captured.get("kind") == "video_t2v"
 
 
-def test_video_from_image_resolves_video_i2v_kind(runner):
+def test_video_from_image_resolves_video_i2v_kind(runner, tmp_path):
+    frame = tmp_path / "frame.png"
     captured = _invoke_capture(
         runner,
         _SRC,
-        ["video", "from-image", "frame.png"],
-        files={"frame.png": b"\x89PNG\r\n\x1a\n" + b"\x00" * 32},
+        ["video", "from-image", str(frame)],
+        files={frame: b"\x89PNG\r\n\x1a\n" + b"\x00" * 32},
     )
     assert captured.get("kind") == "video_i2v"
 
