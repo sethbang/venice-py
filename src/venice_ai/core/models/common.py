@@ -250,20 +250,27 @@ class FileContentParam(TypedDict):
     cache_control: NotRequired[dict[str, str]]
 
 
-MessageContentPartParam = (
+MessageContentPartParam = Annotated[
     MessageContentPart
     | TextContentParam
     | ImageContentParam
     | AudioContentParam
     | VideoContentParam
-    | FileContentParam
-)
+    | FileContentParam,
+    Field(union_mode="left_to_right"),
+]
 """Input alias accepted by message constructors.
 
 Mirrors :data:`MessageContentPart` plus :class:`TypedDict` variants of each
 content shape so callers can pass plain dicts without type-checker complaints.
 At runtime Pydantic validates dicts via the same discriminated union — invalid
 ``type`` values still raise :class:`pydantic.ValidationError`.
+
+``union_mode="left_to_right"`` keeps :data:`MessageContentPart` ahead of the
+:class:`TypedDict` mirrors so a plain dict is coerced into the corresponding
+typed content object instead of being left as a dict. The mirrors describe the
+same shapes by construction, so smart mode — which scores union members rather
+than honouring their order — has no stable reason to prefer one over the other.
 """
 
 

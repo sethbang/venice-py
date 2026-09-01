@@ -54,7 +54,7 @@ COV_THRESHOLD  := 90
 # -----------------------------------------------------
 # Pytest Flag Composition (reduces duplication)
 # -----------------------------------------------------
-PYTEST_COMMON    := -n 6 --tb=short --show-capture=no
+PYTEST_COMMON    := -n 4 --tb=short --show-capture=no
 PYTEST_IGNORE    := --ignore=tests/benchmarks --ignore=tests/profiling
 PYTEST_COV_BASE  := --cov=$(COV_SOURCE) --cov-report=term-missing
 PYTEST_COV_FULL  := $(PYTEST_COV_BASE) --cov-report=html:$(COV_HTML_DIR) --cov-report=xml:$(COV_XML)
