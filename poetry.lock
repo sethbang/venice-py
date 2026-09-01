@@ -7,7 +7,7 @@ description = "Parsers for ABNF grammars."
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "abnf-2.6.0-py3-none-any.whl", hash = "sha256:e40aed8e105846ba91a566f6e0f6878cc6cae61218bc949ca05b3577bed92c6e"},
     {file = "abnf-2.6.0.tar.gz", hash = "sha256:945c1377ef6dfc25ae19fd6d6eafe767e6cf8d3a9cbd3e4cd9ef715607ee2068"},
@@ -29,7 +29,7 @@ files = [
     {file = "adaptive_rate_limiter-1.3.0-py3-none-any.whl", hash = "sha256:1e7f645e41d29d290ef78c3e1b05b09748fb3dcbe9d4cb279778b1036c1051ee"},
     {file = "adaptive_rate_limiter-1.3.0.tar.gz", hash = "sha256:2d4231ead24ae27918cbd05a0ffbf3e2aae36f74f2266fb479622cb236323c27"},
 ]
-markers = {main = "extra == \"adaptive\" or extra == \"enterprise\" or extra == \"all\""}
+markers = {main = "extra == \"adaptive\" or extra == \"all\" or extra == \"enterprise\""}
 
 [package.dependencies]
 pydantic = ">=2.0.0,<3.0.0"
@@ -67,7 +67,7 @@ files = [
     {file = "aiofiles-25.1.0-py3-none-any.whl", hash = "sha256:abe311e527c862958650f9438e859c1fa7568a141b22abcd015e120e86a85695"},
     {file = "aiofiles-25.1.0.tar.gz", hash = "sha256:a8d728f0a29de45dc521f18f07297428d56992a742f0cd2701ba86e44d23d5b2"},
 ]
-markers = {main = "extra == \"cli\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"cli\""}
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -520,7 +520,7 @@ description = "efficient arrays of booleans -- C extension"
 optional = true
 python-versions = ">=3.7"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "bitarray-3.10.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:fdcdb64d155ebddc2adca2d9eabf3ae93f3e2a1b244bee5a7cb36b75f16259cd"},
     {file = "bitarray-3.10.1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:b42adba4705a4e461ff3c76b89b1622a15c26759101226a66419adab60632035"},
@@ -870,7 +870,7 @@ files = [
     {file = "certifi-2026.7.22-py3-none-any.whl", hash = "sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"},
     {file = "certifi-2026.7.22.tar.gz", hash = "sha256:741e2c3b351ddf169a738da9f2c048608ff7f2c5cc02f1ebc6b118bb090d5d55"},
 ]
-markers = {main = "extra == \"x402\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"x402\""}
 
 [[package]]
 name = "cffi"
@@ -879,7 +879,7 @@ description = "Foreign Function Interface for Python calling C code."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "sys_platform != \"android\" and sys_platform != \"ios\" or platform_python_implementation != \"CPython\" or extra == \"e2ee\" or extra == \"e2ee-verify\" or extra == \"all\""
+markers = "sys_platform != \"android\" and sys_platform != \"ios\" or platform_python_implementation != \"CPython\" or extra == \"all\" or extra == \"e2ee\" or extra == \"e2ee-verify\""
 files = [
     {file = "cffi-2.1.1-cp310-cp310-macosx_10_15_x86_64.whl", hash = "sha256:baed1e86cc735622097354b9d1281406caf42ff42a886d29faa8e8d1630333be"},
     {file = "cffi-2.1.1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:ca82be1a1d406ecfe1d25dc16cb33488e5a16bf4438c9fb590484ea29d92478b"},
@@ -1100,7 +1100,7 @@ files = [
     {file = "charset_normalizer-3.4.9-py3-none-any.whl", hash = "sha256:68e5f26a1ad57ded6d1cfb85331d1c1a195314756471d97758c48498bb4dcdf5"},
     {file = "charset_normalizer-3.4.9.tar.gz", hash = "sha256:673611bbd43f0810bec0b0f028ddeaaa501190339cac411f347ac76917c3ae7b"},
 ]
-markers = {main = "extra == \"x402\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"x402\""}
 
 [[package]]
 name = "ckzg"
@@ -1109,7 +1109,7 @@ description = "Python bindings for C-KZG-4844"
 optional = true
 python-versions = "*"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "ckzg-2.1.8-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:8dc23b189b5e061b5a2fcf609b6dc1f62098dd72cf9116e4721f995eb144b0ee"},
     {file = "ckzg-2.1.8-cp310-cp310-manylinux2010_i686.manylinux_2_12_i686.manylinux_2_28_i686.whl", hash = "sha256:71e0e6d84a268c23c29d546a7ef4720a9d2aea597efe4def75205b6ef436900c"},
@@ -1181,7 +1181,7 @@ files = [
     {file = "click-8.4.2-py3-none-any.whl", hash = "sha256:e6f9f66136c816745b9d65817da91d61d957fb16e02e4dcd0552553c5a197b76"},
     {file = "click-8.4.2.tar.gz", hash = "sha256:9a6cea6e60b17ebe0a44c5cc636d94f09bd66142c1cd7d8b4cd731c4917a15f6"},
 ]
-markers = {main = "extra == \"cli\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"cli\""}
 
 [package.dependencies]
 colorama = {version = "*", markers = "platform_system == \"Windows\""}
@@ -1197,7 +1197,7 @@ files = [
     {file = "colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"},
     {file = "colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44"},
 ]
-markers = {main = "platform_system == \"Windows\" and (extra == \"cli\" or extra == \"all\")", dev = "platform_system == \"Windows\" or sys_platform == \"win32\""}
+markers = {main = "platform_system == \"Windows\" and (extra == \"all\" or extra == \"cli\")", dev = "platform_system == \"Windows\" or sys_platform == \"win32\""}
 
 [[package]]
 name = "coverage"
@@ -1340,7 +1340,7 @@ description = "cryptography is a package which provides cryptographic recipes an
 optional = true
 python-versions = "!=3.9.0,!=3.9.1,>=3.9"
 groups = ["main"]
-markers = "extra == \"e2ee\" or extra == \"e2ee-verify\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"e2ee\" or extra == \"e2ee-verify\""
 files = [
     {file = "cryptography-50.0.0-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:031e2d5dd4bb9caa3ca9c82e5a197fd8ae680232cee62603d1a813f3f07e3d03"},
     {file = "cryptography-50.0.0-cp311-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:fd9192b7b70c573d7f214eb1ae35e00d359f6f5e4b27c7e21e30de1fc6204645"},
@@ -1448,7 +1448,7 @@ description = "Cython implementation of Toolz: High performance functional utili
 optional = true
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "implementation_name == \"cpython\" and (extra == \"x402\" or extra == \"all\")"
+markers = "implementation_name == \"cpython\" and (extra == \"all\" or extra == \"x402\")"
 files = [
     {file = "cytoolz-1.1.0-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:72d7043a88ea5e61ba9d17ea0d1c1eff10f645d7edfcc4e56a31ef78be287644"},
     {file = "cytoolz-1.1.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:d759e9ed421bacfeb456d47af8d734c057b9912b5f2441f95b27ca35e5efab07"},
@@ -1639,7 +1639,7 @@ description = "Python bindings for DCAP (Data Center Attestation Primitives) quo
 optional = true
 python-versions = ">=3.8"
 groups = ["main"]
-markers = "extra == \"e2ee-verify\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"e2ee-verify\""
 files = [
     {file = "dcap_qvl-0.6.1-cp38-abi3-macosx_10_12_x86_64.whl", hash = "sha256:fc64c271a41413b44dd9185c8ceff7d48033b8708047cc89e9899f0442003d4a"},
     {file = "dcap_qvl-0.6.1-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:b09b5c20f17bcb44b3ed65d873b0d055f241aff5549d0d098637608892261c6e"},
@@ -1670,7 +1670,7 @@ description = "eth_abi: Python utilities for working with Ethereum ABI definitio
 optional = true
 python-versions = "<4,>=3.8"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "eth_abi-5.2.0-py3-none-any.whl", hash = "sha256:17abe47560ad753f18054f5b3089fcb588f3e3a092136a416b6c1502cb7e8877"},
     {file = "eth_abi-5.2.0.tar.gz", hash = "sha256:178703fa98c07d8eecd5ae569e7e8d159e493ebb6eeb534a8fe973fbc4e40ef0"},
@@ -1694,7 +1694,7 @@ description = "eth-account: Sign Ethereum transactions and messages with local p
 optional = true
 python-versions = "<4,>=3.8"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "eth_account-0.13.7-py3-none-any.whl", hash = "sha256:39727de8c94d004ff61d10da7587509c04d2dc7eac71e04830135300bdfc6d24"},
     {file = "eth_account-0.13.7.tar.gz", hash = "sha256:5853ecbcbb22e65411176f121f5f24b8afeeaf13492359d254b16d8b18c77a46"},
@@ -1724,7 +1724,7 @@ description = "eth-hash: The Ethereum hashing function, keccak256, sometimes (er
 optional = true
 python-versions = "<4,>=3.10"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "eth_hash-0.8.0-py3-none-any.whl", hash = "sha256:523718a51b369ab89866b929a5c93c52978cd866ea309192ad980dd8271f9fac"},
     {file = "eth_hash-0.8.0.tar.gz", hash = "sha256:b009752b620da2e9c7668014849d1f5fadbe4f138603f1871cc5d4ca706896b1"},
@@ -1747,7 +1747,7 @@ description = "eth-keyfile: A library for handling the encrypted keyfiles used t
 optional = true
 python-versions = "<4,>=3.8"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "eth_keyfile-0.8.1-py3-none-any.whl", hash = "sha256:65387378b82fe7e86d7cb9f8d98e6d639142661b2f6f490629da09fddbef6d64"},
     {file = "eth_keyfile-0.8.1.tar.gz", hash = "sha256:9708bc31f386b52cca0969238ff35b1ac72bd7a7186f2a84b86110d3c973bec1"},
@@ -1770,7 +1770,7 @@ description = "eth-keys: Common API for Ethereum key operations"
 optional = true
 python-versions = "<4,>=3.8"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "eth_keys-0.7.0-py3-none-any.whl", hash = "sha256:b0cdda8ffe8e5ba69c7c5ca33f153828edcace844f67aabd4542d7de38b159cf"},
     {file = "eth_keys-0.7.0.tar.gz", hash = "sha256:79d24fd876201df67741de3e3fefb3f4dbcbb6ace66e47e6fe662851a4547814"},
@@ -1793,7 +1793,7 @@ description = "eth-rlp: RLP definitions for common Ethereum objects in Python"
 optional = true
 python-versions = "<4,>=3.8"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "eth_rlp-2.2.0-py3-none-any.whl", hash = "sha256:5692d595a741fbaef1203db6a2fedffbd2506d31455a6ad378c8449ee5985c47"},
     {file = "eth_rlp-2.2.0.tar.gz", hash = "sha256:5e4b2eb1b8213e303d6a232dfe35ab8c29e2d3051b86e8d359def80cd21db83d"},
@@ -1816,7 +1816,7 @@ description = "eth-typing: Common type annotations for ethereum python packages"
 optional = true
 python-versions = "<4,>=3.10"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "eth_typing-6.0.0-py3-none-any.whl", hash = "sha256:ee74fb641eb36dd885e1c42c2a3055314efa532b3e71480816df70a94d35cfb9"},
     {file = "eth_typing-6.0.0.tar.gz", hash = "sha256:315dd460dc0b71c15a6cd51e3c0b70d237eec8771beb844144f3a1fb4adb2392"},
@@ -1837,7 +1837,7 @@ description = "eth-utils: Common utility functions for python code that interact
 optional = true
 python-versions = "<4,>=3.10"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "eth_utils-6.0.0-py3-none-any.whl", hash = "sha256:63cf48ee32c45541cb5748751909a8345c470432fb6f0fed4bd7c53fd6400469"},
     {file = "eth_utils-6.0.0.tar.gz", hash = "sha256:eb54b2f82dd300d3142c49a89da195e823f5e5284d43203593f87c67bad92a96"},
@@ -1872,16 +1872,16 @@ testing = ["hatch", "pre-commit", "pytest", "tox"]
 
 [[package]]
 name = "filelock"
-version = "3.32.3"
+version = "3.32.4"
 description = "A platform independent file lock."
 optional = false
 python-versions = ">=3.10"
 groups = ["main", "dev"]
 files = [
-    {file = "filelock-3.32.3-py3-none-any.whl", hash = "sha256:7f0ca4bcc0e181c60dbbd8aa9ab5b120ebb99e4e064e83636340056f833a1f09"},
-    {file = "filelock-3.32.3.tar.gz", hash = "sha256:0ffa185a3540854c95caa7fa76b76cb219d907415e2c5dc9af25fd970563487f"},
+    {file = "filelock-3.32.4-py3-none-any.whl", hash = "sha256:22e58ca3b1ae3b98993b762d7338367ae64fe50252bf78d59da3bfebcdf1cedd"},
+    {file = "filelock-3.32.4.tar.gz", hash = "sha256:2bde2e4cf732e0153406d8a7bc80620ecf5e621fe0d25e41143c4e3b4733ff30"},
 ]
-markers = {main = "extra == \"cli\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"cli\""}
 
 [[package]]
 name = "fqdn"
@@ -2057,7 +2057,7 @@ description = "hexbytes: Python `bytes` subclass that decodes hex, with a readab
 optional = true
 python-versions = "<4,>=3.8"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "hexbytes-1.3.1-py3-none-any.whl", hash = "sha256:da01ff24a1a9a2b1881c4b85f0e9f9b0f51b526b379ffa23832ae7899d29c2c7"},
     {file = "hexbytes-1.3.1.tar.gz", hash = "sha256:a657eebebdfe27254336f98d8af6e2236f3f83aed164b87466b6cf6c5f5a4765"},
@@ -2231,7 +2231,7 @@ description = "A microlibrary that defines a Json type alias for Python."
 optional = true
 python-versions = ">=3.7,<4.0"
 groups = ["main"]
-markers = "extra == \"x402-solana\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402-solana\""
 files = [
     {file = "jsonalias-0.1.1-py3-none-any.whl", hash = "sha256:a56d2888e6397812c606156504e861e8ec00e188005af149f003c787db3d3f18"},
     {file = "jsonalias-0.1.1.tar.gz", hash = "sha256:64f04d935397d579fc94509e1fcb6212f2d081235d9d6395bd10baedf760a769"},
@@ -2739,7 +2739,7 @@ files = [
     {file = "markdown_it_py-4.2.0-py3-none-any.whl", hash = "sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a"},
     {file = "markdown_it_py-4.2.0.tar.gz", hash = "sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49"},
 ]
-markers = {main = "extra == \"cli\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"cli\""}
 
 [package.dependencies]
 linkify-it-py = {version = ">=1,<3", optional = true, markers = "extra == \"linkify\""}
@@ -2884,7 +2884,7 @@ files = [
     {file = "mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8"},
     {file = "mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba"},
 ]
-markers = {main = "extra == \"cli\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"cli\""}
 
 [[package]]
 name = "msgpack"
@@ -3341,7 +3341,7 @@ description = "OpenTelemetry Python API"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"observability\" or extra == \"enterprise\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"enterprise\" or extra == \"observability\""
 files = [
     {file = "opentelemetry_api-1.44.0-py3-none-any.whl", hash = "sha256:94b98c893a91b88657eaac1e3ba89618cdb85be6918196705354f34728b2cdef"},
     {file = "opentelemetry_api-1.44.0.tar.gz", hash = "sha256:67647e5e9566edcf421166fdf022b3537f818635daa852b289e34604dc6fb33a"},
@@ -3357,7 +3357,7 @@ description = "OpenTelemetry Python SDK"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"observability\" or extra == \"enterprise\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"enterprise\" or extra == \"observability\""
 files = [
     {file = "opentelemetry_sdk-1.44.0-py3-none-any.whl", hash = "sha256:df081c4c6bcfdb1211e3e86140376792643128a25f8d72d1d27675936e7e96ad"},
     {file = "opentelemetry_sdk-1.44.0.tar.gz", hash = "sha256:cebe7f65dc12f26ead75c6064de12fd2a9052e5060c0272d402cfa203aae123b"},
@@ -3378,7 +3378,7 @@ description = "OpenTelemetry Semantic Conventions"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"observability\" or extra == \"enterprise\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"enterprise\" or extra == \"observability\""
 files = [
     {file = "opentelemetry_semantic_conventions-0.65b0-py3-none-any.whl", hash = "sha256:1cacde7b0ad306f84c5ef08c3dbe1bbaf20165bba6f8bff43b670e555a086bcb"},
     {file = "opentelemetry_semantic_conventions-0.65b0.tar.gz", hash = "sha256:f9b2b81e9d5b64f11bc952075e7e9c7fb0aab075c7fd1c46d597f1b919852d60"},
@@ -3425,7 +3425,7 @@ description = "(Soon to be) the fastest pure-Python PEG parser I could muster"
 optional = true
 python-versions = "*"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "parsimonious-0.10.0-py3-none-any.whl", hash = "sha256:982ab435fabe86519b57f6b35610aa4e4e977e9f02a14353edf4bbc75369fc0f"},
     {file = "parsimonious-0.10.0.tar.gz", hash = "sha256:8281600da180ec8ae35427a4ab4f7b82bfec1e3d1e52f80cb60ea82b9512501c"},
@@ -3547,7 +3547,7 @@ files = [
     {file = "pillow-12.3.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:04f01d28a6aaff387bf842a13be313df23ba0597a44f1a976c9feb3c6ff4711a"},
     {file = "pillow-12.3.0.tar.gz", hash = "sha256:3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce"},
 ]
-markers = {main = "extra == \"cli\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"cli\""}
 
 [package.extras]
 docs = ["furo", "olefile", "sphinx (>=8.2)", "sphinx-autobuild", "sphinx-copybutton", "sphinx-inline-tabs", "sphinxext-opengraph"]
@@ -3674,7 +3674,7 @@ files = [
     {file = "prometheus_client-0.26.0-py3-none-any.whl", hash = "sha256:fa93d06737aa02bacd05794768508bb97d2fbee28cb3bca04eaae92f0ca953d6"},
     {file = "prometheus_client-0.26.0.tar.gz", hash = "sha256:04a91bcf94e2cf74a44a1a874d651a2e853ed354b6e822f3b7487751465d5c2b"},
 ]
-markers = {main = "extra == \"metrics\" or extra == \"enterprise\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"enterprise\" or extra == \"metrics\""}
 
 [package.extras]
 aiohttp = ["aiohttp"]
@@ -3692,7 +3692,7 @@ files = [
     {file = "prompt_toolkit-3.0.53-py3-none-any.whl", hash = "sha256:01c0891d7f9237d5e339f7d3e42cdae80b7534abb1c7c0e3352efba6231492f2"},
     {file = "prompt_toolkit-3.0.53.tar.gz", hash = "sha256:9ec8a0ad96d5c56148b3f914aa79c1564c3fde5d2e6b876e7bc327e353cf8fa6"},
 ]
-markers = {main = "extra == \"cli\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"cli\""}
 
 [package.dependencies]
 wcwidth = ">=0.1.4"
@@ -4011,7 +4011,7 @@ description = "C parser in Python"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "(sys_platform != \"android\" and sys_platform != \"ios\" or platform_python_implementation != \"CPython\" or extra == \"e2ee\" or extra == \"e2ee-verify\" or extra == \"all\") and implementation_name != \"PyPy\""
+markers = "(sys_platform != \"android\" and sys_platform != \"ios\" or platform_python_implementation != \"CPython\" or extra == \"all\" or extra == \"e2ee\" or extra == \"e2ee-verify\") and implementation_name != \"PyPy\""
 files = [
     {file = "pycparser-3.0-py3-none-any.whl", hash = "sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"},
     {file = "pycparser-3.0.tar.gz", hash = "sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29"},
@@ -4024,7 +4024,7 @@ description = "Cryptographic library for Python"
 optional = true
 python-versions = "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,!=3.6.*,>=2.7"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "pycryptodome-3.23.0-cp27-cp27m-macosx_10_9_x86_64.whl", hash = "sha256:a176b79c49af27d7f6c12e4b178b0824626f40a7b9fed08f712291b6d54bf566"},
     {file = "pycryptodome-3.23.0-cp27-cp27m-manylinux2010_i686.whl", hash = "sha256:573a0b3017e06f2cffd27d92ef22e46aa3be87a2d317a5abf7cc0e84e321bd75"},
@@ -4231,7 +4231,7 @@ description = "Settings management using Pydantic"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"enterprise\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"enterprise\""
 files = [
     {file = "pydantic_settings-2.15.0-py3-none-any.whl", hash = "sha256:0ba092c291c94baceb5eff768aa0d56400a457585bc0175925a5a5510303da42"},
     {file = "pydantic_settings-2.15.0.tar.gz", hash = "sha256:694b793e84f766ba76a90ebdefc01d0a9a045dab0382bee70393da93712ad117"},
@@ -4272,7 +4272,7 @@ files = [
     {file = "pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176"},
     {file = "pygments-2.20.0.tar.gz", hash = "sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f"},
 ]
-markers = {main = "extra == \"cli\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"cli\""}
 
 [package.extras]
 windows-terminal = ["colorama (>=0.4.6)"]
@@ -4521,7 +4521,7 @@ files = [
     {file = "python_dotenv-1.2.2-py3-none-any.whl", hash = "sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a"},
     {file = "python_dotenv-1.2.2.tar.gz", hash = "sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3"},
 ]
-markers = {main = "extra == \"enterprise\" or extra == \"all\" or extra == \"cli\""}
+markers = {main = "extra == \"all\" or extra == \"enterprise\" or extra == \"cli\""}
 
 [package.extras]
 cli = ["click (>=5.0)"]
@@ -4588,7 +4588,7 @@ description = "A library for Unicode normalization (NFC, NFD, NFKC, NFKD) indepe
 optional = true
 python-versions = ">=3.8"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "pyunormalize-17.0.0-py3-none-any.whl", hash = "sha256:f0d93b076f938db2b26d319d04f2b58505d1cd7a80b5b72badbe7d1aa4d2a31c"},
     {file = "pyunormalize-17.0.0.tar.gz", hash = "sha256:0949a3e56817e287febcaf1b0cc4b5adf0bb107628d379335938040947eec792"},
@@ -4601,7 +4601,7 @@ description = "Python for Windows Extensions"
 optional = true
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "platform_system == \"Windows\" and (extra == \"x402\" or extra == \"all\")"
+markers = "platform_system == \"Windows\" and (extra == \"all\" or extra == \"x402\")"
 files = [
     {file = "pywin32-312-cp310-cp310-win32.whl", hash = "sha256:772235332b5d1024c696f11cea1ae4be7930f0a8b894bb43db14e3f435f1ff7e"},
     {file = "pywin32-312-cp310-cp310-win_amd64.whl", hash = "sha256:5dbc35d2b5320dc07f25fa31269cfb767471002b17de5eb067d03da68c7cb2db"},
@@ -4708,7 +4708,7 @@ files = [
     {file = "pyyaml-6.0.3-cp39-cp39-win_amd64.whl", hash = "sha256:2e71d11abed7344e42a8849600193d15b6def118602c4c176f748e4583246007"},
     {file = "pyyaml-6.0.3.tar.gz", hash = "sha256:d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f"},
 ]
-markers = {main = "extra == \"cli\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"cli\""}
 
 [[package]]
 name = "pyyaml-ft"
@@ -4749,7 +4749,7 @@ files = [
     {file = "questionary-2.1.1-py3-none-any.whl", hash = "sha256:a51af13f345f1cdea62347589fbb6df3b290306ab8930713bfae4d475a7d4a59"},
     {file = "questionary-2.1.1.tar.gz", hash = "sha256:3d7e980292bb0107abaa79c68dd3eee3c561b83a0f89ae482860b181c8bd412d"},
 ]
-markers = {main = "extra == \"cli\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"cli\""}
 
 [package.dependencies]
 prompt_toolkit = ">=2.0,<4.0"
@@ -4761,7 +4761,7 @@ description = "Python client for Redis database and key-value store"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"redis\" or extra == \"adaptive\" or extra == \"enterprise\" or extra == \"all\""
+markers = "extra == \"adaptive\" or extra == \"all\" or extra == \"enterprise\" or extra == \"redis\""
 files = [
     {file = "redis-8.1.0-py3-none-any.whl", hash = "sha256:a4fe1aac3d3b3cc791d4b3d5931c5a956045dc951ee74d1c913ee3ac4d2ee9fb"},
     {file = "redis-8.1.0.tar.gz", hash = "sha256:6e1a19beef9225c83efd689c7e6b7da2d5215b1f42cd13b7fc3714d0a09c7b25"},
@@ -4914,7 +4914,7 @@ files = [
     {file = "regex-2026.7.19-cp314-cp314t-win_arm64.whl", hash = "sha256:9a15e785f244f3e07847b984ce8773fc3da10a9f3c131cc49a4c5b4d672b4547"},
     {file = "regex-2026.7.19.tar.gz", hash = "sha256:7e77b324909c1617cbb4c668677e2c6ae13f44d7c1de0d4f15f2e3c10f3315b5"},
 ]
-markers = {main = "extra == \"x402\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"x402\""}
 
 [[package]]
 name = "requests"
@@ -4927,7 +4927,7 @@ files = [
     {file = "requests-2.34.2-py3-none-any.whl", hash = "sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"},
     {file = "requests-2.34.2.tar.gz", hash = "sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed"},
 ]
-markers = {main = "extra == \"x402\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"x402\""}
 
 [package.dependencies]
 certifi = ">=2023.5.7"
@@ -4995,7 +4995,7 @@ files = [
     {file = "rich-15.0.0-py3-none-any.whl", hash = "sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb"},
     {file = "rich-15.0.0.tar.gz", hash = "sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36"},
 ]
-markers = {main = "extra == \"cli\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"cli\""}
 
 [package.dependencies]
 markdown-it-py = ">=2.2.0"
@@ -5011,7 +5011,7 @@ description = "rlp: A package for Recursive Length Prefix encoding and decoding"
 optional = true
 python-versions = "<4,>=3.8"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "rlp-4.1.0-py3-none-any.whl", hash = "sha256:8eca394c579bad34ee0b937aecb96a57052ff3716e19c7a578883e767bc5da6f"},
     {file = "rlp-4.1.0.tar.gz", hash = "sha256:be07564270a96f3e225e2c107db263de96b5bc1f27722d2855bd3459a08e95a9"},
@@ -5318,7 +5318,7 @@ description = "A Python implementation of Sign-In with Ethereum (EIP-4361)."
 optional = true
 python-versions = "<4.0,>=3.8"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "siwe-4.4.0-py3-none-any.whl", hash = "sha256:3a4db2d36e10933c01d09ba0aad4db2f404e9ab2c9e9a204fa1bc1103e9d754d"},
     {file = "siwe-4.4.0.tar.gz", hash = "sha256:5fdf843253a91d78085f1da11ed7c9695bbb743e112da658e63a285ddf3ffec7"},
@@ -5368,7 +5368,7 @@ description = "Python bindings for Solana Rust tools"
 optional = true
 python-versions = "<4.0,>=3.10"
 groups = ["main"]
-markers = "extra == \"x402-solana\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402-solana\""
 files = [
     {file = "solders-0.29.0-cp310-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:785841623bdd7b8dedc68e7c794b54327d3b03e1ab9697eda90a139ca3c98cfe"},
     {file = "solders-0.29.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:00524baf575ae5edb2ba43cdb1d80491c59efdc16b48fec96a6f929c0401d0e4"},
@@ -5631,7 +5631,7 @@ description = "List processing tools and functional utilities"
 optional = true
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "(implementation_name == \"pypy\" or implementation_name == \"cpython\") and (extra == \"x402\" or extra == \"all\")"
+markers = "(implementation_name == \"pypy\" or implementation_name == \"cpython\") and (extra == \"all\" or extra == \"x402\")"
 files = [
     {file = "toolz-1.1.0-py3-none-any.whl", hash = "sha256:15ccc861ac51c53696de0a5d6d4607f99c210739caf987b5d2054f3efed429d8"},
     {file = "toolz-1.1.0.tar.gz", hash = "sha256:27a5c770d068c110d9ed9323f24f1543e83b2f300a687b7891c1a6d56b697b5b"},
@@ -5664,7 +5664,7 @@ description = "Typing stubs for requests"
 optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "types_requests-2.33.0.20260712-py3-none-any.whl", hash = "sha256:de027e28c171d3da529689cbfa023b0b4eab188c8dfa22fd834eebd2cee6e7bb"},
     {file = "types_requests-2.33.0.20260712.tar.gz", hash = "sha256:2141b67ab534a5c5cd2dac5034f2a35f42e699c5bf185eee608c5246a069d7fb"},
@@ -5753,7 +5753,7 @@ files = [
     {file = "urllib3-2.7.0-py3-none-any.whl", hash = "sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"},
     {file = "urllib3-2.7.0.tar.gz", hash = "sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c"},
 ]
-markers = {main = "extra == \"x402\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"x402\""}
 
 [package.extras]
 brotli = ["brotli (>=1.2.0) ; platform_python_implementation == \"CPython\"", "brotlicffi (>=1.2.0.0) ; platform_python_implementation != \"CPython\""]
@@ -5804,7 +5804,7 @@ files = [
     {file = "wcwidth-0.8.2-py3-none-any.whl", hash = "sha256:d63947694a0539a1d51e01eda7caf800c291020e6cdd7e28ad7b14dd33ad4f85"},
     {file = "wcwidth-0.8.2.tar.gz", hash = "sha256:91fbef97204b96a3d4d421609b80340b760cf33e26da123ff243d76b1fda8dda"},
 ]
-markers = {main = "extra == \"cli\" or extra == \"all\""}
+markers = {main = "extra == \"all\" or extra == \"cli\""}
 
 [[package]]
 name = "web3"
@@ -5813,7 +5813,7 @@ description = "web3: A Python library for interacting with Ethereum"
 optional = true
 python-versions = "<4,>=3.8"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "web3-7.16.0-py3-none-any.whl", hash = "sha256:760b2718c473980d70708c3593d9d28395db4b482f45e38a63a36fa028178f51"},
     {file = "web3-7.16.0.tar.gz", hash = "sha256:b4a75a3fa94fef4d23d502eb3c2244146ef9a1ee0082cf1cb0a91586ba0510c3"},
@@ -5860,7 +5860,7 @@ description = "An implementation of the WebSocket Protocol (RFC 6455 & 7692)"
 optional = true
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "extra == \"x402\" or extra == \"all\""
+markers = "extra == \"all\" or extra == \"x402\""
 files = [
     {file = "websockets-15.0.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:d63efaa0cd96cf0c5fe4d581521d9fa87744540d4bc999ae6e08595a1014b45b"},
     {file = "websockets-15.0.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:ac60e3b188ec7574cb761b08d50fcedf9d77f1530352db4eef1707fe9dee7205"},
