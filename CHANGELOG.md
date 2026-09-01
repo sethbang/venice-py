@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-09-01
+
 ### Changed
 
 - **`abnf` is now capped at `<2.9`** on the `x402` extra. `siwe` accepts `abnf >=2.2,<3`,
@@ -801,7 +803,8 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.2.1...HEAD
+[2.2.1]: https://github.com/sethbang/venice-py/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/sethbang/venice-py/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/sethbang/venice-py/compare/v2.0.2...v2.1.0
 [2.0.2]: https://github.com/sethbang/venice-py/compare/v2.0.1...v2.0.2
