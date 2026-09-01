@@ -25,6 +25,8 @@ import vcr
 from aiohttp import ClientSession
 from vcr.record_mode import RecordMode
 
+from tests.vcr_policy import cassette_dir_for, resolve_record_mode
+
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -981,7 +983,9 @@ def vcr_config():
     - Records HTTP interactions to YAML cassettes
     - Scrubs Authorization headers to prevent API key leakage
     - Sanitizes sensitive data in response bodies (API keys, billing data)
-    - Uses 'once' record mode by default (record once, then replay)
+    - Replays only by default; recording is opt-in via VENICE_VCR_RECORD
+      (``all`` to re-record, ``new`` to fill gaps). Cassettes are gitignored,
+      so a recording mode on a fresh clone spends real credit.
     - Stores cassettes in tests/cassettes/ directory
 
     CI Mode: When VENICE_CI_MODE=true, uses NONE mode to prevent recording.
@@ -990,21 +994,10 @@ def vcr_config():
         venice_ai.test_support.vcr_utilities - Comprehensive VCR documentation,
         usage guide, and compatibility notes for production code patterns.
     """
-    # Check if running in CI mode - never record cassettes in CI
-    ci_mode = os.getenv("VENICE_CI_MODE", "false").lower() == "true"
-    # VENICE_VCR_RECORD=all forces a full re-record of every interaction the
-    # selected tests touch, overwriting existing cassettes (record_on_exception
-    # below still prevents a failed call from clobbering a good cassette). This
-    # is the batching mechanism for refreshing cassettes: run any subset of
-    # tests with VENICE_VCR_RECORD=all to refresh exactly those, with no manual
-    # cassette deletion. CI mode always wins and never records.
-    force_record = os.getenv("VENICE_VCR_RECORD", "").lower() == "all"
-    if ci_mode:
-        record_mode = RecordMode.NONE
-    elif force_record:
-        record_mode = RecordMode.ALL
-    else:
-        record_mode = RecordMode.NEW_EPISODES
+    # Resolved centrally so this fixture and the benchmark suite's module-level
+    # VCR instance can never disagree about whether a run may touch the network.
+    # See tests/vcr_policy.py for the token table.
+    record_mode = resolve_record_mode()
 
     return vcr.VCR(
         cassette_library_dir="tests/integration/cassettes",
@@ -1063,11 +1056,7 @@ def vcr_cassette(vcr_config, request):
         return
 
     # Determine cassette directory based on test path
-    test_path = str(request.fspath)
-    if "tests/e2e/" in test_path:
-        cassette_dir = "tests/e2e/cassettes"
-    else:
-        cassette_dir = "tests/integration/cassettes"
+    cassette_dir = cassette_dir_for(str(request.fspath))
 
     # Configure the cassette library directory
     vcr_config.cassette_library_dir = cassette_dir
@@ -1166,11 +1155,7 @@ def vcr_error_cassette(vcr_config_with_errors, request):
         return
 
     # Determine cassette directory based on test path
-    test_path = str(request.fspath)
-    if "tests/e2e/" in test_path:
-        cassette_dir = "tests/e2e/cassettes"
-    else:
-        cassette_dir = "tests/integration/cassettes"
+    cassette_dir = cassette_dir_for(str(request.fspath))
 
     # Configure the cassette library directory
     vcr_config_with_errors.cassette_library_dir = cassette_dir

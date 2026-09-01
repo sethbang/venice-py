@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`adaptive-rate-limiter` now requires `>=1.3.0`** (was `>=1.1.0`). Venice meters requests
+  but not tokens, and the limiter could not represent that. Two layers had to change for the
+  adaptive path to work against this API at all.
+
+  The header gate in INTELLIGENT mode scored all six `x-ratelimit-*` headers as one pool and
+  demanded all six before syncing anything. Venice sends three, so every response fell through
+  to release-only: the backend was never called, the bucket was never verified, and the limiter
+  ran on fabricated cold-start limits for the life of the process. It failed silently — the
+  release path returns success and logs at debug, so nothing ever surfaced. Measured on a live
+  model: 427 cold-start probes across 66 minutes with the bucket never once written. The gate
+  is now assessed per dimension, so a request-only provider syncs the dimension it reports.
+
+  Underneath that, reset headers could not be parsed. Venice sends both reset stamps as absolute
+  epoch milliseconds; the library rewrote its own clean integer through `str(float(...))`, then
+  failed to parse the result, substituted `0`, and had its Lua reject the update on a post-2020
+  sanity floor. Absent counts were separately defaulted — remaining to `0`, limit to a fabricated
+  fallback — a pairing no server reports. Absent and genuinely-zero values are now distinguished,
+  and an incomplete dimension is skipped rather than sinking the whole update.
+
+  `1.2.x` is excluded deliberately rather than incidentally: `1.2.0` clamps an out-of-range token
+  window into range, which rotates it early and refills the token count before the server does,
+  and `1.2.1` still cannot get past the header gate on this API.
+
 - The README now carries a short note explaining that the package installs as `venice-py`,
   that imports and `VENICE_API_KEY` are unchanged, and that the `venice-ai` bridge declares
   no extras — so `venice-ai[cli]` and friends need the name updated.
@@ -20,6 +43,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   step of the distribution rename, and it changes nothing about what gets built or installed.
 
 ### Fixed
+
+- **Local test runs no longer record cassettes — and no longer spend API credit — by
+  default.** The VCR record mode defaulted to `NEW_EPISODES` outside CI, which replays what
+  a cassette holds and sends anything it lacks to the live Venice API. Cassettes are
+  gitignored, so a fresh clone has none and the first `make test` billed whoever's
+  `VENICE_API_KEY` was configured, silently. Recording is now opt-in through the existing
+  `VENICE_VCR_RECORD` variable (`all` re-records, `new` fills gaps); anything else replays
+  only, and a request with no cassette raises instead of reaching the network.
+  `make test-fresh` and `make test-quick` delete cassettes in order to re-record, so they
+  now pass the opt-in themselves and announce that they spend credit.
+
+- **Every VCR call site now resolves its record mode from one place**
+  (`tests/vcr_policy.py`). The benchmark suite built its own module-level `vcr.VCR` with a
+  hardcoded `RecordMode.ONCE`, under a module global that shadowed the `vcr_config` fixture
+  name. `VENICE_CI_MODE=true` is only read inside that fixture, so the documented guarantee
+  that CI never records did not hold for that module, and it recorded whenever a cassette
+  was absent.
+
+- **Benchmark tests now look for their cassettes where they actually live.** The cassette
+  directory was chosen by test path, special-casing only `tests/e2e/`, so tests under
+  `tests/benchmarks/` resolved to `tests/integration/cassettes` and could never match a
+  cassette — every request either went live or failed outright. Both fixtures that made
+  this choice now share one helper.
+
+- **The adaptive rate-limiter saturation benchmark now enforces its own pass criterion.**
+  It computed whether the contended p50 stayed within 50% of the control p50, wrote that
+  verdict into a report, and returned without asserting it, so the test could not fail on
+  the property it exists to measure. It now asserts the criterion — and asserts that
+  latency samples were collected at all, since an empty sample set drove the computed delta
+  to zero and produced a pass.
 
 - **`__version__` no longer falls back to a plausible-looking version string.** When the
   package metadata cannot be read — a source tree with nothing installed — `__version__`

@@ -33,9 +33,15 @@ Why ``VeniceClientFactory`` instead of ``VeniceClient(rate_limiter=...)``?
   a ``RateLimiterConfig`` dataclass. The supported wiring path for
   ADAPTIVE mode is::
 
-    config = VeniceAIConfig(rate_limiter=RateLimiterConfig(
-        mode=RateLimiterMode.ADAPTIVE, redis_url=...,
-    ))
+    config = VeniceAIConfig(
+        rate_limiter=RateLimiterConfig(
+            mode=RateLimiterMode.ADAPTIVE, redis_url=...,
+        ),
+        backend=BackendConfig(
+            backend_type=BackendType.REDIS,
+            redis=RedisBackendConfig(redis_url=...),
+        ),
+    )
     client = VeniceClientFactory.create_client(config, api_key=...)
 
   which is what this benchmark uses.
@@ -54,6 +60,11 @@ import pytest
 
 from venice_ai import UserMessage
 from venice_ai.core.config import VeniceAIConfig
+from venice_ai.core.config.backends import (
+    BackendConfig,
+    BackendType,
+    RedisBackendConfig,
+)
 from venice_ai.factory import VeniceClientFactory
 from venice_ai.rate_limiting import RateLimiterConfig, RateLimiterMode
 from venice_ai.types.api.models import LLMModelPricing, TextModelSpec
@@ -353,6 +364,10 @@ def write_saturation_report(
         f"| `{choices['L'].id}` | `{choices['XS'].id}` | {ctl_p50:.0f} ms | "
         f"{cnt_p50:.0f} ms | {delta_pct:+.1f}% | {'YES' if iso_pass else 'NO'} |\n"
     )
+    # The audits directory is not tracked, so it may not exist on a fresh
+    # checkout. Create it rather than losing a completed live run — this
+    # write happens after every request has already been paid for.
+    RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     RESULTS_PATH.write_text(body, encoding="utf-8")
 
 
@@ -376,10 +391,18 @@ async def test_saturation_full_run() -> None:
     if not os.environ.get("VENICE_API_KEY"):
         pytest.skip("VENICE_API_KEY not set; live API calls are required.")
 
+    # backend_type must be set explicitly: it defaults to MEMORY, and a
+    # rate_limiter redis_url on its own does not change it. Without this the
+    # run silently uses the in-process backend and measures nothing about the
+    # cross-process coordination the adaptive limiter exists to provide.
     config = VeniceAIConfig(
         rate_limiter=RateLimiterConfig(
             mode=RateLimiterMode.ADAPTIVE,
             redis_url=redis_url,
+        ),
+        backend=BackendConfig(
+            backend_type=BackendType.REDIS,
+            redis=RedisBackendConfig(redis_url=redis_url),
         ),
     )
     client = VeniceClientFactory.create_client(config)
@@ -407,4 +430,18 @@ async def test_saturation_full_run() -> None:
 
     write_saturation_report(
         single_results, choices, ctl_p50, cnt_p50, delta_pct, isolation_pass, spent
+    )
+
+    # Asserted after the report is written so a failing run still leaves its
+    # diagnostics on disk.
+    #
+    # The emptiness checks are not incidental: with no control samples ctl_p50
+    # is 0.0, which pins delta_pct to 0.0 and makes isolation_pass true. A run
+    # that measured nothing has to fail rather than report success.
+    assert ctl, "isolation run collected no control latencies; nothing was measured"
+    assert cnt, "isolation run collected no contended latencies; nothing was measured"
+    assert isolation_pass, (
+        f"adaptive limiter did not isolate the light model from the heavy one: "
+        f"contended p50 {cnt_p50:.3f}s vs control p50 {ctl_p50:.3f}s "
+        f"({delta_pct:+.1f}%, criterion <50%)"
     )

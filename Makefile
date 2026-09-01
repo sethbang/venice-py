@@ -99,12 +99,14 @@ test-refresh: clean ## Refresh model cache from API and run tests
 	@echo "$(GREEN)Refreshing model cache and running tests...$(NC)"
 	$(PYTEST) tests/ --refresh-models --no-cov $(PYTEST_COMMON) $(PYTEST_IGNORE) -q $(ARGS)
 
-test-fresh: clean-cassettes test ## Delete cassettes and run tests (regenerate VCR)
+test-fresh: clean-cassettes ## Delete cassettes and re-record them live (SPENDS CREDIT)
+	@echo "$(YELLOW)Re-recording every cassette against the live API — this spends credit.$(NC)"
+	VENICE_VCR_RECORD=all $(MAKE) test
 	@echo "$(GREEN)Tests completed with fresh cassettes!$(NC)"
 
-test-quick: clean-cassettes ## Fast iteration: E2E + modified integration tests
-	@echo "$(GREEN)Running quick test iteration...$(NC)"
-	$(PYTEST) tests/e2e/ \
+test-quick: clean-cassettes ## Fast iteration: E2E + modified integration tests (SPENDS CREDIT)
+	@echo "$(YELLOW)Re-recording the selected cassettes against the live API — spends credit.$(NC)"
+	VENICE_VCR_RECORD=all $(PYTEST) tests/e2e/ \
 		tests/integration/test_image_vcr.py \
 		tests/integration/test_api_keys_vcr.py \
 		tests/integration/test_embeddings_vcr.py \
@@ -310,7 +312,7 @@ clean: ## Clean test artifacts and cache
 	@find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	@find . -type f -name ".DS_Store" -delete 2>/dev/null || true
 
-clean-cassettes: ## Delete all VCR cassettes (force live API testing)
+clean-cassettes: ## Delete all VCR cassettes (re-record needs VENICE_VCR_RECORD=all)
 	@echo "$(YELLOW)Deleting all VCR cassettes...$(NC)"
 	@find tests -type d -name "cassettes" -exec rm -rf {} + 2>/dev/null || true
 	@echo "$(GREEN)All VCR cassettes deleted$(NC)"
