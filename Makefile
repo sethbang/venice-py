@@ -84,9 +84,14 @@ help: ## Show this help message
 # =====================================================
 # INSTALLATION
 # =====================================================
+# --all-extras is required, not optional, and matches the validate job in CI.
+# Without it the TEE, x402 and Solana test modules skip wholesale (importorskip
+# on cryptography, dcap-qvl, eth-account, siwe, solders) and mypy degrades the
+# same imports to Any — a green local run that never exercised the most
+# security-sensitive code in the SDK.
 install: ## Install all dependencies
 	@echo "$(GREEN)Installing dependencies...$(NC)"
-	$(POETRY) install --with dev
+	$(POETRY) install --with dev --all-extras
 
 # =====================================================
 # TESTING TARGETS

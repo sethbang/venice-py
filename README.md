@@ -601,7 +601,7 @@ See [Installation Options](#installation-options) for optional dependencies.
 
 ```bash
 git clone https://github.com/sethbang/venice-py.git && cd venice-py
-poetry install
+make install
 make test
 ```
 
