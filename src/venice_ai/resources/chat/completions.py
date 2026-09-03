@@ -71,7 +71,7 @@ import asyncio
 import inspect
 import logging
 import warnings
-from collections.abc import AsyncIterable, AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping, Sequence
 from decimal import Decimal
 from typing import (
     TYPE_CHECKING,
@@ -497,7 +497,7 @@ class ChatCompletions(APIResource["VeniceClient"]):
         tools: Sequence[Tool] | None = None,
         tool_choice: Literal["none", "auto"] | SpecificToolChoice | None = None,
         user: str | None = None,  # Discarded but supported for OpenAI compat
-        venice_parameters: VeniceParameters | None = None,
+        venice_parameters: VeniceParameters | Mapping[str, Any] | None = None,
         # --- Venice-Specific Params ---
         reasoning_effort: ReasoningEffortLevel | None = None,
         reasoning: ReasoningConfig | None = None,
@@ -549,7 +549,7 @@ class ChatCompletions(APIResource["VeniceClient"]):
         tools: Sequence[Tool] | None = None,
         tool_choice: Literal["none", "auto"] | SpecificToolChoice | None = None,
         user: str | None = None,
-        venice_parameters: VeniceParameters | None = None,
+        venice_parameters: VeniceParameters | Mapping[str, Any] | None = None,
         # --- Venice-Specific Params ---
         reasoning_effort: ReasoningEffortLevel | None = None,
         reasoning: ReasoningConfig | None = None,
@@ -659,7 +659,13 @@ class ChatCompletions(APIResource["VeniceClient"]):
             user: Unique identifier representing your end-user (discarded
                 by API but supported for OpenAI compatibility).
             venice_parameters: Venice-specific parameters for fine-tuning
-                model behavior.
+                model behavior. Accepts a :class:`VeniceParameters` or a
+                plain mapping of the same fields; a mapping is validated
+                into the model while the request body is built, so an
+                invalid value still raises before the request is sent.
+                Note that :class:`VeniceParameters` is ``extra="allow"``,
+                so an unrecognized key is carried through rather than
+                rejected — the same for either form.
             reasoning_effort: Controls thinking depth on reasoning models.
                 One of ``"none"``, ``"minimal"``, ``"low"``, ``"medium"``,
                 ``"high"``, ``"xhigh"``, or ``"max"``. Takes precedence
