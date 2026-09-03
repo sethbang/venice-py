@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`venice_parameters=` now type-checks with a plain dict.** Both `chat.completions.create()` overloads annotated the parameter `VeniceParameters | None`, which is narrower than what the code accepts: a mapping of the same fields has always been validated and coerced by `ChatCompletionRequest`, but type checkers rejected the call — and because `create()` is overloaded, the diagnostic reported the whole call as unmatched (`No overload variant of "create" ... matches argument types`) without naming the offending argument. The annotation is now `VeniceParameters | Mapping[str, Any] | None`. `ChatCompletionRequest.venice_parameters` deliberately stays model-only; it is the validation boundary where mappings are coerced. Note that `VeniceParameters` is `extra="allow"`, so an unrecognized key is carried through rather than rejected — identically for either form. Reported alongside the `messages=` variant in [#1](https://github.com/sethbang/venice-py/issues/1), tracked as [#58](https://github.com/sethbang/venice-py/issues/58).
+
 ## [2.2.1] - 2026-09-01
 
 ### Changed
