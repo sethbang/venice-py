@@ -19,6 +19,16 @@ updates:
       - "sethbang"
     assignees:
       - "sethbang"
+    ignore:
+      # abnf 2.9.0 made redefining an RFC 5234 core rule a hard error, and siwe's
+      # own rfc5234 grammar redefines ALPHA, so 2.9.x breaks `import siwe`
+      # outright. siwe 4.4.0 is the latest release and still ships that grammar,
+      # so there is nothing to upgrade to. pyproject pins abnf <2.9 for this
+      # reason; without this ignore, Dependabot reopens the same failing PR
+      # every week. Drop both once siwe stops redefining core rules.
+      - dependency-name: "abnf"
+        versions: [">=2.9"]
+
     # Group minor and patch updates together
     groups:
       production-dependencies:
