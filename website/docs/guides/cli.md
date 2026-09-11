@@ -381,6 +381,10 @@ venice-py image upscale <INPUT_FILE> [OPTIONS]
 |--------|-------|---------|-------------|
 | `--scale` | | `2` | Scale factor — must be `2` or `4` |
 | `--creativity` | | — | Detail and texture the upscaler adds; the server clamps this to 0–0.02 (default 0.01) |
+| `--enhance / --no-enhance` | | — | **Deprecated** — the API removed this field; ignored. Use `--creativity`. Removed in 3.0.0 |
+| `--enhance-creativity` | | — | **Deprecated** — ignored. Use `--creativity` (note the range is 0–0.02, not 0–1) |
+| `--enhance-prompt` | | — | **Deprecated** — the upscale endpoint no longer takes a prompt; ignored |
+| `--replication` | | — | **Deprecated** — the API removed this field; ignored |
 | `--output` | `-o` | auto-generated | Output file path |
 | `--save-dir` | | `.` | Directory to save the result |
 | `--open` | | `false` | Open image after saving |

@@ -3,6 +3,7 @@ Image upscaling command.
 """
 
 import asyncio
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,28 @@ from ...utils import (
     default=None,
     help="Detail/texture the upscaler adds; server clamps to 0-0.02 (default 0.01)",
 )
+@click.option(
+    "--enhance/--no-enhance",
+    default=None,
+    help="[deprecated] No longer supported by the API; ignored. Use --creativity.",
+)
+@click.option(
+    "--enhance-creativity",
+    type=float,
+    default=None,
+    help="[deprecated] No longer supported by the API; ignored. Use --creativity.",
+)
+@click.option(
+    "--enhance-prompt",
+    default=None,
+    help="[deprecated] No longer supported by the API; ignored.",
+)
+@click.option(
+    "--replication",
+    type=float,
+    default=None,
+    help="[deprecated] No longer supported by the API; ignored.",
+)
 @click.option("--output", "-o", default=None, help="Output file path")
 @click.option(
     "--save-dir",
@@ -45,6 +68,10 @@ def upscale_image(
     input_file: str,
     scale: float | None,
     creativity: float | None,
+    enhance: bool | None,
+    enhance_creativity: float | None,
+    enhance_prompt: str | None,
+    replication: float | None,
     output: str | None,
     save_dir: str,
     open_image: bool,
@@ -66,6 +93,10 @@ def upscale_image(
             output,
             save_dir,
             open_image,
+            enhance=enhance,
+            enhance_creativity=enhance_creativity,
+            enhance_prompt=enhance_prompt,
+            replication=replication,
         )
     )
 
@@ -78,8 +109,28 @@ async def _upscale_async(
     output: str | None,
     save_dir: str,
     open_image: bool,
+    *,
+    enhance: bool | None = None,
+    enhance_creativity: float | None = None,
+    enhance_prompt: str | None = None,
+    replication: float | None = None,
 ) -> None:
     """Async implementation of image upscaling"""
+    _removed = {
+        "--enhance": enhance,
+        "--enhance-creativity": enhance_creativity,
+        "--enhance-prompt": enhance_prompt,
+        "--replication": replication,
+    }
+    _supplied = [name for name, value in _removed.items() if value is not None]
+    if _supplied:
+        warnings.warn(
+            f"{', '.join(_supplied)} no longer affect upscaling — Venice removed the "
+            "fields server-side, so they are ignored. Use --creativity instead "
+            "(clamped to 0-0.02). These flags are removed in 3.0.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     plain = ctx.obj.get("plain", False) or is_plain_mode()
 
     input_path = Path(input_file)

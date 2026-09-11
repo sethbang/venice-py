@@ -650,14 +650,41 @@ async def test_upscale_does_not_send_removed_fields(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_upscale_rejects_removed_kwargs(monkeypatch):
-    """They are gone server-side, so accepting them would silently do nothing."""
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("enhance", True),
+        ("enhanceCreativity", 0.5),
+        ("enhancePrompt", "vivid"),
+        ("replication", 0.35),
+    ],
+)
+async def test_upscale_warns_on_removed_kwargs(monkeypatch, field, value):
+    """Venice removed these server-side, so they have had no effect for a while.
+
+    Accepting them with a warning keeps behaviour identical to before while
+    pointing callers at ``creativity``; 3.0.0 drops them.
+    """
+    from venice_ai.resources.image import Image
+
+    captured = _capture_multipart(monkeypatch)
+    img = Image(AsyncMock())
+    with pytest.warns(DeprecationWarning, match="creativity"):
+        await img.upscale(image=b"\x89PNG\r\n\x1a\nfake", **{field: value})  # type: ignore[arg-type]
+
+    # Warned, but never put back on the wire — the endpoint rejects unknown fields.
+    assert field not in captured["data"]
+
+
+@pytest.mark.asyncio
+async def test_upscale_does_not_warn_without_removed_kwargs(monkeypatch, recwarn):
     from venice_ai.resources.image import Image
 
     _capture_multipart(monkeypatch)
     img = Image(AsyncMock())
-    with pytest.raises(TypeError):
-        await img.upscale(image=b"\x89PNG\r\n\x1a\nfake", enhance=True)  # type: ignore[call-arg]
+    await img.upscale(image=b"\x89PNG\r\n\x1a\nfake", scale=2, creativity=0.01)
+
+    assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
 
 
 @pytest.mark.asyncio

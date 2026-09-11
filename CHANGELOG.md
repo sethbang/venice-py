@@ -33,11 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`loop` on music generation.** `music.submit()` and `music.run()` now accept `loop`, which renders a clip whose end splices back into its start without an audible seam. The API gates it on the model, so `MusicModelSpec.supports_loop` is modelled alongside the existing capability flags and a pre-flight check raises before the request is sent when a model declares `supports_loop=false` — matching how `force_instrumental` already behaves. An undeclared capability defers to the server rather than being treated as unsupported.
 
-### Removed
+### Deprecated
 
-- **BREAKING: `image.upscale()` no longer accepts `enhance`, `enhanceCreativity`, `enhancePrompt` or `replication`.** Venice removed all four from `POST /image/upscale`; the endpoint now takes exactly `image`, `scale` and `creativity`. The SDK was sending the four dead fields on every upscale call and had no way to set `creativity` — the only tuning knob left. `scale` must now be `2` or `4` (`1` is rejected, and the validator that steered callers toward `scale=1` + `enhance=True` — a combination the API now always rejects — is gone). `venice image upscale` drops the matching `--enhance/--no-enhance`, `--enhance-creativity`, `--enhance-prompt` and `--replication` flags for a single `--creativity`. Replace `enhanceCreativity` with `creativity`, noting the range is different: the server clamps it to 0–0.02 (default 0.01), not 0–1. The SDK forwards whatever you pass rather than rejecting out-of-range values, because the server clamps rather than erroring.
+- **`image.upscale()`'s `enhance`, `enhanceCreativity`, `enhancePrompt` and `replication` are deprecated and ignored.** Venice removed all four from `POST /image/upscale`; the endpoint now takes exactly `image`, `scale` and `creativity`. The SDK was still sending the four dead fields on every call and had no way to set `creativity` — the only tuning knob left. Passing any of them now raises a `DeprecationWarning` and is ignored, which matches what the server already did with them, so no working call changes behaviour. They are removed in 3.0.0. The matching `venice image upscale` flags (`--enhance/--no-enhance`, `--enhance-creativity`, `--enhance-prompt`, `--replication`) behave the same way.
+
+  Migrating: replace `enhanceCreativity` with `creativity`, noting the range differs — the server clamps `creativity` to 0–0.02 (default 0.01), not 0–1. The SDK forwards whatever you pass rather than rejecting out-of-range values, because the server clamps rather than erroring. `enhancePrompt` has no replacement; the endpoint no longer accepts a prompt.
 
 ### Fixed
+
+- **`image.upscale()` now sends `creativity` and a valid `scale`.** `scale` must be `2` or `4`; the old validator steered callers toward `scale=1` + `enhance=True`, a combination the API now always rejects, and `scale=1` is rejected outright. Neither previously produced a successful call.
 
 - **Source-matched video duration is no longer rejected before it is sent.** Seedance reference-to-video edit and extend can ask the output to follow the source clip — `duration="auto"` (or `"-1"`), alongside `aspect_ratio="adaptive"` (or `"auto"`). Those sentinels are not members of a model's `constraints.durations` enum, so the duration pre-flight compared them against it and raised `duration_seconds='auto' is not supported by model ...`, rejecting a request the API accepts. The sentinels are now exempt from the enum check; any other unrecognised duration is still rejected.
 
@@ -51,7 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Video prompts accept up to 20,000 characters.** `prompt` and `negative_prompt` on the video request models were capped at 10,000, which is now half the API's limit — the SDK was rejecting prompts the API accepts. Purely a widening; no previously valid request changes behavior.
 
-- **Embeddings input is text-only.** `input` was typed `str | list[str] | list[int] | list[list[int]]`, advertising token-ID arrays that the API now rejects with a validation error. The signature is narrowed to `str | list[str]`, and passing a token-ID array raises `InvalidRequestError` before the request is sent rather than surfacing as a bare pydantic "Input should be a valid string", which would not explain why a previously working call stopped working. Callers passing token IDs must pass the source text instead.
+- **Embeddings input is text-only.** `input` was typed `str | list[str] | list[int] | list[list[int]]`, advertising token-ID arrays that the API now rejects with a validation error. The signature is narrowed to `str | list[str]`, and passing a token-ID array raises `InvalidRequestError` before the request is sent rather than as a bare pydantic "Input should be a valid string". No working call changes: token-ID arrays never produced an embedding — they previously failed upstream, and the API now rejects them outright. Callers passing token IDs must pass the source text instead.
 
 ## [2.3.0] - 2026-09-11
 

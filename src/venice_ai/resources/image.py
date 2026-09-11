@@ -72,6 +72,7 @@ import asyncio
 import base64
 import io
 import logging
+import warnings
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -654,6 +655,10 @@ class Image(APIResource["VeniceClient"]):
         scale: float | None = None,
         creativity: float | None = None,
         timeout: float | aiohttp.ClientTimeout | None = None,
+        enhance: bool | None = None,
+        enhanceCreativity: float | None = None,
+        enhancePrompt: str | None = None,
+        replication: float | None = None,
     ) -> bytes:
         """
         Upscale an image using Venice AI's image upscaling API asynchronously.
@@ -717,6 +722,24 @@ class Image(APIResource["VeniceClient"]):
         image_b64 = base64.b64encode(image_content).decode("utf-8")
 
         # Create and validate the Pydantic request model
+        _removed = {
+            "enhance": enhance,
+            "enhanceCreativity": enhanceCreativity,
+            "enhancePrompt": enhancePrompt,
+            "replication": replication,
+        }
+        _supplied = [name for name, value in _removed.items() if value is not None]
+        if _supplied:
+            warnings.warn(
+                f"{', '.join(_supplied)} no longer affect POST /image/upscale — Venice "
+                "removed the fields server-side, so they have had no effect for some time "
+                "and are now ignored. Use `creativity` instead (the server clamps it to "
+                "0-0.02; note that is a different range to enhanceCreativity's 0-1). "
+                "These parameters are removed in 3.0.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         upscale_kwargs: dict[str, Any] = {"image": image_b64}
         if scale is not None:
             upscale_kwargs["scale"] = scale
