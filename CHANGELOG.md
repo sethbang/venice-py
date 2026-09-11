@@ -9,9 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bitrate_mode` on video generation.** `video.submit()` and `video.run()` accept `"standard"` or `"high"`, selecting the output encode bitrate on public Seedance 2.0 (including Fast) and 2.5 models. Omitting it is equivalent to `"standard"`. It is queue-only and does not affect price, so `video.quote()` deliberately does not accept it.
+
+- **`RateLimitError.is_error_budget`** distinguishes a 429 from one of the two rolling 30-second error budgets — too many failed requests, or too many requests for a feature the model does not support — from an ordinary throughput 429. Detected from the response headers, which set `x-ratelimit-resets` for a budget trip rather than the per-window `x-ratelimit-reset-requests`/`-tokens`. (The singular `X-RateLimit-Reset` that `/crypto/rpc` sets on its own 429s is deliberately not treated as a match.)
+
 - **`model_spec.uncensored`** is now modelled on `ModelSpec`, so whether Venice classifies a model as uncensored can be read off the catalog instead of inferred from traits or model-ID substrings. Note the semantics differ from the `supports_*` capability flags in the same module: the API sends this field only when it is true and omits it otherwise, so it is typed `bool` defaulting to `False` — an absent field is a definite "not uncensored", not "undeclared".
 
-- **`modelPrivacy` on API keys.** Keys carry a persistent privacy tier — `ALL`, `PRIVATE_TEXT`, or `PRIVATE_ONLY` — controlling which models the key may call. It is settable on `CreateApiKeyRequest` and reported on `ApiKey`. Omit it to let the account default apply. (`venice api-keys create` does not expose a flag for it yet.)
+- **`modelPrivacy` on API keys.** Keys carry a persistent privacy tier — `ALL`, `PRIVATE_TEXT`, or `PRIVATE_ONLY` — controlling which models the key may call. It is settable on `CreateApiKeyRequest` and reported on `ApiKey`. Omit it to let the account default apply.
 
 - **`RateLimitError.custom_message`** surfaces the API's `customMessage`, which names the cap that tripped. Several distinct limits all surface as a 429 — the per-minute request cap, the per-day credit cap, and two rolling 30-second error budgets (failed requests, and requests asking a model for a feature it does not support) — and they need different responses. Previously a caller saw only "Rate limit exceeded" with no way to tell them apart. The field name is documented; its position in the body is not, so it is read from both the flat and `error`-nested shapes and is `None` when absent — this has not yet been confirmed against an observed 429.
 
@@ -21,7 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`loop` on music generation.** `music.submit()` and `music.run()` now accept `loop`, which renders a clip whose end splices back into its start without an audible seam. The API gates it on the model, so `MusicModelSpec.supports_loop` is modelled alongside the existing capability flags and a pre-flight check raises before the request is sent when a model declares `supports_loop=false` — matching how `force_instrumental` already behaves. An undeclared capability defers to the server rather than being treated as unsupported.
 
+### Fixed
+
+- **Source-matched video duration is no longer rejected before it is sent.** Seedance reference-to-video edit and extend can ask the output to follow the source clip — `duration="auto"` (or `"-1"`), alongside `aspect_ratio="adaptive"` (or `"auto"`). Those sentinels are not members of a model's `constraints.durations` enum, so the duration pre-flight compared them against it and raised `duration_seconds='auto' is not supported by model ...`, rejecting a request the API accepts. The sentinels are now exempt from the enum check; any other unrecognised duration is still rejected.
+
+- **A 429 from an error budget now backs off for the full window.** These budgets exist to stop clients retrying into a wall, and they clear only when their rolling 30-second window rolls. `SimpleRateLimiter` applied its ordinary schedule instead — with the default `min_backoff=1.0` that is roughly 1s, 2s and 4s, so all three retries landed inside the window and were guaranteed to fail. Worse, for the failed-request budget each of those retries counted against the budget again. An error-budget 429 now backs off at least `SimpleRateLimiter.ERROR_BUDGET_WINDOW_SECONDS` (30s); throughput 429s are unaffected. **Note the latency trade-off:** the limiter does not consult `RequestMetadata.timeout` when sleeping, so with the default `max_retries=3` an error-budget 429 can now hold a single `submit_request` call for up to 90s where it previously gave up after ~7s. That is the correct behaviour — the shorter schedule could not have succeeded — but lower `max_retries` if you need a tighter ceiling.
+
 ### Changed
+
+- **`venice api-keys create` gained `--model-privacy`** (`ALL`, `PRIVATE_TEXT`, `PRIVATE_ONLY`), so the CLI can set the same privacy tier the SDK already exposed. Unset leaves the account default in place.
 
 - **Video prompts accept up to 20,000 characters.** `prompt` and `negative_prompt` on the video request models were capped at 10,000, which is now half the API's limit — the SDK was rejecting prompts the API accepts. Purely a widening; no previously valid request changes behavior.
 

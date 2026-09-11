@@ -336,6 +336,15 @@ class RateLimitError(APIError):
             responses, and only this message distinguishes them. An
             unsupported-feature trip in particular will keep recurring until
             the request itself changes, so retrying it unchanged is futile.
+        is_error_budget: Whether this 429 came from one of the two rolling
+            30-second error budgets (too many failed requests, or too many
+            requests for an unsupported feature) rather than a throughput cap.
+            Detected from the response headers: those responses set
+            ``x-ratelimit-resets`` instead of the per-window
+            ``x-ratelimit-reset-requests`` / ``-tokens``. Worth branching on,
+            because the budgets exist precisely to stop clients retrying into
+            a wall — a fast retry re-trips them, and for the failed-request
+            budget it counts against the budget again.
     """
 
     retry_after_seconds: int | None
@@ -343,6 +352,7 @@ class RateLimitError(APIError):
     reset_requests_timestamp: float | None
     cached_rate_limit_headers: dict[str, str]
     custom_message: str | None
+    is_error_budget: bool
 
     def __init__(
         self,
@@ -356,9 +366,11 @@ class RateLimitError(APIError):
         reset_requests_timestamp: float | None = None,
         cached_rate_limit_headers: dict[str, str] | None = None,
         custom_message: str | None = None,
+        is_error_budget: bool = False,
     ) -> None:
         super().__init__(message, request=request, response=response, body=body)
         self.custom_message = custom_message
+        self.is_error_budget = is_error_budget
         self.retry_after_seconds = retry_after_seconds
         self.remaining_requests = remaining_requests
         self.reset_requests_timestamp = reset_requests_timestamp
@@ -691,6 +703,30 @@ def _parse_retry_after_header(
             return None
 
 
+#: Header that only the rolling error-budget 429s set. The per-window limits
+#: use the suffixed ``x-ratelimit-reset-requests`` / ``-tokens``, and
+#: ``/crypto/rpc`` uses the singular ``X-RateLimit-Reset``, so the plural form
+#: is what distinguishes an error-budget trip.
+_ERROR_BUDGET_HEADER = "x-ratelimit-resets"
+
+
+def _is_error_budget_response(
+    rate_limit_headers: dict[str, str] | None,
+    response: Any,
+) -> bool:
+    """Whether a 429's headers mark it as an error-budget trip."""
+    for source in (rate_limit_headers, getattr(response, "headers", None)):
+        if not source:
+            continue
+        try:
+            keys = {str(key).lower() for key in source}
+        except TypeError:  # pragma: no cover - non-iterable header mapping
+            continue
+        if _ERROR_BUDGET_HEADER in keys:
+            return True
+    return False
+
+
 def _make_status_error(
     message: str | None,
     *,
@@ -772,6 +808,7 @@ def _make_status_error(
                 reset_requests_timestamp=ms_epoch_to_seconds(_safe_float_parse(reset_requests_str)),
                 cached_rate_limit_headers=headers,
                 custom_message=custom_message,
+                is_error_budget=_is_error_budget_response(rate_limit_headers, response),
             )
             exc.code = error_code
             return exc

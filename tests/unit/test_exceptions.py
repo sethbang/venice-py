@@ -519,3 +519,57 @@ class TestRateLimitCustomMessage:
         )
         assert isinstance(error, RateLimitError)
         assert error.custom_message is None
+
+
+class TestErrorBudget429:
+    """Two rolling 30-second error budgets also surface as 429.
+
+    They are documented to set ``x-ratelimit-remaining`` / ``x-ratelimit-resets``
+    instead of the per-window headers, which is what tells them apart from a
+    throughput 429. The distinction matters because these budgets exist to stop
+    clients retrying into a wall: a fast retry re-trips them and, for the
+    failed-request budget, counts against it again.
+    """
+
+    @staticmethod
+    def _error(headers: dict) -> RateLimitError:
+        response = MagicMock()
+        response.status = 429
+        response.headers = headers
+        error = _make_status_error(
+            "Rate limit exceeded",
+            body={"error": "Rate limit exceeded"},
+            response=response,
+            rate_limit_headers=headers,
+        )
+        assert isinstance(error, RateLimitError)
+        return error
+
+    def test_error_budget_headers_are_detected(self):
+        error = self._error({"x-ratelimit-remaining": "0", "x-ratelimit-resets": "30"})
+        assert error.is_error_budget is True
+
+    def test_per_window_headers_are_not_an_error_budget(self):
+        error = self._error(
+            {
+                "x-ratelimit-limit-requests": "100",
+                "x-ratelimit-remaining-requests": "0",
+                "x-ratelimit-reset-requests": "1704067260",
+            }
+        )
+        assert error.is_error_budget is False
+
+    def test_crypto_rpc_headers_are_not_an_error_budget(self):
+        """/crypto/rpc sets its own singular X-RateLimit-Reset on 429s — that
+        must not be mistaken for the plural error-budget header."""
+        error = self._error(
+            {
+                "X-RateLimit-Limit": "100",
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1704067260",
+            }
+        )
+        assert error.is_error_budget is False
+
+    def test_no_headers_is_not_an_error_budget(self):
+        assert self._error({}).is_error_budget is False

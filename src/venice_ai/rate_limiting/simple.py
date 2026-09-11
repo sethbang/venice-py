@@ -160,6 +160,14 @@ class SimpleRateLimiter:
 
     # Constants
     BACKOFF_MULTIPLIER = 2.0
+
+    #: Length of the rolling window behind the two error budgets (too many
+    #: failed requests, too many unsupported-feature requests). A 429 from one
+    #: of those clears only when the window rolls, so backing off for less is
+    #: guaranteed to fail again — and for the failed-request budget, each such
+    #: retry counts against the budget, digging the hole deeper. These budgets
+    #: exist specifically to stop clients retrying into a wall.
+    ERROR_BUDGET_WINDOW_SECONDS = 30.0
     BACKOFF_JITTER = 0.1  # ±10% jitter
     CLEANUP_INTERVAL = 300.0  # 5 minutes
 
@@ -637,6 +645,11 @@ class SimpleRateLimiter:
                     wait_time = (
                         getattr(rate_limit_error, "retry_after_seconds", None) or self.min_backoff
                     )
+
+                # An error-budget 429 only clears when its 30s window rolls;
+                # the normal backoff schedule retries entirely inside it.
+                if getattr(rate_limit_error, "is_error_budget", False):
+                    wait_time = max(wait_time, self.ERROR_BUDGET_WINDOW_SECONDS)
 
                 logger.info(
                     f"Received 429 on {model}, retrying after {wait_time:.1f}s "

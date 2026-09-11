@@ -384,3 +384,47 @@ async def test_loop_unknown_capability_falls_through() -> None:
 
     client = _client_with_model(_music_entry_with_loop("mystery-model", supports_loop=None))
     await _preflight_validate_loop(client, "mystery-model", True)
+
+
+# ---------------------------------------------------------------------------
+# Video — Seedance source-matched duration sentinels
+#
+# Seedance R2V edit/extend can ask the output to follow the source clip:
+# duration "auto" / "-1" and aspect_ratio "adaptive" / "auto". These are not
+# members of a model's `constraints.durations` enum, so the duration preflight
+# must let them through instead of rejecting a request the API accepts.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sentinel", ["auto", "-1"])
+async def test_source_matched_duration_skips_the_enum_check(sentinel: str) -> None:
+    client = _client_with_model(
+        _video_entry("seedance-2-5-reference-to-video-basic", durations=["5s", "10s"])
+    )
+    await _preflight_validate_video_duration(
+        client, "seedance-2-5-reference-to-video-basic", sentinel
+    )
+
+
+@pytest.mark.asyncio
+async def test_source_matched_sentinel_is_case_insensitive() -> None:
+    """Callers reasonably type "Auto"; the upscale sentinel is already "Auto"."""
+    client = _client_with_model(
+        _video_entry("seedance-2-5-reference-to-video-basic", durations=["5s", "10s"])
+    )
+    await _preflight_validate_video_duration(
+        client, "seedance-2-5-reference-to-video-basic", "Auto"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unknown_duration_string_is_still_rejected() -> None:
+    """Only the documented sentinels bypass the check — not any old string."""
+    client = _client_with_model(
+        _video_entry("seedance-2-5-reference-to-video-basic", durations=["5s", "10s"])
+    )
+    with pytest.raises(ValueError, match="not supported"):
+        await _preflight_validate_video_duration(
+            client, "seedance-2-5-reference-to-video-basic", "7s"
+        )

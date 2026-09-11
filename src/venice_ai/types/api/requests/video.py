@@ -206,6 +206,16 @@ class VideoRequestBase(BaseModel):
             "in prompt as @Image1, @Image2, etc."
         ),
     )
+    bitrate_mode: Literal["standard", "high"] | None = Field(
+        None,
+        description=(
+            "Output encode bitrate. ``high`` is a higher-quality, larger-file "
+            "encode; omitting the field is equivalent to ``standard``. Supported "
+            "on public Seedance 2.0 (including Fast) and 2.5 models only — other "
+            "video families reject it. Queue-only: it does not change price, and "
+            "``/video/quote`` does not accept it."
+        ),
+    )
     consents: VideoConsents | None = Field(
         None,
         description=(

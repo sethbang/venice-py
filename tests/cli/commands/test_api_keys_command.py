@@ -1361,3 +1361,75 @@ class TestCreateKeyFlags:
             request = mock_client.api_keys.create.call_args.kwargs["api_key_request"]
             assert request.consumptionLimit is not None
             assert request.consumptionLimit.diem == 7.0
+
+
+class TestCreateKeyModelPrivacy:
+    """`--model-privacy` sets the key's persistent privacy tier at creation."""
+
+    @pytest.mark.asyncio
+    async def test_model_privacy_reaches_the_request(self):
+        mock_client = AsyncMock()
+        mock_client.api_keys.create = AsyncMock(
+            return_value=SimpleNamespace(
+                id="k",
+                description="d",
+                apiKeyType="INFERENCE",
+                createdAt=None,
+                apiKey="sk-x",
+            )
+        )
+        captured = {}
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with (
+            patch("venice_ai.VeniceClient") as MockClient,
+            patch("venice_ai.cli.config.ensure_api_key", return_value="test-key"),
+            patch("venice_ai.types.api.CreateApiKeyRequest", side_effect=_capture),
+            patch("venice_ai.cli.commands.api_keys.click.echo"),
+        ):
+            _setup_client_patch(MockClient, mock_client)
+            await _create_key_async(
+                _make_ctx(), name="Private", model_privacy="PRIVATE_ONLY", output_json=True
+            )
+
+        assert captured["modelPrivacy"] == "PRIVATE_ONLY"
+
+    @pytest.mark.asyncio
+    async def test_model_privacy_defaults_to_none(self):
+        """Unset means the account default applies — don't send a tier."""
+        mock_client = AsyncMock()
+        mock_client.api_keys.create = AsyncMock(
+            return_value=SimpleNamespace(
+                id="k",
+                description="d",
+                apiKeyType="INFERENCE",
+                createdAt=None,
+                apiKey="sk-x",
+            )
+        )
+        captured = {}
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with (
+            patch("venice_ai.VeniceClient") as MockClient,
+            patch("venice_ai.cli.config.ensure_api_key", return_value="test-key"),
+            patch("venice_ai.types.api.CreateApiKeyRequest", side_effect=_capture),
+            patch("venice_ai.cli.commands.api_keys.click.echo"),
+        ):
+            _setup_client_patch(MockClient, mock_client)
+            await _create_key_async(_make_ctx(), name="Default", output_json=True)
+
+        assert captured["modelPrivacy"] is None
+
+    def test_cli_exposes_the_flag(self):
+        """The option must be wired to the command, not just the async helper."""
+        from venice_ai.cli.commands.api_keys import create_key
+
+        names = {p.name for p in create_key.params}
+        assert "model_privacy" in names

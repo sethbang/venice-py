@@ -181,3 +181,59 @@ async def test_queue_omits_new_fields_when_unset(video_resource: Video) -> None:
     body = post.call_args.kwargs["json_data"]
     for k in _NEW_FIELDS:
         assert k not in body
+
+
+# ---------------------------------------------------------------------------
+# Seedance bitrate_mode — a queue-only encoding option.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["standard", "high"])
+async def test_queue_forwards_bitrate_mode(video_resource: Video, mode: str) -> None:
+    post = _post_mock(video_resource)
+    await video_resource.submit(
+        model="seedance-2-5-text-to-video-basic",
+        prompt="A neon city at night",
+        duration_seconds=5,
+        bitrate_mode=mode,
+    )
+    body = post.call_args[1]["json_data"]
+    assert body["bitrate_mode"] == mode
+
+
+@pytest.mark.asyncio
+async def test_queue_omits_bitrate_mode_when_unset(video_resource: Video) -> None:
+    """Omitting it is documented as equivalent to "standard"; don't send one."""
+    post = _post_mock(video_resource)
+    await video_resource.submit(
+        model="seedance-2-5-text-to-video-basic",
+        prompt="A neon city at night",
+        duration_seconds=5,
+    )
+    assert "bitrate_mode" not in post.call_args[1]["json_data"]
+
+
+@pytest.mark.asyncio
+async def test_queue_rejects_unknown_bitrate_mode(video_resource: Video) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        await video_resource.submit(
+            model="seedance-2-5-text-to-video-basic",
+            prompt="A neon city at night",
+            duration_seconds=5,
+            bitrate_mode="ultra",  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_forwards_bitrate_mode(video_resource: Video) -> None:
+    post = _post_mock(video_resource)
+    await video_resource.run(
+        model="seedance-2-5-text-to-video-basic",
+        prompt="A neon city at night",
+        duration_seconds=5,
+        bitrate_mode="high",
+    )
+    assert post.call_args[1]["json_data"]["bitrate_mode"] == "high"
