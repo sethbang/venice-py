@@ -5,6 +5,7 @@ This test file focuses on achieving >80% coverage for API key management functio
 testing all methods: create, list, get, delete, update, and error handling.
 """
 
+import contextlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1085,3 +1086,21 @@ class TestApiKeysRobustness:
 
         assert result.success is True
         mock_client.delete.assert_called_once_with("api_keys", params={"id": long_key_id})
+
+
+class TestUpdateModelPrivacy:
+    """PATCH /api_keys accepts modelPrivacy, so update() must be able to send it."""
+
+    @pytest.mark.asyncio
+    async def test_update_forwards_model_privacy(self):
+        from venice_ai.resources.api_keys import ApiKeys
+
+        client = AsyncMock()
+        client.patch = AsyncMock(return_value={"data": {}})
+        keys = ApiKeys(client)
+        # The response shape is irrelevant here; the request body is what matters.
+        with contextlib.suppress(Exception):
+            await keys.update(id="key-1", model_privacy="PRIVATE_ONLY")
+
+        body = client.patch.await_args.kwargs["json_data"]
+        assert body["modelPrivacy"] == "PRIVATE_ONLY"

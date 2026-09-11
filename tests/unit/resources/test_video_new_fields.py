@@ -237,3 +237,87 @@ async def test_run_forwards_bitrate_mode(video_resource: Video) -> None:
         bitrate_mode="high",
     )
     assert post.call_args[1]["json_data"]["bitrate_mode"] == "high"
+
+
+# ---------------------------------------------------------------------------
+# Remaining /video/queue fields: the Topaz enhancement cluster plus the
+# general-purpose keyframes / omni_reference_task_type / reference_document_urls
+# / output_format.
+# ---------------------------------------------------------------------------
+
+_ENHANCEMENT_FIELDS = {
+    "enhancement_model": "prob-4",
+    "compression": 0.3,
+    "creativity": 0.4,
+    "grain": 0.05,
+    "h264_output": True,
+    "halo": 0.2,
+    "noise": 0.5,
+    "realism": 0.6,
+    "recover_detail": 0.7,
+    "sharp": 0.5,
+    "softness": 3,
+    "output_format": "prores",
+    "target_fps": 60,
+    "slowdown_factor": 2,
+}
+
+_GENERAL_QUEUE_FIELDS = {
+    "omni_reference_task_type": "edit",
+    "reference_document_urls": ["https://example.com/brief.pdf"],
+    "keyframes": [
+        {"image_url": "https://example.com/a.png", "frame_index": 0},
+        {"image_url": "https://example.com/b.png", "frame_index": 120},
+    ],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value", list(_ENHANCEMENT_FIELDS.items()) + list(_GENERAL_QUEUE_FIELDS.items())
+)
+async def test_queue_forwards_remaining_field(video_resource: Video, field, value) -> None:
+    post = _post_mock(video_resource)
+    await video_resource.submit(
+        model="topaz-video-upscale",
+        prompt="Enhance this",
+        duration_seconds=5,
+        **{field: value},
+    )
+    assert post.call_args[1]["json_data"][field] == value
+
+
+@pytest.mark.asyncio
+async def test_queue_omits_remaining_fields_when_unset(video_resource: Video) -> None:
+    post = _post_mock(video_resource)
+    await video_resource.submit(
+        model="topaz-video-upscale", prompt="Enhance this", duration_seconds=5
+    )
+    body = post.call_args[1]["json_data"]
+    for field in list(_ENHANCEMENT_FIELDS) + list(_GENERAL_QUEUE_FIELDS):
+        assert field not in body, f"{field} should be omitted when unset"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [("enhancement_model", "prob-4"), ("target_fps", 60), ("slowdown_factor", 2)],
+)
+async def test_quote_forwards_enhancement_field(video_resource: Video, field, value) -> None:
+    """These three affect price, so /video/quote accepts them too."""
+    post = _post_mock(video_resource)
+    await video_resource.quote(model="topaz-video-upscale", duration_seconds=5, **{field: value})
+    assert post.call_args[1]["json_data"][field] == value
+
+
+@pytest.mark.asyncio
+async def test_queue_rejects_out_of_range_enhancement_value(video_resource: Video) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        await video_resource.submit(
+            model="topaz-video-upscale",
+            prompt="Enhance this",
+            duration_seconds=5,
+            grain=0.5,  # spec caps grain at 0.1
+        )

@@ -146,19 +146,17 @@ Useful for compositing several reference images under one editing prompt.
 ```python
 image_bytes = await client.image.upscale(
     image=open("input.png", "rb"),           # no `model` param — upscale has its own backend
-    scale=2,                                  # float — usually 2 or 4
-    enhanceCreativity=0.0,                    # 0.0–1.0 — higher lets the model hallucinate detail
-    enhance=None,                             # bool | None
-    enhancePrompt=None,                       # str | None
-    replication=None,                         # float | None
+    scale=2,                                  # 2 or 4 — 1 is rejected
+    creativity=0.01,                          # detail/texture added; server clamps to 0–0.02
     timeout=None,                             # float seconds | aiohttp.ClientTimeout — raise for large images
 )
 Path("./upscaled.png").write_bytes(image_bytes)
 ```
 
 `upscale()` takes **no `model` argument**, returns raw `bytes`, and uses `scale`
-(not `upscale_factor`). A higher `enhanceCreativity` produces sharper but less
-faithful results — good for thumbnails / hero images, bad for evidence /
+(not `upscale_factor`). The endpoint accepts exactly `image`, `scale` and
+`creativity`. A higher `creativity` adds more detail and texture but strays
+further from the source — good for thumbnails / hero images, bad for evidence /
 forensics. Large source images and high scale factors take longer; raise
 `timeout` to avoid a premature client-side abort.
 

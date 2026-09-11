@@ -568,6 +568,9 @@ class SimpleRateLimiter:
 
         model = metadata.model_id
         last_rate_limit_error: Exception | None = None
+        # Total time spent in retry backoff, so it can be held under the
+        # caller's own deadline rather than silently outlasting it.
+        total_backoff = 0.0
 
         for attempt in range(self.max_retries + 1):
             # Check rate limit before proceeding (based on local state)
@@ -650,6 +653,23 @@ class SimpleRateLimiter:
                 # the normal backoff schedule retries entirely inside it.
                 if getattr(rate_limit_error, "is_error_budget", False):
                     wait_time = max(wait_time, self.ERROR_BUDGET_WINDOW_SECONDS)
+
+                # Waiting past the caller's deadline serves nobody: they would
+                # get neither the response nor their timeout on time. Surface
+                # the rate-limit error instead.
+                call_timeout = getattr(metadata, "timeout", None)
+                if (
+                    isinstance(call_timeout, (int, float))
+                    and not isinstance(call_timeout, bool)
+                    and total_backoff + wait_time > call_timeout
+                ):
+                    logger.info(
+                        f"Not retrying {model} after 429: a {wait_time:.1f}s backoff would "
+                        f"exceed the {call_timeout:.1f}s request timeout"
+                    )
+                    raise rate_limit_error
+
+                total_backoff += wait_time
 
                 logger.info(
                     f"Received 429 on {model}, retrying after {wait_time:.1f}s "

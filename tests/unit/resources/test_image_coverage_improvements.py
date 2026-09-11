@@ -763,7 +763,7 @@ class TestImageRequestHelperMethods:
             # Setup the _request_multipart method on the image_resource directly
             image_resource._request_multipart = AsyncMock(return_value=b"result")
 
-            await image_resource.upscale(image=test_data, scale=2.0, enhance=True)
+            await image_resource.upscale(image=test_data, scale=2, creativity=0.01)
 
             # Verify _request_multipart was called with expected structure
             image_resource._request_multipart.assert_called_once()

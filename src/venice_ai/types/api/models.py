@@ -99,6 +99,17 @@ class ModelCapabilities(BaseModel):
             "supportsTeeAttestation to also be true."
         ),
     )
+    supportsStyleReferences: bool | None = Field(
+        default=None,
+        description="Whether the image model accepts ``style_references``.",
+    )
+    supportsStyleReferenceStrength: bool | None = Field(
+        default=None,
+        description=(
+            "Whether per-reference ``strength`` is honoured; when false the "
+            "strength is ignored rather than rejected."
+        ),
+    )
     supportsXSearch: bool = Field(
         default=False,
         description=(

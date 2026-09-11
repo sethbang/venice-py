@@ -603,3 +603,166 @@ async def test_multi_edit_omits_new_params_when_none():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# /image/upscale takes exactly image, scale and creativity. The old enhance,
+# enhancePrompt, enhanceCreativity and replication fields were removed
+# server-side, so sending them is dead weight and `creativity` — the only
+# tuning knob left — was unreachable.
+# ---------------------------------------------------------------------------
+
+
+def _capture_multipart(monkeypatch):
+    from venice_ai.resources.image import Image
+
+    captured = {}
+
+    async def fake_multipart(self, method, path, *, files, data=None, headers=None, timeout=None):
+        captured["data"] = data or {}
+        return b"\x89PNG\r\n\x1a\n"
+
+    monkeypatch.setattr(Image, "_request_multipart", fake_multipart, raising=True)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_upscale_sends_creativity(monkeypatch):
+    from venice_ai.resources.image import Image
+
+    captured = _capture_multipart(monkeypatch)
+    img = Image(AsyncMock())
+    await img.upscale(image=b"\x89PNG\r\n\x1a\nfake", scale=2, creativity=0.02)
+
+    assert float(captured["data"]["creativity"]) == 0.02
+
+
+@pytest.mark.asyncio
+async def test_upscale_does_not_send_removed_fields(monkeypatch):
+    from venice_ai.resources.image import Image
+
+    captured = _capture_multipart(monkeypatch)
+    img = Image(AsyncMock())
+    await img.upscale(image=b"\x89PNG\r\n\x1a\nfake", scale=4)
+
+    removed = {"enhance", "enhanceCreativity", "enhancePrompt", "replication"}
+    assert not (removed & set(captured["data"])), f"still sending {removed & set(captured['data'])}"
+
+
+@pytest.mark.asyncio
+async def test_upscale_rejects_removed_kwargs(monkeypatch):
+    """They are gone server-side, so accepting them would silently do nothing."""
+    from venice_ai.resources.image import Image
+
+    _capture_multipart(monkeypatch)
+    img = Image(AsyncMock())
+    with pytest.raises(TypeError):
+        await img.upscale(image=b"\x89PNG\r\n\x1a\nfake", enhance=True)  # type: ignore[call-arg]
+
+
+@pytest.mark.asyncio
+async def test_upscale_scale_of_one_is_rejected(monkeypatch):
+    """scale must be 2 or 4; the API rejects 1 outright now."""
+    from pydantic import ValidationError
+
+    from venice_ai.resources.image import Image
+
+    _capture_multipart(monkeypatch)
+    img = Image(AsyncMock())
+    with pytest.raises(ValidationError):
+        await img.upscale(image=b"\x89PNG\r\n\x1a\nfake", scale=1)
+
+
+@pytest.mark.asyncio
+async def test_upscale_allows_creativity_outside_the_clamp(monkeypatch):
+    """The server clamps to 0-0.02 rather than rejecting, so the SDK must not
+    reject a value the API accepts."""
+    from venice_ai.resources.image import Image
+
+    captured = _capture_multipart(monkeypatch)
+    img = Image(AsyncMock())
+    await img.upscale(image=b"\x89PNG\r\n\x1a\nfake", scale=2, creativity=0.5)
+
+    assert float(captured["data"]["creativity"]) == 0.5
+
+
+# ---------------------------------------------------------------------------
+# enhance_prompt / disable_prompt_optimization_thinking / style_references
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("enhance_prompt", True),
+        ("disable_prompt_optimization_thinking", True),
+        ("style_references", [{"image": "https://example.com/s.png", "strength": 0.5}]),
+    ],
+)
+async def test_generate_forwards_prompt_fields(field, value):
+    from venice_ai.resources.image import Image
+
+    client = AsyncMock()
+    client.post = AsyncMock(return_value={"images": [], "request": {}, "timing": {}})
+    img = Image(client)
+    await img.create(model="venice-sd35", prompt="a cat", **{field: value})
+
+    assert client.post.await_args.kwargs["json_data"][field] == value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["enhance_prompt", "disable_prompt_optimization_thinking"])
+async def test_edit_forwards_prompt_fields(field):
+    from venice_ai.resources.image import Image
+
+    client = AsyncMock()
+    client._request = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n")
+    img = Image(client)
+    await img.edit(prompt="make it blue", image=b"\x89PNG\r\n\x1a\nfake", **{field: True})
+
+    assert client._request.await_args.kwargs["json_data"][field] is True
+
+
+def test_enhanced_prompt_exposed_from_response_header():
+    """enhance_prompt returns the rewritten prompt in a header; without an
+    accessor the caller has to know the header name to get it back."""
+    from types import SimpleNamespace as NS
+
+    from venice_ai.types.api.images import ImageGenerationResponse
+
+    resp = ImageGenerationResponse.model_validate(
+        {
+            "id": "img-1",
+            "images": [],
+            "timing": {
+                "inferenceDuration": 1.0,
+                "inferencePreprocessingTime": 0.1,
+                "inferenceQueueTime": 0.1,
+                "total": 1.2,
+            },
+        }
+    )
+    resp._response = NS(headers={"x-venice-enhanced-prompt": "a%20fluffy%20cat"})
+    assert resp.enhanced_prompt == "a fluffy cat"
+
+
+def test_enhanced_prompt_is_none_without_the_header():
+    from types import SimpleNamespace as NS
+
+    from venice_ai.types.api.images import ImageGenerationResponse
+
+    resp = ImageGenerationResponse.model_validate(
+        {
+            "id": "img-1",
+            "images": [],
+            "timing": {
+                "inferenceDuration": 1.0,
+                "inferencePreprocessingTime": 0.1,
+                "inferenceQueueTime": 0.1,
+                "total": 1.2,
+            },
+        }
+    )
+    resp._response = NS(headers={})
+    assert resp.enhanced_prompt is None

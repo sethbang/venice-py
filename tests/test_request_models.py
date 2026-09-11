@@ -665,6 +665,29 @@ class TestApiKeyModelPrivacy:
         )
         assert "modelPrivacy" not in request.model_dump(exclude_none=True)
 
+    def test_web3_create_request_accepts_model_privacy(self) -> None:
+        """Web3-created keys carry the same privacy tier as ordinary ones."""
+        from venice_ai.types.api.requests.api_keys import Web3CreateApiKeyRequest
+
+        request = Web3CreateApiKeyRequest(  # type: ignore[call-arg]
+            address="0xabc",
+            signature="0xdef",
+            token="tok",
+            apiKeyType="INFERENCE",
+            description="Web3 private key",
+            modelPrivacy="PRIVATE_TEXT",
+        )
+        assert request.model_dump(exclude_none=True)["modelPrivacy"] == "PRIVATE_TEXT"
+
+    def test_update_request_accepts_model_privacy(self) -> None:
+        """PATCH /api_keys accepts the tier too, so a key's privacy can change."""
+        from venice_ai.types.api.requests.api_keys import UpdateApiKeyRequest
+
+        request = UpdateApiKeyRequest(  # type: ignore[call-arg]
+            id="key-1", modelPrivacy="ALL"
+        )
+        assert request.model_dump(exclude_none=True)["modelPrivacy"] == "ALL"
+
     def test_invalid_tier_rejected(self) -> None:
         from pydantic import ValidationError
 

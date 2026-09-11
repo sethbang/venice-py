@@ -211,6 +211,7 @@ from .requests import (
     SimpleImageGenerationRequest,
     SpecificToolChoice,
     StreamOptions,
+    StyleReference,
     SystemMessage,
     # Chat completion models
     TextContent,
@@ -480,6 +481,7 @@ __all__ = [
     "ImageGenerationRequest",
     "SimpleImageGenerationRequest",
     "ImageUpscaleRequest",
+    "StyleReference",
     "ImageEditRequest",
     "ImageBackgroundRemoveRequest",
     "ImageMultiEditRequest",

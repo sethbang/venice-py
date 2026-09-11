@@ -379,18 +379,15 @@ venice-py image upscale <INPUT_FILE> [OPTIONS]
 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
-| `--scale` | | — | Scale factor (e.g., `2.0` for 2x) |
-| `--enhance / --no-enhance` | | — | Apply AI enhancement during upscaling |
-| `--enhance-creativity` | | — | Enhancement creativity (0.0–1.0) |
-| `--enhance-prompt` | | — | Style prompt for enhancement |
-| `--replication` | | — | Replication factor (0.0–1.0) |
+| `--scale` | | `2` | Scale factor — must be `2` or `4` |
+| `--creativity` | | — | Detail and texture the upscaler adds; the server clamps this to 0–0.02 (default 0.01) |
 | `--output` | `-o` | auto-generated | Output file path |
 | `--save-dir` | | `.` | Directory to save the result |
 | `--open` | | `false` | Open image after saving |
 
 ```bash
 venice-py image upscale photo.jpg --scale 2
-venice-py image upscale photo.png --scale 4 --enhance --save-dir ./upscaled
+venice-py image upscale photo.png --scale 4 --creativity 0.02 --save-dir ./upscaled
 venice-py image upscale logo.png --output logo_hd.png --open
 ```
 

@@ -366,6 +366,7 @@ class ApiKeys(APIResource["VeniceClient"]):
         expires_at: str | None = None,
         consumption_limit: dict[str, Any] | None = None,
         limit_period: Literal["EPOCH", "MONTH", "LIFETIME"] | None = None,
+        model_privacy: Literal["ALL", "PRIVATE_TEXT", "PRIVATE_ONLY"] | None = None,
     ) -> ApiKey:
         """Update an existing API key (PATCH /api_keys).
 
@@ -374,6 +375,9 @@ class ApiKeys(APIResource["VeniceClient"]):
             description: New description for the key.
             expires_at: New expiration date (ISO 8601 format).
             consumption_limit: Epoch consumption limits (e.g., ``{'diem': 1, 'usd': 10}``).
+            model_privacy: Privacy tier restricting which models the key may
+                call ("ALL", "PRIVATE_TEXT", "PRIVATE_ONLY"). Omit to leave the
+                key's current tier unchanged.
             limit_period: Period over which the consumption limit resets
                 (``EPOCH``, ``MONTH``, or ``LIFETIME``).
 
@@ -401,6 +405,7 @@ class ApiKeys(APIResource["VeniceClient"]):
             expiresAt=expires_at,
             consumptionLimit=consumption_limit,  # type: ignore[arg-type]  # Pydantic coerces dict to ConsumptionLimit at validate time
             limitPeriod=limit_period,
+            modelPrivacy=model_privacy,
         )
         body = request.model_dump(exclude_none=True, by_alias=True)
         # Per the docs (api-reference/endpoint/api_keys/update), the response is
