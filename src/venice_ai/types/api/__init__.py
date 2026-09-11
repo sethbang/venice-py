@@ -36,6 +36,7 @@ from .api_keys import (
     RateLimitLogsResponse,
     RateLimitsData,
     RateLimitsResponse,
+    RateLimitType,
     TrailingSevenDaysUsage,
 )
 from .audio import (
@@ -364,6 +365,7 @@ __all__ = [
     "RateLimitsData",
     "RateLimitsResponse",
     "RateLimitLogEntry",
+    "RateLimitType",
     "RateLimitLogsResponse",
     # From billing module
     "InferenceDetails",

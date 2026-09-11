@@ -359,7 +359,7 @@ class Video(APIResource["VeniceClient"]):
         :param model: Video model ID (e.g., ``"wan-2.6-text-to-video"``).
         :type model: str
         :param prompt: Text prompt for video generation (max length varies by
-            model; default 2500 chars, up to 10000 for some models).
+            model; default 2500 chars, up to 20000 for some models).
         :type prompt: str
         :param duration_seconds: Duration of generated video as an integer
             number of seconds (e.g. ``5``, ``10``). Liberal string parsing

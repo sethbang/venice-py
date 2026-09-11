@@ -640,3 +640,37 @@ def test_image_generation_request_rejects_bad_quality():
 
 if __name__ == "__main__":
     main()
+
+
+class TestApiKeyModelPrivacy:
+    """API keys carry a persistent model-privacy tier, settable at creation.
+
+    `ALL` allows every model; `PRIVATE_TEXT` requires text and embedding
+    models to be Private/TEE/E2EE; `PRIVATE_ONLY` requires it of every model.
+    """
+
+    def test_create_request_accepts_model_privacy(self) -> None:
+        request = CreateApiKeyRequest(  # type: ignore[call-arg]
+            apiKeyType="INFERENCE",
+            description="Private-only key",
+            modelPrivacy="PRIVATE_ONLY",
+        )
+        data = request.model_dump(exclude_none=True)
+        assert data["modelPrivacy"] == "PRIVATE_ONLY"
+
+    def test_model_privacy_omitted_when_unset(self) -> None:
+        """Omitted means the account default applies; don't invent a tier."""
+        request = CreateApiKeyRequest(  # type: ignore[call-arg]
+            apiKeyType="INFERENCE", description="Default key"
+        )
+        assert "modelPrivacy" not in request.model_dump(exclude_none=True)
+
+    def test_invalid_tier_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            CreateApiKeyRequest(  # type: ignore[call-arg]
+                apiKeyType="INFERENCE",
+                description="Bad tier",
+                modelPrivacy="PRIVATE_IMAGES",
+            )

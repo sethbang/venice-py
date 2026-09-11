@@ -102,13 +102,13 @@ class VideoRequestBase(BaseModel):
 
     model: str = Field(
         ...,
-        description="Video model ID (e.g., 'wan-2.6-text-to-video', 'ltx-2-fast-image-to-video')",
+        description="Video model ID (e.g., 'wan-2.6-text-to-video', 'wan-3-0-prime-image-to-video')",
     )
     prompt: str = Field(
         ...,
         min_length=1,
-        max_length=10000,
-        description="Text prompt for video generation (max 10000 chars on newer models)",
+        max_length=20000,
+        description="Text prompt for video generation (max 20000 chars on newer models)",
     )
     duration: str = Field(
         ...,
@@ -116,10 +116,10 @@ class VideoRequestBase(BaseModel):
     )
     negative_prompt: str | None = Field(
         None,
-        max_length=10000,
+        max_length=20000,
         description=(
             "Optional negative prompt. Per-model max length varies (default 2500, "
-            "up to 10000). The API has no default — omit to skip."
+            "up to 20000). The API has no default — omit to skip."
         ),
     )
     resolution: str | None = Field(

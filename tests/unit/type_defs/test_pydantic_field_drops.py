@@ -120,12 +120,18 @@ def _api_key_wire() -> dict:
         "lastUsedAt": "2026-06-04T09:32:19.821Z",
         "usage": {"trailingSevenDays": {"usd": "61.9948", "vcu": "0.0000", "diem": "3.1667"}},
         "currentPeriodUsage": {"usd": "113.8246", "diem": "13.7806"},
+        "modelPrivacy": "PRIVATE_TEXT",
     }
 
 
 def test_api_key_preserves_limit_period():
     ak = ApiKey.model_validate(_api_key_wire())
     assert ak.limitPeriod == "LIFETIME"
+
+
+def test_api_key_preserves_model_privacy():
+    ak = ApiKey.model_validate(_api_key_wire())
+    assert ak.modelPrivacy == "PRIVATE_TEXT"
 
 
 def test_api_key_preserves_current_period_usage():
@@ -204,3 +210,52 @@ def test_usage_analytics_preserves_usd_daily_charts():
     resp = UsageAnalyticsResponse.model_validate(wire)
     assert resp.byKeyDailyUsd == [{"date": 1, "Web App": 0.5}]
     assert resp.byModelDailyUsd == [{"date": 1, "Llama 3.3 70B": 0.5}]
+
+
+# ---------------------------------------------------------------------------
+# RateLimitLogEntry.rateLimitType is a documented five-value enum, not a
+# free-form string: RPM/TPM/RPD are throughput limits, FAILED_REQUESTS counts
+# non-success responses in the window, and UNSUPPORTED_FEATURE_REQUESTS counts
+# requests asking a model for a feature it does not have.
+# ---------------------------------------------------------------------------
+def _rate_limit_log_wire(rate_limit_type: str) -> dict:
+    return {
+        "apiKeyId": "2c9d04bd-aaaa-bbbb-cccc-dddddddddddd",
+        "modelId": "zai-org-glm-5-2",
+        "rateLimitTier": "paid",
+        "rateLimitType": rate_limit_type,
+        "timestamp": "2026-09-01T12:00:00.000Z",
+    }
+
+
+def test_rate_limit_type_enum_covers_the_documented_values():
+    """Callers compare against these instead of hand-writing magic strings.
+
+    Mirrors how ``VeniceAPIErrorCode`` is used against ``APIError.code``: the
+    field stays ``str`` so an unrecognised server value still parses, and the
+    enum is the set of known constants.
+    """
+    from venice_ai.types.api.api_keys import RateLimitType
+
+    assert {member.value for member in RateLimitType} == {
+        "RPD",
+        "RPM",
+        "TPM",
+        "FAILED_REQUESTS",
+        "UNSUPPORTED_FEATURE_REQUESTS",
+    }
+
+
+def test_rate_limit_type_compares_equal_to_the_wire_string():
+    from venice_ai.types.api.api_keys import RateLimitLogEntry, RateLimitType
+
+    entry = RateLimitLogEntry.model_validate(_rate_limit_log_wire("UNSUPPORTED_FEATURE_REQUESTS"))
+    assert entry.rateLimitType == RateLimitType.UNSUPPORTED_FEATURE_REQUESTS
+
+
+def test_rate_limit_log_entry_tolerates_an_unknown_type():
+    """A sixth server-side value must not fail the whole log listing."""
+    from venice_ai.types.api.api_keys import RateLimitLogEntry
+
+    entry = RateLimitLogEntry.model_validate(_rate_limit_log_wire("CONCURRENCY"))
+    assert entry.rateLimitType == "CONCURRENCY"

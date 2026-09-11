@@ -257,6 +257,8 @@ class ApiKeys(APIResource["VeniceClient"]):
                 - apiKeyType: Key type ("INFERENCE", "ADMIN", etc.)
                 - expiresAt: Optional ISO 8601 expiration timestamp
                 - consumptionLimit: Optional usage quotas and restrictions
+                - modelPrivacy: Optional privacy tier restricting which models
+                  the key may call ("ALL", "PRIVATE_TEXT", "PRIVATE_ONLY")
 
         Returns:
             Complete API key object including the secret key value, metadata,

@@ -96,6 +96,7 @@ class VeniceAPIErrorCode(StrEnum):
     API_KEY_USD_SPEND_LIMIT_EXCEEDED = "API_KEY_USD_SPEND_LIMIT_EXCEEDED"
     # 403
     UNAUTHORIZED = "UNAUTHORIZED"
+    MODEL_PRIVACY_RESTRICTED = "MODEL_PRIVACY_RESTRICTED"
     API_ACCESS_DISABLED = "API_ACCESS_DISABLED"
     X402_WALLET_MISMATCH = "X402_WALLET_MISMATCH"
     # 400
@@ -327,12 +328,21 @@ class RateLimitError(APIError):
             ``x-ratelimit-reset-requests`` header.
         cached_rate_limit_headers: Pre-extracted rate-limit headers (lowercase keys)
             for use by distributed backend state synchronisation.
+        custom_message: The API's ``customMessage``, naming which cap tripped
+            (may be ``None``). Several different limits all surface as a 429 —
+            the per-minute request cap, the per-day credit cap, and two rolling
+            30-second error budgets: failed requests, and requests asking a
+            model for a feature it does not support. They need different
+            responses, and only this message distinguishes them. An
+            unsupported-feature trip in particular will keep recurring until
+            the request itself changes, so retrying it unchanged is futile.
     """
 
     retry_after_seconds: int | None
     remaining_requests: int | None
     reset_requests_timestamp: float | None
     cached_rate_limit_headers: dict[str, str]
+    custom_message: str | None
 
     def __init__(
         self,
@@ -345,8 +355,10 @@ class RateLimitError(APIError):
         remaining_requests: int | None = None,
         reset_requests_timestamp: float | None = None,
         cached_rate_limit_headers: dict[str, str] | None = None,
+        custom_message: str | None = None,
     ) -> None:
         super().__init__(message, request=request, response=response, body=body)
+        self.custom_message = custom_message
         self.retry_after_seconds = retry_after_seconds
         self.remaining_requests = remaining_requests
         self.reset_requests_timestamp = reset_requests_timestamp
@@ -706,6 +718,7 @@ def _make_status_error(
 
     # Parse error details from response body
     error_code: str | None = None
+    custom_message: str | None = None
     if isinstance(body, dict):
         error_data = body.get("error")
         if isinstance(error_data, dict):
@@ -713,10 +726,13 @@ def _make_status_error(
             if detail:
                 err_msg = f"{base_message}: {detail}"
             error_code = error_data.get("code")
+            custom_message = error_data.get("customMessage")
         elif isinstance(error_data, str):
             err_msg = f"{base_message}: {error_data}"
         if error_code is None:
             error_code = body.get("code")
+        if custom_message is None:
+            custom_message = body.get("customMessage")
     elif isinstance(body, str) and body.strip():
         err_msg = f"{base_message}: {body}"
 
@@ -755,6 +771,7 @@ def _make_status_error(
                 remaining_requests=_safe_int_parse(remaining_requests_str),
                 reset_requests_timestamp=ms_epoch_to_seconds(_safe_float_parse(reset_requests_str)),
                 cached_rate_limit_headers=headers,
+                custom_message=custom_message,
             )
             exc.code = error_code
             return exc

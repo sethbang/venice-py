@@ -55,36 +55,36 @@ class TestVideoTextToVideoRequest:
             )  # type: ignore
 
     def test_prompt_max_length(self):
-        """Prompts over 10000 chars are rejected (the max is model-dependent;
-        the SDK enforces the highest known ceiling — 10000 per swagger)."""
-        # 10000 is accepted.
+        """Prompts over 20000 chars are rejected (the max is model-dependent;
+        the SDK enforces the highest known ceiling — 20000 per swagger)."""
+        # 20000 is accepted.
         VideoTextToVideoRequest(
             model="wan-2.6-text-to-video",
-            prompt="A" * 10000,
+            prompt="A" * 20000,
             duration="5s",
         )  # type: ignore
-        # 10001 is rejected.
+        # 20001 is rejected.
         with pytest.raises(ValidationError):
             VideoTextToVideoRequest(
                 model="wan-2.6-text-to-video",
-                prompt="A" * 10001,  # Over limit
+                prompt="A" * 20001,  # Over limit
                 duration="5s",
             )  # type: ignore
 
     def test_negative_prompt_max_length(self):
-        """negative_prompt accepts up to 10000 chars, rejects 10001."""
+        """negative_prompt accepts up to 20000 chars, rejects 20001."""
         VideoTextToVideoRequest(
             model="wan-2.6-text-to-video",
             prompt="A sunset",
             duration="5s",
-            negative_prompt="B" * 10000,
+            negative_prompt="B" * 20000,
         )  # type: ignore
         with pytest.raises(ValidationError):
             VideoTextToVideoRequest(
                 model="wan-2.6-text-to-video",
                 prompt="A sunset",
                 duration="5s",
-                negative_prompt="B" * 10001,
+                negative_prompt="B" * 20001,
             )  # type: ignore
 
     def test_negative_prompt_defaults_to_none(self):

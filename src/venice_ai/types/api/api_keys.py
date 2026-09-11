@@ -5,6 +5,7 @@ This module contains Pydantic models for API key creation, listing, rate limits,
 and Web3 authentication functionality.
 """
 
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -85,6 +86,16 @@ class ApiKey(BaseModel):
         description=(
             "API Key consumption limits. Optional — the docs list this as a "
             "non-required response field."
+        ),
+    )
+    modelPrivacy: Literal["ALL", "PRIVATE_TEXT", "PRIVATE_ONLY"] | None = Field(
+        default=None,
+        description=(
+            "Which models this key may call, by privacy tier. ``ALL`` allows every "
+            "model. ``PRIVATE_TEXT`` requires text and embedding models to be "
+            "Private, TEE, or E2EE while other modalities may be Anonymous or "
+            "Private. ``PRIVATE_ONLY`` requires every model to be Private, TEE, or "
+            "E2EE; Anonymous models are rejected."
         ),
     )
     limitPeriod: Literal["EPOCH", "MONTH", "LIFETIME"] | None = Field(
@@ -191,13 +202,46 @@ class RateLimitsResponse(BaseModel):
     data: RateLimitsData = Field(..., description="Rate limits and balance information")
 
 
+class RateLimitType(StrEnum):
+    """The kinds of rate limit that can be exceeded.
+
+    These are the values ``RateLimitLogEntry.rateLimitType`` carries. Compare
+    against these rather than hand-writing the strings::
+
+        if entry.rateLimitType == RateLimitType.UNSUPPORTED_FEATURE_REQUESTS:
+            ...
+
+    ``rateLimitType`` stays typed as ``str`` so a value Venice adds later still
+    parses instead of failing the whole log listing — the same arrangement as
+    :class:`~venice_ai.exceptions.VeniceAPIErrorCode` and ``APIError.code``.
+    """
+
+    #: Requests per day.
+    RPD = "RPD"
+    #: Requests per minute.
+    RPM = "RPM"
+    #: Tokens per minute.
+    TPM = "TPM"
+    #: Too many requests returned a non-success status code within the window.
+    FAILED_REQUESTS = "FAILED_REQUESTS"
+    #: Too many requests asked a model for a feature it does not support
+    #: (e.g. vision or tool calling from a model without that capability).
+    UNSUPPORTED_FEATURE_REQUESTS = "UNSUPPORTED_FEATURE_REQUESTS"
+
+
 class RateLimitLogEntry(BaseModel):
     """Rate limit violation log entry"""
 
     apiKeyId: str = Field(..., description="API key that exceeded the limit")
     modelId: str = Field(..., description="Model being used when limit was exceeded")
     rateLimitTier: str = Field(..., description="API tier of the rate limit")
-    rateLimitType: str = Field(..., description="Type of rate limit exceeded")
+    rateLimitType: str = Field(
+        ...,
+        description=(
+            "Type of rate limit exceeded. Compare against :class:`RateLimitType`; "
+            "left as ``str`` so an unrecognised future value still parses."
+        ),
+    )
     timestamp: str = Field(..., description="When the rate limit was exceeded")
 
 
@@ -209,6 +253,7 @@ class RateLimitLogsResponse(BaseModel):
 
 
 __all__ = [
+    "RateLimitType",
     "ConsumptionLimits",
     "TrailingSevenDaysUsage",
     "CurrentPeriodUsage",

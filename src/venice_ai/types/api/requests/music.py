@@ -3,7 +3,8 @@
 Music generation is served through the ``/audio/*`` queue family
 (``queue`` / ``quote`` / ``retrieve`` / ``complete``). Each model advertises
 its own capabilities (``/models?type=music`` exposes ``supports_lyrics``,
-``supports_force_instrumental``, ``supports_language_code``, ``supports_speed``,
+``supports_force_instrumental``, ``supports_language_code``, ``supports_loop``,
+``supports_speed``,
 ``supports_lyrics_optimizer``, and tiered ``min_duration`` / ``max_duration``),
 so validation here is intentionally permissive — enforcement happens
 server-side against the selected model's capability matrix.
@@ -88,6 +89,13 @@ class MusicQueueRequest(BaseModel):
         ge=0.25,
         le=4.0,
         description="Optional audio speed multiplier; range 0.25–4.",
+    )
+    loop: bool | None = Field(
+        None,
+        description=(
+            "Render the clip so its end splices back into its start without an "
+            "audible seam. Only supported when ``/models`` reports ``supports_loop=true``."
+        ),
     )
 
 

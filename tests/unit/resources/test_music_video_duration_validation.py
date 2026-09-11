@@ -330,3 +330,57 @@ def test_resources_still_importable() -> None:
     """No regressions to top-level imports."""
     assert Music is not None
     assert Video is not None
+
+
+# ---------------------------------------------------------------------------
+# Music — loop capability preflight
+# ---------------------------------------------------------------------------
+
+
+def _music_entry_with_loop(model_id: str, *, supports_loop: bool | None) -> ModelResponse:
+    spec = MusicModelSpec(name=model_id, supports_loop=supports_loop)
+    return ModelResponse.model_validate(
+        {
+            "id": model_id,
+            "type": "music",
+            "object": "model",
+            "owned_by": "venice.ai",
+            "model_spec": spec.model_dump(),
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_loop_unsupported_raises() -> None:
+    from venice_ai.resources.music import _preflight_validate_loop
+
+    client = _client_with_model(_music_entry_with_loop("ace-step-15", supports_loop=False))
+    with pytest.raises(ValueError, match="loop"):
+        await _preflight_validate_loop(client, "ace-step-15", True)
+
+
+@pytest.mark.asyncio
+async def test_loop_unsupported_blocks_false_too() -> None:
+    """The API rejects the presence of the field, not just a True value."""
+    from venice_ai.resources.music import _preflight_validate_loop
+
+    client = _client_with_model(_music_entry_with_loop("ace-step-15", supports_loop=False))
+    with pytest.raises(ValueError, match="loop"):
+        await _preflight_validate_loop(client, "ace-step-15", False)
+
+
+@pytest.mark.asyncio
+async def test_loop_supported_passes() -> None:
+    from venice_ai.resources.music import _preflight_validate_loop
+
+    client = _client_with_model(_music_entry_with_loop("elevenlabs-music", supports_loop=True))
+    await _preflight_validate_loop(client, "elevenlabs-music", True)
+
+
+@pytest.mark.asyncio
+async def test_loop_unknown_capability_falls_through() -> None:
+    """An undeclared capability defers to the server; it is not a declared False."""
+    from venice_ai.resources.music import _preflight_validate_loop
+
+    client = _client_with_model(_music_entry_with_loop("mystery-model", supports_loop=None))
+    await _preflight_validate_loop(client, "mystery-model", True)

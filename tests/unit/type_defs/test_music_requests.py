@@ -152,3 +152,38 @@ class TestMusicRetrieveAndCompleteRequests:
         request = MusicCompleteRequest(model="elevenlabs-music", queue_id="q-123")
         assert request.model == "elevenlabs-music"
         assert request.queue_id == "q-123"
+
+
+class TestMusicLoopParameter:
+    """``loop`` renders a seamlessly-splicing clip on models that support it."""
+
+    def test_loop_defaults_to_none(self):
+        """Omitted means "model default" — the SDK must not invent a value."""
+        request = MusicQueueRequest(
+            model="elevenlabs-music",
+            prompt="Ambient pad",
+            duration_seconds=30,
+            lyrics_prompt=None,
+            force_instrumental=None,
+            lyrics_optimizer=None,
+            voice=None,
+            language_code=None,
+            speed=None,
+            loop=None,
+        )
+        assert request.loop is None
+
+    def test_loop_accepts_bool(self):
+        request = MusicQueueRequest(
+            model="elevenlabs-music",
+            prompt="Ambient pad",
+            duration_seconds=30,
+            lyrics_prompt=None,
+            force_instrumental=None,
+            lyrics_optimizer=None,
+            voice=None,
+            language_code=None,
+            speed=None,
+            loop=True,
+        )
+        assert request.loop is True
