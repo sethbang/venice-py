@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-09-11
+
 ### Added
 
 - **Every documented request field is now modelled.** A field-level coverage pass against the spec found ~25 params the SDK never sent. Image generation gains `enhance_prompt`, `disable_prompt_optimization_thinking` and `style_references` (with a `StyleReference` item model); image edit and multi-edit gain the first two. Video generation gains `omni_reference_task_type`, `reference_document_urls`, `keyframes` (with a `VideoKeyframe` item model) and the enhancement cluster used by Topaz-style models — `enhancement_model`, `compression`, `creativity`, `grain`, `halo`, `noise`, `realism`, `recover_detail`, `sharp`, `softness`, `h264_output`, `output_format`, `target_fps` and `slowdown_factor`. `video.quote()` gains the three of those that move the price: `enhancement_model`, `target_fps` and `slowdown_factor`.
