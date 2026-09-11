@@ -16,8 +16,12 @@ from ...identifiers import ModelId
 class EmbeddingsRequest(BaseModel):
     """Embeddings generation request"""
 
-    input: str | list[str] | list[int] | list[list[int]] = Field(
-        ..., description="Text(s) to embed"
+    input: str | list[str] = Field(
+        ...,
+        description=(
+            "Text(s) to embed. Token-ID arrays are not accepted — the API "
+            "validates embeddings input as text only."
+        ),
     )
     model: ModelId = Field(..., description="Embedding model to use")
 
@@ -29,6 +33,22 @@ class EmbeddingsRequest(BaseModel):
         None, description="Format to return embeddings (server default is 'float' when omitted)"
     )
     user: str | None = Field(None, description="User identifier (compatibility only)")
+
+    @field_validator("input", mode="before")
+    @classmethod
+    def reject_token_id_input(cls, v: Any) -> Any:
+        """Reject token-ID arrays before coercion turns them into a type error.
+
+        Embeddings input is validated as text only; a token-ID array would
+        otherwise surface as a bare "Input should be a valid string", which
+        does not explain why a previously working call stopped working.
+        """
+        if isinstance(v, list) and any(not isinstance(item, str) for item in v):
+            raise ValueError(
+                "Embeddings input must be text. Token-ID arrays are not accepted — "
+                "pass the source text instead."
+            )
+        return v
 
     @field_validator("input")
     @classmethod

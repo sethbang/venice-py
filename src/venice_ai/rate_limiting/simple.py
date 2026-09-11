@@ -160,6 +160,14 @@ class SimpleRateLimiter:
 
     # Constants
     BACKOFF_MULTIPLIER = 2.0
+
+    #: Length of the rolling window behind the two error budgets (too many
+    #: failed requests, too many unsupported-feature requests). A 429 from one
+    #: of those clears only when the window rolls, so backing off for less is
+    #: guaranteed to fail again — and for the failed-request budget, each such
+    #: retry counts against the budget, digging the hole deeper. These budgets
+    #: exist specifically to stop clients retrying into a wall.
+    ERROR_BUDGET_WINDOW_SECONDS = 30.0
     BACKOFF_JITTER = 0.1  # ±10% jitter
     CLEANUP_INTERVAL = 300.0  # 5 minutes
 
@@ -560,6 +568,9 @@ class SimpleRateLimiter:
 
         model = metadata.model_id
         last_rate_limit_error: Exception | None = None
+        # Total time spent in retry backoff, so it can be held under the
+        # caller's own deadline rather than silently outlasting it.
+        total_backoff = 0.0
 
         for attempt in range(self.max_retries + 1):
             # Check rate limit before proceeding (based on local state)
@@ -637,6 +648,28 @@ class SimpleRateLimiter:
                     wait_time = (
                         getattr(rate_limit_error, "retry_after_seconds", None) or self.min_backoff
                     )
+
+                # An error-budget 429 only clears when its 30s window rolls;
+                # the normal backoff schedule retries entirely inside it.
+                if getattr(rate_limit_error, "is_error_budget", False):
+                    wait_time = max(wait_time, self.ERROR_BUDGET_WINDOW_SECONDS)
+
+                # Waiting past the caller's deadline serves nobody: they would
+                # get neither the response nor their timeout on time. Surface
+                # the rate-limit error instead.
+                call_timeout = getattr(metadata, "timeout", None)
+                if (
+                    isinstance(call_timeout, (int, float))
+                    and not isinstance(call_timeout, bool)
+                    and total_backoff + wait_time > call_timeout
+                ):
+                    logger.info(
+                        f"Not retrying {model} after 429: a {wait_time:.1f}s backoff would "
+                        f"exceed the {call_timeout:.1f}s request timeout"
+                    )
+                    raise rate_limit_error
+
+                total_backoff += wait_time
 
                 logger.info(
                     f"Received 429 on {model}, retrying after {wait_time:.1f}s "

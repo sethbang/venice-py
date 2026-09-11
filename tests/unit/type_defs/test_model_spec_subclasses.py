@@ -503,3 +503,29 @@ class TestNestedConstraintCapabilityExtraAllow:
             }
         )
         assert caps.quantization == "fp6-experimental"
+
+
+class TestUncensoredFlag:
+    """``model_spec.uncensored`` replaces inferring the label from model IDs.
+
+    The API sends the field only when it is true ("Present and true when
+    Venice classifies this model as uncensored... Absent for all other
+    models"), so absence is a definite *not uncensored*, not "unknown".
+    """
+
+    def test_uncensored_true_is_parsed(self):
+        entry = ModelResponse.model_validate(
+            _wrap("text", {"name": "Venice Uncensored", "uncensored": True})
+        )
+        assert entry.model_spec.uncensored is True
+
+    def test_absent_means_not_uncensored(self):
+        entry = ModelResponse.model_validate(_wrap("text", {"name": "Some Model"}))
+        assert entry.model_spec.uncensored is False
+
+    def test_uncensored_applies_to_non_text_modalities(self):
+        """The flag covers every modality, including video."""
+        entry = ModelResponse.model_validate(
+            _wrap("video", {"name": "A Video Model", "uncensored": True})
+        )
+        assert entry.model_spec.uncensored is True

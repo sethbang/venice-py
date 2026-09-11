@@ -1628,3 +1628,142 @@ class TestGetAllStatesWithDeletion:
         # Should have 4 states (one was deleted during iteration)
         # The exact count depends on which models were iterated before deletion
         assert isinstance(result, dict)
+
+
+class TestErrorBudgetBackoff:
+    """A 429 from a rolling error budget needs a full-window backoff.
+
+    The budgets are 30-second windows that exist to stop clients retrying into
+    a wall. The default backoff schedule (1s, 2s, 4s) retries three times
+    entirely inside that window, so every retry fails — and each one counts
+    against the failed-request budget again, deepening the hole.
+    """
+
+    @staticmethod
+    def _error_budget_response():
+        response = MagicMock()
+        response.status = 429
+        response.headers = {"x-ratelimit-remaining": "0", "x-ratelimit-resets": "30"}
+        return response
+
+    @pytest.mark.asyncio
+    async def test_error_budget_429_waits_at_least_the_window(self):
+        from venice_ai._queue_types import RequestMetadata, ResourceType
+        from venice_ai.exceptions import RateLimitError, _make_status_error
+
+        limiter = SimpleRateLimiter(min_backoff=1.0, max_retries=1)
+        response = self._error_budget_response()
+
+        slept: list[float] = []
+
+        async def fake_sleep(seconds):
+            slept.append(seconds)
+
+        with patch("asyncio.sleep", side_effect=fake_sleep), pytest.raises(RateLimitError):
+            await limiter.submit_request(
+                RequestMetadata(
+                    request_id="req-1",
+                    model_id="test-model",
+                    resource_type=ResourceType.LLM,
+                    endpoint="chat/completions",
+                ),
+                AsyncMock(return_value=response),
+                error_factory=_make_status_error,
+            )
+
+        assert slept, "expected a backoff before the retry"
+        assert max(slept) >= 30.0, f"backed off only {slept!r}, inside the 30s window"
+
+    @pytest.mark.asyncio
+    async def test_throughput_429_keeps_the_normal_backoff(self):
+        """Only error budgets get the floor; a plain 429 must not wait 30s."""
+        from venice_ai._queue_types import RequestMetadata, ResourceType
+        from venice_ai.exceptions import RateLimitError, _make_status_error
+
+        limiter = SimpleRateLimiter(min_backoff=1.0, max_retries=1)
+        response = MagicMock()
+        response.status = 429
+        response.headers = {"x-ratelimit-reset-requests": "60"}
+
+        slept: list[float] = []
+
+        async def fake_sleep(seconds):
+            slept.append(seconds)
+
+        with patch("asyncio.sleep", side_effect=fake_sleep), pytest.raises(RateLimitError):
+            await limiter.submit_request(
+                RequestMetadata(
+                    request_id="req-1",
+                    model_id="test-model",
+                    resource_type=ResourceType.LLM,
+                    endpoint="chat/completions",
+                ),
+                AsyncMock(return_value=response),
+                error_factory=_make_status_error,
+            )
+
+        assert all(s < 30.0 for s in slept), f"unexpected 30s floor on a throughput 429: {slept!r}"
+
+    @pytest.mark.asyncio
+    async def test_backoff_does_not_outlast_the_caller_timeout(self):
+        """A 30s floor must not silently blow past the timeout the caller set.
+
+        RequestMetadata.timeout is the caller's ceiling for the whole call, so
+        once the accumulated backoff would exceed it there is no point sleeping
+        — surface the rate-limit error instead of holding the call past the
+        deadline and returning neither in time.
+        """
+        from venice_ai._queue_types import RequestMetadata, ResourceType
+        from venice_ai.exceptions import RateLimitError, _make_status_error
+
+        limiter = SimpleRateLimiter(min_backoff=1.0, max_retries=3)
+        response = self._error_budget_response()
+
+        slept: list[float] = []
+
+        async def fake_sleep(seconds):
+            slept.append(seconds)
+
+        with patch("asyncio.sleep", side_effect=fake_sleep), pytest.raises(RateLimitError):
+            await limiter.submit_request(
+                RequestMetadata(
+                    request_id="req-timeout",
+                    model_id="test-model",
+                    resource_type=ResourceType.LLM,
+                    endpoint="chat/completions",
+                    timeout=5.0,
+                ),
+                AsyncMock(return_value=response),
+                error_factory=_make_status_error,
+            )
+
+        assert sum(slept) <= 5.0, f"slept {sum(slept)}s against a 5s timeout: {slept!r}"
+
+    @pytest.mark.asyncio
+    async def test_no_timeout_still_allows_the_full_window(self):
+        """timeout=None means no ceiling, so the 30s floor still applies."""
+        from venice_ai._queue_types import RequestMetadata, ResourceType
+        from venice_ai.exceptions import RateLimitError, _make_status_error
+
+        limiter = SimpleRateLimiter(min_backoff=1.0, max_retries=1)
+        response = self._error_budget_response()
+
+        slept: list[float] = []
+
+        async def fake_sleep(seconds):
+            slept.append(seconds)
+
+        with patch("asyncio.sleep", side_effect=fake_sleep), pytest.raises(RateLimitError):
+            await limiter.submit_request(
+                RequestMetadata(
+                    request_id="req-no-timeout",
+                    model_id="test-model",
+                    resource_type=ResourceType.LLM,
+                    endpoint="chat/completions",
+                    timeout=None,
+                ),
+                AsyncMock(return_value=response),
+                error_factory=_make_status_error,
+            )
+
+        assert max(slept) >= 30.0

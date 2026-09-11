@@ -127,6 +127,29 @@ class ImageGenerationResponse(VeniceBaseModel):
             t.write_bytes(raw)
         return targets
 
+    @property
+    def enhanced_prompt(self) -> str | None:
+        """The rewritten prompt, when ``enhance_prompt=True`` produced one.
+
+        The API returns it URL-encoded in the ``x-venice-enhanced-prompt``
+        response header; this decodes it. ``None`` when the header is absent,
+        which is the normal case for a request that did not ask for a rewrite.
+        """
+        headers = self.headers
+        if not headers:
+            return None
+        raw = headers.get("x-venice-enhanced-prompt")
+        if raw is None:
+            for key, value in headers.items():
+                if key.lower() == "x-venice-enhanced-prompt":
+                    raw = value
+                    break
+        if raw is None:
+            return None
+        from urllib.parse import unquote
+
+        return unquote(raw)
+
 
 class SimpleImageData(BaseModel):
     """OpenAI-compatible image data object"""

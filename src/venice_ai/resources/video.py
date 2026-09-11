@@ -29,6 +29,7 @@ from ..types.api.requests.video import (
     VideoConsents,
     VideoElement,
     VideoImageToVideoRequest,
+    VideoKeyframe,
     VideoQuoteRequest,
     VideoRetrieveRequest,
     VideoTextToVideoRequest,
@@ -71,6 +72,13 @@ def _format_video_duration(duration_seconds: int | str) -> str:
         raise
 
 
+#: Duration values that ask the output to match the source clip rather than
+#: naming a length. They are never members of a model's
+#: ``constraints.durations`` enum, so the duration preflight has to let them
+#: through.
+_SOURCE_MATCHED_DURATIONS = frozenset({"auto", "-1"})
+
+
 async def _preflight_validate_video_duration(
     client: VeniceClient,
     model_id: str,
@@ -81,9 +89,18 @@ async def _preflight_validate_video_duration(
     Best-effort: silent fall-through on catalog miss or non-video spec.
     Raises a ``ValueError`` only when the spec exposes an explicit
     ``constraints.durations`` enum and the requested value isn't in it.
+
+    The source-matched sentinels (``"auto"`` / ``"-1"``, used by Seedance R2V
+    edit and extend to follow the source clip's length) are exempt — they are
+    not enum members, so checking them against the enum would reject a request
+    the API accepts.
     """
     if duration_seconds is None:
         return
+    if isinstance(duration_seconds, str) and duration_seconds.strip().lower() in (
+        _SOURCE_MATCHED_DURATIONS
+    ):
+        return  # source-matched: the server resolves the length from the source clip
     try:
         wire_form = _format_video_duration(duration_seconds)
     except ValueError:
@@ -343,6 +360,24 @@ class Video(APIResource["VeniceClient"]):
         reference_video_urls: list[str] | None = None,
         elements: list[VideoElement | dict] | None = None,
         scene_image_urls: list[str] | None = None,
+        omni_reference_task_type: Literal["auto", "reference", "edit", "extend"] | None = None,
+        reference_document_urls: list[str] | None = None,
+        keyframes: list[VideoKeyframe | dict] | None = None,
+        enhancement_model: str | None = None,
+        compression: float | None = None,
+        creativity: float | None = None,
+        grain: float | None = None,
+        halo: float | None = None,
+        noise: float | None = None,
+        realism: float | None = None,
+        recover_detail: float | None = None,
+        sharp: float | None = None,
+        softness: float | None = None,
+        h264_output: bool | None = None,
+        output_format: Literal["mp4", "prores"] | None = None,
+        target_fps: int | None = None,
+        slowdown_factor: Literal[1, 2, 4, 8] | None = None,
+        bitrate_mode: Literal["standard", "high"] | None = None,
         consents: VideoConsents | dict | None = None,
     ) -> VideoQueueResponse:
         """
@@ -359,13 +394,17 @@ class Video(APIResource["VeniceClient"]):
         :param model: Video model ID (e.g., ``"wan-2.6-text-to-video"``).
         :type model: str
         :param prompt: Text prompt for video generation (max length varies by
-            model; default 2500 chars, up to 10000 for some models).
+            model; default 2500 chars, up to 20000 for some models).
         :type prompt: str
         :param duration_seconds: Duration of generated video as an integer
             number of seconds (e.g. ``5``, ``10``). Liberal string parsing
             also accepts ``"5"`` / ``"5s"`` / ``"5 seconds"``. The wire
             format ``"5s"`` is generated internally. Valid values vary by
-            model.
+            model. On Seedance 2.5 reference-to-video **edit**, ``"auto"``
+            (or ``"-1"``) matches the source clip's length instead; that
+            requires ``reference_video_urls``, and on :meth:`quote` it
+            requires ``reference_video_total_duration``, which is what the
+            job bills (rounded up).
         :type duration_seconds: int | str
         :param negative_prompt: Negative prompt to avoid unwanted content.
         :type negative_prompt: Optional[str]
@@ -375,7 +414,9 @@ class Video(APIResource["VeniceClient"]):
         :param audio: Generate audio if model supports it.
         :type audio: Optional[bool]
         :param aspect_ratio: Aspect ratio (e.g., ``"16:9"``, ``"9:16"``).
-            Typically required for T2V, ignored for I2V.
+            Typically required for T2V, ignored for I2V. On Seedance
+            reference-to-video, ``"adaptive"`` (or ``"auto"``) matches the
+            source clip's ratio; that requires ``reference_video_urls``.
         :type aspect_ratio: Optional[str]
         :param image_url: Reference image URL for image-to-video generation.
             Must start with ``http://``, ``https://``, or ``data:``.
@@ -411,6 +452,11 @@ class Video(APIResource["VeniceClient"]):
         :param scene_image_urls: Up to 4 scene reference images for
             element-aware models. Reference as ``@Image1``, ``@Image2``, etc.
         :type scene_image_urls: Optional[list[str]]
+        :param bitrate_mode: Output encode bitrate on public Seedance 2.0 and
+            2.5 models: ``"high"`` for a higher-quality, larger-file encode.
+            Omitting it is equivalent to ``"standard"``. Does not affect price,
+            and :meth:`quote` does not accept it.
+        :type bitrate_mode: Optional[str]
 
         :return: Queue response containing ``model`` and ``queue_id``.
         :rtype: VideoQueueResponse
@@ -459,6 +505,24 @@ class Video(APIResource["VeniceClient"]):
             "reference_video_urls": reference_video_urls,
             "elements": elements,
             "scene_image_urls": scene_image_urls,
+            "omni_reference_task_type": omni_reference_task_type,
+            "reference_document_urls": reference_document_urls,
+            "keyframes": keyframes,
+            "enhancement_model": enhancement_model,
+            "compression": compression,
+            "creativity": creativity,
+            "grain": grain,
+            "halo": halo,
+            "noise": noise,
+            "realism": realism,
+            "recover_detail": recover_detail,
+            "sharp": sharp,
+            "softness": softness,
+            "h264_output": h264_output,
+            "output_format": output_format,
+            "target_fps": target_fps,
+            "slowdown_factor": slowdown_factor,
+            "bitrate_mode": bitrate_mode,
             "consents": consents,
         }.items():
             if val is not None:
@@ -491,6 +555,9 @@ class Video(APIResource["VeniceClient"]):
         audio: bool | None = None,
         video_url: str | None = None,
         reference_video_total_duration: float | None = None,
+        enhancement_model: str | None = None,
+        target_fps: int | None = None,
+        slowdown_factor: Literal[1, 2, 4, 8] | None = None,
     ) -> VideoQuoteResponse:
         """
         Get a price estimate for a video generation request.
@@ -544,6 +611,9 @@ class Video(APIResource["VeniceClient"]):
             audio=audio,
             video_url=video_url,
             reference_video_total_duration=reference_video_total_duration,
+            enhancement_model=enhancement_model,
+            target_fps=target_fps,
+            slowdown_factor=slowdown_factor,
         )
         body = request.model_dump(exclude_none=True)
 
@@ -768,6 +838,24 @@ class Video(APIResource["VeniceClient"]):
         reference_video_urls: list[str] | None = None,
         elements: list[VideoElement | dict] | None = None,
         scene_image_urls: list[str] | None = None,
+        omni_reference_task_type: Literal["auto", "reference", "edit", "extend"] | None = None,
+        reference_document_urls: list[str] | None = None,
+        keyframes: list[VideoKeyframe | dict] | None = None,
+        enhancement_model: str | None = None,
+        compression: float | None = None,
+        creativity: float | None = None,
+        grain: float | None = None,
+        halo: float | None = None,
+        noise: float | None = None,
+        realism: float | None = None,
+        recover_detail: float | None = None,
+        sharp: float | None = None,
+        softness: float | None = None,
+        h264_output: bool | None = None,
+        output_format: Literal["mp4", "prores"] | None = None,
+        target_fps: int | None = None,
+        slowdown_factor: Literal[1, 2, 4, 8] | None = None,
+        bitrate_mode: Literal["standard", "high"] | None = None,
         consents: VideoConsents | dict | None = None,
     ) -> VideoJob:
         """Queue a video generation and return a :class:`VideoJob` for lifecycle management.
@@ -801,6 +889,24 @@ class Video(APIResource["VeniceClient"]):
             reference_video_urls=reference_video_urls,
             elements=elements,
             scene_image_urls=scene_image_urls,
+            omni_reference_task_type=omni_reference_task_type,
+            reference_document_urls=reference_document_urls,
+            keyframes=keyframes,
+            enhancement_model=enhancement_model,
+            compression=compression,
+            creativity=creativity,
+            grain=grain,
+            halo=halo,
+            noise=noise,
+            realism=realism,
+            recover_detail=recover_detail,
+            sharp=sharp,
+            softness=softness,
+            h264_output=h264_output,
+            output_format=output_format,
+            target_fps=target_fps,
+            slowdown_factor=slowdown_factor,
+            bitrate_mode=bitrate_mode,
             consents=consents,
         )
         return VideoJob(client=self._client, queue_response=queue_response)

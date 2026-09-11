@@ -273,9 +273,8 @@ async def test_image_upscale_with_bytes(venice_client, sample_image_bytes, vcr_c
         try:
             result = await venice_client.image.upscale(
                 image=sample_image_bytes,
-                scale=2.0,
+                scale=2,
                 timeout=RECORDING_TIMEOUT,
-                enhance=True,
             )
 
             assert result is not None
@@ -288,16 +287,18 @@ async def test_image_upscale_with_bytes(venice_client, sample_image_bytes, vcr_c
 
 @pytest.mark.integration
 async def test_image_upscale_with_enhancement(venice_client, sample_image_bytes, vcr_cassette):
-    """Test image upscaling with enhancement parameters."""
+    """Test image upscaling with the creativity knob.
+
+    ``creativity`` replaced the removed ``enhance`` / ``enhanceCreativity`` /
+    ``enhancePrompt`` parameters; the server clamps it to 0-0.02.
+    """
     with vcr_cassette:
         try:
             result = await venice_client.image.upscale(
                 image=sample_image_bytes,
-                scale=2.0,
+                scale=2,
                 timeout=RECORDING_TIMEOUT,
-                enhance=True,
-                enhanceCreativity=0.7,
-                enhancePrompt="make it more vibrant and detailed",
+                creativity=0.02,
             )
 
             assert result is not None
@@ -569,9 +570,9 @@ async def test_image_content_preparation_bytes_upload(
             # Test with raw bytes - should handle binary data correctly
             result = await venice_client.image.upscale(
                 image=sample_image_bytes,  # Raw bytes
-                scale=2.0,
+                scale=2,
                 timeout=RECORDING_TIMEOUT,
-                enhance=True,  # Test additional parameters
+                creativity=0.01,  # Test additional parameters
             )
 
             assert result is not None

@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-09-11
+
+### Added
+
+- **Every documented request field is now modelled.** A field-level coverage pass against the spec found ~25 params the SDK never sent. Image generation gains `enhance_prompt`, `disable_prompt_optimization_thinking` and `style_references` (with a `StyleReference` item model); image edit and multi-edit gain the first two. Video generation gains `omni_reference_task_type`, `reference_document_urls`, `keyframes` (with a `VideoKeyframe` item model) and the enhancement cluster used by Topaz-style models — `enhancement_model`, `compression`, `creativity`, `grain`, `halo`, `noise`, `realism`, `recover_detail`, `sharp`, `softness`, `h264_output`, `output_format`, `target_fps` and `slowdown_factor`. `video.quote()` gains the three of those that move the price: `enhancement_model`, `target_fps` and `slowdown_factor`.
+
+- **`ImageGenerationResponse.enhanced_prompt`** returns the rewritten prompt produced by `enhance_prompt=True`, decoding it from the URL-encoded `x-venice-enhanced-prompt` response header. Without it the caller had to know the header name and unescape it themselves.
+
+- **`modelPrivacy` now covers all three API-key paths.** It was added to key creation, but `PATCH /api_keys` and `POST /api_keys/generate_web3_key` accept it too, so `UpdateApiKeyRequest` and `Web3CreateApiKeyRequest` carry it as well and `api_keys.update()` takes a `model_privacy` argument — a key's privacy tier can be changed after creation, and Web3-created keys can set one.
+
+- **`supportsStyleReferences` and `supportsStyleReferenceStrength`** on `ModelCapabilities`, so callers can tell which image models accept `style_references` before sending one. (There is no capability flag for `disable_prompt_optimization_thinking`; the API documents it as ignored rather than rejected by models that lack it, so it is safe to send unconditionally.)
+
+- **`bitrate_mode` on video generation.** `video.submit()` and `video.run()` accept `"standard"` or `"high"`, selecting the output encode bitrate on public Seedance 2.0 (including Fast) and 2.5 models. Omitting it is equivalent to `"standard"`. It is queue-only and does not affect price, so `video.quote()` deliberately does not accept it.
+
+- **`RateLimitError.is_error_budget`** distinguishes a 429 from one of the two rolling 30-second error budgets — too many failed requests, or too many requests for a feature the model does not support — from an ordinary throughput 429. Detected from the response headers, which set `x-ratelimit-resets` for a budget trip rather than the per-window `x-ratelimit-reset-requests`/`-tokens`. (The singular `X-RateLimit-Reset` that `/crypto/rpc` sets on its own 429s is deliberately not treated as a match.)
+
+- **`model_spec.uncensored`** is now modelled on `ModelSpec`, so whether Venice classifies a model as uncensored can be read off the catalog instead of inferred from traits or model-ID substrings. Note the semantics differ from the `supports_*` capability flags in the same module: the API sends this field only when it is true and omits it otherwise, so it is typed `bool` defaulting to `False` — an absent field is a definite "not uncensored", not "undeclared".
+
+- **`modelPrivacy` on API keys.** Keys carry a persistent privacy tier — `ALL`, `PRIVATE_TEXT`, or `PRIVATE_ONLY` — controlling which models the key may call. It is settable on `CreateApiKeyRequest` and reported on `ApiKey`. Omit it to let the account default apply.
+
+- **`RateLimitError.custom_message`** surfaces the API's `customMessage`, which names the cap that tripped. Several distinct limits all surface as a 429 — the per-minute request cap, the per-day credit cap, and two rolling 30-second error budgets (failed requests, and requests asking a model for a feature it does not support) — and they need different responses. Previously a caller saw only "Rate limit exceeded" with no way to tell them apart. The field name is documented; its position in the body is not, so it is read from both the flat and `error`-nested shapes and is `None` when absent — this has not yet been confirmed against an observed 429.
+
+- **`RateLimitType`** enumerates the values `RateLimitLogEntry.rateLimitType` carries (`RPD`, `RPM`, `TPM`, `FAILED_REQUESTS`, `UNSUPPORTED_FEATURE_REQUESTS`), so reading `/api_keys/rate_limits/log` no longer means hand-writing magic strings. The field stays typed `str` so a value Venice adds later still parses rather than failing the whole listing — the same arrangement as `VeniceAPIErrorCode` and `APIError.code`.
+
+- **`VeniceAPIErrorCode.MODEL_PRIVACY_RESTRICTED`**, returned when an API key's privacy tier excludes the requested model.
+
+- **`loop` on music generation.** `music.submit()` and `music.run()` now accept `loop`, which renders a clip whose end splices back into its start without an audible seam. The API gates it on the model, so `MusicModelSpec.supports_loop` is modelled alongside the existing capability flags and a pre-flight check raises before the request is sent when a model declares `supports_loop=false` — matching how `force_instrumental` already behaves. An undeclared capability defers to the server rather than being treated as unsupported.
+
+### Deprecated
+
+- **`image.upscale()`'s `enhance`, `enhanceCreativity`, `enhancePrompt` and `replication` are deprecated and ignored.** Venice removed all four from `POST /image/upscale`; the endpoint now takes exactly `image`, `scale` and `creativity`. The SDK was still sending the four dead fields on every call and had no way to set `creativity` — the only tuning knob left. Passing any of them now raises a `DeprecationWarning` and is ignored, which matches what the server already did with them, so no working call changes behaviour. They are removed in 3.0.0. The matching `venice image upscale` flags (`--enhance/--no-enhance`, `--enhance-creativity`, `--enhance-prompt`, `--replication`) behave the same way.
+
+  Migrating: replace `enhanceCreativity` with `creativity`, noting the range differs — the server clamps `creativity` to 0–0.02 (default 0.01), not 0–1. The SDK forwards whatever you pass rather than rejecting out-of-range values, because the server clamps rather than erroring. `enhancePrompt` has no replacement; the endpoint no longer accepts a prompt.
+
+### Fixed
+
+- **`image.upscale()` now sends `creativity` and a valid `scale`.** `scale` must be `2` or `4`; the old validator steered callers toward `scale=1` + `enhance=True`, a combination the API now always rejects, and `scale=1` is rejected outright. Neither previously produced a successful call.
+
+- **Source-matched video duration is no longer rejected before it is sent.** Seedance reference-to-video edit and extend can ask the output to follow the source clip — `duration="auto"` (or `"-1"`), alongside `aspect_ratio="adaptive"` (or `"auto"`). Those sentinels are not members of a model's `constraints.durations` enum, so the duration pre-flight compared them against it and raised `duration_seconds='auto' is not supported by model ...`, rejecting a request the API accepts. The sentinels are now exempt from the enum check; any other unrecognised duration is still rejected.
+
+- **Retry backoff no longer outlasts the caller's own timeout.** `SimpleRateLimiter` never consulted `RequestMetadata.timeout` when sleeping between retries, so a caller who set a 5s timeout could sit in backoff for 30s or more and receive neither the response nor their timeout on schedule. Backoff is now accumulated and checked against that timeout: once the next sleep would exceed it, the `RateLimitError` is raised instead. A `timeout` of `None` keeps the old unbounded behaviour.
+
+- **A 429 from an error budget now backs off for the full window.** These budgets exist to stop clients retrying into a wall, and they clear only when their rolling 30-second window rolls. `SimpleRateLimiter` applied its ordinary schedule instead — with the default `min_backoff=1.0` that is roughly 1s, 2s and 4s, so all three retries landed inside the window and were guaranteed to fail. Worse, for the failed-request budget each of those retries counted against the budget again. An error-budget 429 now backs off at least `SimpleRateLimiter.ERROR_BUDGET_WINDOW_SECONDS` (30s); throughput 429s are unaffected. Worst-case latency is bounded by `RequestMetadata.timeout` (see above); with `timeout=None` and the default `max_retries=3` an error-budget 429 can hold a call for up to 90s, where the old schedule gave up after ~7s having never had a chance of succeeding.
+
+### Changed
+
+- **`venice api-keys create` gained `--model-privacy`** (`ALL`, `PRIVATE_TEXT`, `PRIVATE_ONLY`), so the CLI can set the same privacy tier the SDK already exposed. Unset leaves the account default in place.
+
+- **Video prompts accept up to 20,000 characters.** `prompt` and `negative_prompt` on the video request models were capped at 10,000, which is now half the API's limit — the SDK was rejecting prompts the API accepts. Purely a widening; no previously valid request changes behavior.
+
+- **Embeddings input is text-only.** `input` was typed `str | list[str] | list[int] | list[list[int]]`, advertising token-ID arrays that the API now rejects with a validation error. The signature is narrowed to `str | list[str]`, and passing a token-ID array raises `InvalidRequestError` before the request is sent rather than as a bare pydantic "Input should be a valid string". No working call changes: token-ID arrays never produced an embedding — they previously failed upstream, and the API now rejects them outright. Callers passing token IDs must pass the source text instead.
+
 ## [2.3.0] - 2026-09-11
 
 ### Added

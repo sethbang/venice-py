@@ -437,3 +437,139 @@ class TestModelGoneError:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestModelPrivacyRestrictedCode:
+    """``MODEL_PRIVACY_RESTRICTED`` is returned when an API key's privacy tier
+    excludes the model — by ``GET /models`` when filtering the listing, and on
+    inference when the key may not call the requested model."""
+
+    def test_code_is_a_known_error_code(self):
+        from venice_ai.exceptions import VeniceAPIErrorCode
+
+        assert VeniceAPIErrorCode.MODEL_PRIVACY_RESTRICTED == "MODEL_PRIVACY_RESTRICTED"
+
+    def test_factory_surfaces_the_code(self):
+        from venice_ai.exceptions import VeniceAPIErrorCode
+
+        response = MagicMock()
+        response.status = 403
+        response.headers = {}
+
+        error = _make_status_error(
+            "Forbidden",
+            body={
+                "error": {"message": "Model not permitted for this key"},
+                "code": "MODEL_PRIVACY_RESTRICTED",
+            },
+            response=response,
+        )
+        assert error.code == VeniceAPIErrorCode.MODEL_PRIVACY_RESTRICTED
+
+
+class TestRateLimitCustomMessage:
+    """A 429 body carries ``customMessage`` naming which cap tripped.
+
+    Without it a caller only sees "Rate limit exceeded" and cannot tell a
+    per-minute throughput cap from the failed-request or unsupported-feature
+    error budgets, which need different fixes.
+    """
+
+    def test_custom_message_parsed_from_top_level(self):
+        response = MagicMock()
+        response.status = 429
+        response.headers = {}
+
+        error = _make_status_error(
+            "Rate limit exceeded",
+            body={
+                "error": "Rate limit exceeded",
+                "customMessage": (
+                    "Too many failed attempts (> 50) resulting in a non-success "
+                    "status code. Please wait 30 seconds and try again."
+                ),
+            },
+            response=response,
+        )
+        assert isinstance(error, RateLimitError)
+        assert error.custom_message is not None
+        assert "Too many failed attempts" in error.custom_message
+
+    def test_custom_message_parsed_when_nested_under_error(self):
+        """The factory already accepts both flat and error-nested bodies."""
+        response = MagicMock()
+        response.status = 429
+        response.headers = {}
+
+        error = _make_status_error(
+            "Rate limit exceeded",
+            body={"error": {"message": "Slow down", "customMessage": "Per-minute cap"}},
+            response=response,
+        )
+        assert isinstance(error, RateLimitError)
+        assert error.custom_message == "Per-minute cap"
+
+    def test_custom_message_is_none_when_absent(self):
+        response = MagicMock()
+        response.status = 429
+        response.headers = {}
+
+        error = _make_status_error(
+            "Rate limit exceeded", body={"error": "Rate limit exceeded"}, response=response
+        )
+        assert isinstance(error, RateLimitError)
+        assert error.custom_message is None
+
+
+class TestErrorBudget429:
+    """Two rolling 30-second error budgets also surface as 429.
+
+    They are documented to set ``x-ratelimit-remaining`` / ``x-ratelimit-resets``
+    instead of the per-window headers, which is what tells them apart from a
+    throughput 429. The distinction matters because these budgets exist to stop
+    clients retrying into a wall: a fast retry re-trips them and, for the
+    failed-request budget, counts against it again.
+    """
+
+    @staticmethod
+    def _error(headers: dict) -> RateLimitError:
+        response = MagicMock()
+        response.status = 429
+        response.headers = headers
+        error = _make_status_error(
+            "Rate limit exceeded",
+            body={"error": "Rate limit exceeded"},
+            response=response,
+            rate_limit_headers=headers,
+        )
+        assert isinstance(error, RateLimitError)
+        return error
+
+    def test_error_budget_headers_are_detected(self):
+        error = self._error({"x-ratelimit-remaining": "0", "x-ratelimit-resets": "30"})
+        assert error.is_error_budget is True
+
+    def test_per_window_headers_are_not_an_error_budget(self):
+        error = self._error(
+            {
+                "x-ratelimit-limit-requests": "100",
+                "x-ratelimit-remaining-requests": "0",
+                "x-ratelimit-reset-requests": "1704067260",
+            }
+        )
+        assert error.is_error_budget is False
+
+    def test_crypto_rpc_headers_are_not_an_error_budget(self):
+        """/crypto/rpc sets its own singular X-RateLimit-Reset on 429s — that
+        must not be mistaken for the plural error-budget header."""
+        error = self._error(
+            {
+                "X-RateLimit-Limit": "100",
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1704067260",
+            }
+        )
+        assert error.is_error_budget is False
+
+    def test_no_headers_is_not_an_error_budget(self):
+        assert self._error({}).is_error_budget is False

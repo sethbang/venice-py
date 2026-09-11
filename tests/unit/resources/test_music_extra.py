@@ -471,3 +471,54 @@ async def test_wait_failed_status_short_circuits_before_sleep(
         await job.wait()
     # First poll already FAILED → no sleep called.
     assert sleep_calls == []
+
+
+@pytest.mark.asyncio
+async def test_submit_forwards_loop_to_request_body(music_resource) -> None:
+    """``loop`` reaches the wire so loop-capable models can splice the clip."""
+    resource, client = music_resource
+    client.post.return_value = MusicQueueResponse(model="elevenlabs-music", queue_id="q-loop-1")
+
+    await resource.submit(
+        model="elevenlabs-music",
+        prompt="Ambient pad",
+        duration_seconds=30,
+        loop=True,
+    )
+
+    args, kwargs = client.post.call_args
+    assert args[0] == "audio/queue"
+    assert kwargs["json_data"]["loop"] is True
+
+
+@pytest.mark.asyncio
+async def test_submit_omits_loop_when_unset(music_resource) -> None:
+    """Omitted ``loop`` must not appear in the body — the model default applies."""
+    resource, client = music_resource
+    client.post.return_value = MusicQueueResponse(model="elevenlabs-music", queue_id="q-loop-2")
+
+    await resource.submit(
+        model="elevenlabs-music",
+        prompt="Ambient pad",
+        duration_seconds=30,
+    )
+
+    _, kwargs = client.post.call_args
+    assert "loop" not in kwargs["json_data"]
+
+
+@pytest.mark.asyncio
+async def test_run_forwards_loop_to_request_body(music_resource) -> None:
+    """``run()`` is the managed-lifecycle entry point and must pass loop through."""
+    resource, client = music_resource
+    client.post.return_value = MusicQueueResponse(model="elevenlabs-music", queue_id="q-loop-3")
+
+    await resource.run(
+        model="elevenlabs-music",
+        prompt="Ambient pad",
+        duration_seconds=30,
+        loop=True,
+    )
+
+    _, kwargs = client.post.call_args
+    assert kwargs["json_data"]["loop"] is True

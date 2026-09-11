@@ -68,6 +68,7 @@ from .images import (
     ImageMultiEditRequest,
     ImageUpscaleRequest,
     SimpleImageGenerationRequest,
+    StyleReference,
 )
 from .music import (
     MusicCompleteRequest,
@@ -135,6 +136,7 @@ __all__ = [
     "ImageGenerationRequest",
     "SimpleImageGenerationRequest",
     "ImageUpscaleRequest",
+    "StyleReference",
     "ImageEditRequest",
     "ImageBackgroundRemoveRequest",
     "ImageMultiEditRequest",

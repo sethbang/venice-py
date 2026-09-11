@@ -40,7 +40,7 @@ async with VeniceClient() as client:
 **Don't hardcode `.png`.** Some image models (e.g., turbo variants) return WebP. `save()` and `save_all()` sniff magic bytes and write the correct extension. Passing `ext=None` (default) does the right thing.
 
 Other image methods:
-- `client.image.upscale(image=..., scale=..., enhanceCreativity=...)` — no `model` param
+- `client.image.upscale(image=..., scale=..., creativity=...)` — no `model` param
 - `client.image.edit(prompt=..., model=..., image=...)` — returns raw bytes
 - `client.image.multi_edit(prompt=..., model=..., image=..., image_2=..., image_3=..., ...)`
 - `client.image.list_styles()` → `ImageStylesResponse` (preset catalog)

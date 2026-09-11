@@ -156,40 +156,6 @@ class TestEmbeddingsCreate:
         assert request_body["user"] == "test_user_123"
 
     @pytest.mark.asyncio
-    async def test_create_with_token_list_input(
-        self, embeddings_resource, mock_client, sample_embedding_response
-    ):
-        """Test embedding creation with list of token integers."""
-        mock_client.post.return_value = sample_embedding_response
-
-        token_list = [101, 1045, 2003, 1037, 3231, 6251, 102]
-
-        result = await embeddings_resource.create(model="text-embedding-bge-m3", input=token_list)
-
-        assert result == sample_embedding_response
-
-        call_args = mock_client.post.call_args
-        request_body = call_args[1]["json_data"]
-        assert request_body["input"] == token_list
-
-    @pytest.mark.asyncio
-    async def test_create_with_token_lists_input(
-        self, embeddings_resource, mock_client, sample_batch_embedding_response
-    ):
-        """Test embedding creation with list of token lists."""
-        mock_client.post.return_value = sample_batch_embedding_response
-
-        token_lists = [[101, 1045, 2003, 102], [101, 2023, 2060, 102]]
-
-        result = await embeddings_resource.create(model="text-embedding-bge-m3", input=token_lists)
-
-        assert result == sample_batch_embedding_response
-
-        call_args = mock_client.post.call_args
-        request_body = call_args[1]["json_data"]
-        assert request_body["input"] == token_lists
-
-    @pytest.mark.asyncio
     async def test_create_with_base64_encoding(
         self, embeddings_resource, mock_client, sample_base64_embedding_response
     ):
@@ -333,47 +299,6 @@ class TestEmbeddingsValidation:
 
 class TestEmbeddingsInputTypes:
     """Test different input types and formats."""
-
-    @pytest.mark.asyncio
-    async def test_create_with_single_token_list(
-        self, embeddings_resource, mock_client, sample_embedding_response
-    ):
-        """Test embedding creation with single list of tokens."""
-        mock_client.post.return_value = sample_embedding_response
-
-        token_list = [101, 2023, 2003, 1037, 3231, 102]
-
-        result = await embeddings_resource.create(model="text-embedding-bge-m3", input=token_list)
-
-        assert result == sample_embedding_response
-
-        call_args = mock_client.post.call_args
-        request_body = call_args[1]["json_data"]
-        assert request_body["input"] == token_list
-        assert all(isinstance(token, int) for token in request_body["input"])
-
-    @pytest.mark.asyncio
-    async def test_create_with_nested_token_lists(
-        self, embeddings_resource, mock_client, sample_batch_embedding_response
-    ):
-        """Test embedding creation with nested lists of tokens."""
-        mock_client.post.return_value = sample_batch_embedding_response
-
-        nested_tokens = [
-            [101, 2023, 102],
-            [101, 2003, 1037, 102],
-            [101, 3231, 6251, 102],
-        ]
-
-        result = await embeddings_resource.create(
-            model="text-embedding-bge-m3", input=nested_tokens
-        )
-
-        assert result == sample_batch_embedding_response
-
-        call_args = mock_client.post.call_args
-        request_body = call_args[1]["json_data"]
-        assert request_body["input"] == nested_tokens
 
     @pytest.mark.asyncio
     async def test_create_mixed_input_types_in_list(
@@ -651,27 +576,6 @@ class TestEmbeddingsBatchProcessing:
         request_body = call_args[1]["json_data"]
         assert request_body["input"] == mixed_input
 
-    @pytest.mark.asyncio
-    async def test_create_varying_token_list_lengths(
-        self, embeddings_resource, mock_client, sample_batch_embedding_response
-    ):
-        """Test batch processing with token lists of varying lengths."""
-        token_lists = [
-            [101, 102],  # Short
-            [101, 2023, 2003, 1037, 102],  # Medium
-            [101] + list(range(1000, 1020)) + [102],  # Long
-            [101, 102],  # Short again
-        ]
-        mock_client.post.return_value = sample_batch_embedding_response
-
-        result = await embeddings_resource.create(model="text-embedding-bge-m3", input=token_lists)
-
-        assert result == sample_batch_embedding_response
-
-        call_args = mock_client.post.call_args
-        request_body = call_args[1]["json_data"]
-        assert request_body["input"] == token_lists
-
 
 class TestEmbeddingsRequestSerialization:
     """Test request serialization and Pydantic model handling."""
@@ -900,25 +804,6 @@ class TestEmbeddingsSpecialInputs:
         request_body = call_args[1]["json_data"]
         assert request_body["input"] == input_with_whitespace
 
-    @pytest.mark.asyncio
-    async def test_create_special_token_values(
-        self, embeddings_resource, mock_client, sample_embedding_response
-    ):
-        """Test embedding creation with special token values."""
-        mock_client.post.return_value = sample_embedding_response
-
-        special_tokens = [0, 1, 50256, 50257, 100000]  # Including special tokens
-
-        result = await embeddings_resource.create(
-            model="text-embedding-bge-m3", input=special_tokens
-        )
-
-        assert result == sample_embedding_response
-
-        call_args = mock_client.post.call_args
-        request_body = call_args[1]["json_data"]
-        assert request_body["input"] == special_tokens
-
 
 class TestEmbeddingsEdgeCases:
     """Test edge cases and robustness."""
@@ -954,44 +839,6 @@ class TestEmbeddingsEdgeCases:
         request_body = call_args[1]["json_data"]
         assert request_body["input"] == single_chars
 
-    @pytest.mark.asyncio
-    async def test_create_nested_empty_token_lists(
-        self, embeddings_resource, mock_client, sample_batch_embedding_response
-    ):
-        """Test embedding creation with nested lists containing empty lists."""
-        nested_with_empty = [
-            [101, 102],
-            [],  # Empty token list
-            [101, 2023, 102],
-        ]
-        mock_client.post.return_value = sample_batch_embedding_response
-
-        result = await embeddings_resource.create(
-            model="text-embedding-bge-m3", input=nested_with_empty
-        )
-
-        assert result == sample_batch_embedding_response
-
-        call_args = mock_client.post.call_args
-        request_body = call_args[1]["json_data"]
-        assert request_body["input"] == nested_with_empty
-
-    @pytest.mark.asyncio
-    async def test_create_large_token_values(
-        self, embeddings_resource, mock_client, sample_embedding_response
-    ):
-        """Test embedding creation with large token values."""
-        large_tokens = [100000, 999999, 50000, 75000]  # Large token IDs
-        mock_client.post.return_value = sample_embedding_response
-
-        result = await embeddings_resource.create(model="text-embedding-bge-m3", input=large_tokens)
-
-        assert result == sample_embedding_response
-
-        call_args = mock_client.post.call_args
-        request_body = call_args[1]["json_data"]
-        assert request_body["input"] == large_tokens
-
 
 class TestEmbeddingsModelValidation:
     """Test model validation scenarios."""
@@ -1019,16 +866,16 @@ class TestEmbeddingsModelValidation:
             assert "input cannot be empty" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_create_zero_input_not_empty(
+    async def test_create_falsy_text_input_not_empty(
         self, embeddings_resource, mock_client, sample_embedding_response
     ):
-        """Test that input containing zero is not considered empty."""
+        """Test that a falsy-looking text input is not considered empty."""
         mock_client.post.return_value = sample_embedding_response
 
-        # Zero as input should be valid (not empty)
+        # "0" is a non-empty string; the empty-input guard must not reject it.
         result = await embeddings_resource.create(
             model="text-embedding-bge-m3",
-            input=[0],  # Zero in list is valid
+            input=["0"],
         )
 
         assert result == sample_embedding_response
@@ -1119,3 +966,28 @@ class TestEmbeddingsPerformanceAndLimits:
 
         assert "2048 or fewer items" in str(exc_info.value)
         assert "but got 5000 items" in str(exc_info.value)
+
+
+class TestEmbeddingsTextOnlyInput:
+    """Token-ID arrays are rejected with the SDK's documented input error.
+
+    The API validates embeddings input as text only. The resource raises
+    InvalidRequestError for bad input, so a token array must surface that
+    rather than a raw Pydantic ValidationError.
+    """
+
+    @pytest.mark.asyncio
+    async def test_flat_token_array_raises_invalid_request(self, embeddings_resource, mock_client):
+        with pytest.raises(InvalidRequestError, match="text"):
+            await embeddings_resource.create(model="text-embedding-bge-m3", input=[101, 1045, 102])
+        mock_client.post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_nested_token_array_raises_invalid_request(
+        self, embeddings_resource, mock_client
+    ):
+        with pytest.raises(InvalidRequestError, match="text"):
+            await embeddings_resource.create(
+                model="text-embedding-bge-m3", input=[[101, 102], [103]]
+            )
+        mock_client.post.assert_not_called()

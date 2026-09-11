@@ -174,6 +174,7 @@ from .api import (
     RateLimitLogsResponse,
     RateLimitsData,
     RateLimitsResponse,
+    RateLimitType,
     ReasoningConfig,
     ReasoningEffortLevel,
     ReasoningSummary,
@@ -390,6 +391,7 @@ __all__ = [
     "RateLimitsData",
     "RateLimitsResponse",
     "RateLimitLogEntry",
+    "RateLimitType",
     "RateLimitLogsResponse",
     # From billing module
     "InferenceDetails",

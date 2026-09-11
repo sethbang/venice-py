@@ -99,6 +99,17 @@ class ModelCapabilities(BaseModel):
             "supportsTeeAttestation to also be true."
         ),
     )
+    supportsStyleReferences: bool | None = Field(
+        default=None,
+        description="Whether the image model accepts ``style_references``.",
+    )
+    supportsStyleReferenceStrength: bool | None = Field(
+        default=None,
+        description=(
+            "Whether per-reference ``strength`` is honoured; when false the "
+            "strength is ignored rather than rejected."
+        ),
+    )
     supportsXSearch: bool = Field(
         default=False,
         description=(
@@ -569,6 +580,17 @@ class ModelSpec(BaseModel):
         ),
     )
     traits: list[str] = Field(default_factory=list, description="Model traits")
+    uncensored: bool = Field(
+        default=False,
+        description=(
+            "Whether Venice classifies this model as uncensored, meaning it applies "
+            "minimal content-based filtering. Covers every modality. The API sends "
+            "this field only when it is true and omits it otherwise, so an absent "
+            "field is a definite 'not uncensored' — unlike the ``supports_*`` "
+            "capability flags elsewhere in this module, where ``None`` means "
+            "undeclared. Upstream providers may still apply their own filtering."
+        ),
+    )
 
     # Optional metadata that any type may grow.
     modelSource: str | None = Field(default=None, description="The source of the model")
@@ -703,6 +725,10 @@ class MusicModelSpec(ModelSpec):
     supports_force_instrumental: bool | None = Field(
         default=None,
         description="Whether the model supports the ``force_instrumental`` flag.",
+    )
+    supports_loop: bool | None = Field(
+        default=None,
+        description="Whether the model supports the ``loop`` flag.",
     )
 
     supports_language_code: bool | None = Field(

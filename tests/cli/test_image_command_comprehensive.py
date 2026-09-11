@@ -2490,10 +2490,7 @@ class TestUpscaleAsync:
                     ctx=plain_ctx,
                     input_file=str(input_file),
                     scale=2.0,
-                    enhance=True,
-                    enhance_creativity=0.5,
-                    enhance_prompt="enhance style",
-                    replication=0.8,
+                    creativity=0.02,
                     output=None,
                     save_dir=str(tmp_path),
                     open_image=False,
@@ -2526,10 +2523,7 @@ class TestUpscaleAsync:
                 ctx=plain_ctx,
                 input_file=str(input_file),
                 scale=None,
-                enhance=None,
-                enhance_creativity=None,
-                enhance_prompt=None,
-                replication=None,
+                creativity=None,
                 output=str(output_file),
                 save_dir=str(tmp_path),
                 open_image=False,
@@ -2561,10 +2555,7 @@ class TestUpscaleAsync:
                 ctx=rich_ctx,
                 input_file=str(input_file),
                 scale=2.0,
-                enhance=None,
-                enhance_creativity=None,
-                enhance_prompt=None,
-                replication=None,
+                creativity=None,
                 output=None,
                 save_dir=str(tmp_path),
                 open_image=False,
@@ -2598,10 +2589,7 @@ class TestUpscaleAsync:
                         ctx=rich_ctx,
                         input_file=str(input_file),
                         scale=None,
-                        enhance=None,
-                        enhance_creativity=None,
-                        enhance_prompt=None,
-                        replication=None,
+                        creativity=None,
                         output=None,
                         save_dir=str(tmp_path),
                         open_image=False,
@@ -2635,10 +2623,7 @@ class TestUpscaleAsync:
                         ctx=plain_ctx,
                         input_file=str(input_file),
                         scale=None,
-                        enhance=None,
-                        enhance_creativity=None,
-                        enhance_prompt=None,
-                        replication=None,
+                        creativity=None,
                         output=None,
                         save_dir=str(tmp_path),
                         open_image=False,
@@ -2670,10 +2655,7 @@ class TestUpscaleAsync:
                         ctx=plain_ctx,
                         input_file=str(input_file),
                         scale=None,
-                        enhance=None,
-                        enhance_creativity=None,
-                        enhance_prompt=None,
-                        replication=None,
+                        creativity=None,
                         output=None,
                         save_dir=str(tmp_path),
                         open_image=False,
@@ -2706,10 +2688,7 @@ class TestUpscaleAsync:
                     ctx=plain_ctx,
                     input_file=str(input_file),
                     scale=None,
-                    enhance=None,
-                    enhance_creativity=None,
-                    enhance_prompt=None,
-                    replication=None,
+                    creativity=None,
                     output=None,
                     save_dir=str(tmp_path),
                     open_image=True,
@@ -3937,3 +3916,53 @@ class TestMultiEditCommand:
         assert "model" not in kwargs
         assert "aspect_ratio" not in kwargs
         assert out_file.read_bytes() == b"RESULT"
+
+
+class TestUpscaleDeprecatedFlags:
+    """The four removed upscale flags still parse, warn, and are ignored."""
+
+    def test_flags_still_exist(self):
+        from venice_ai.cli.commands.image.upscale import upscale_image
+
+        names = {p.name for p in upscale_image.params}
+        assert {"enhance", "enhance_creativity", "enhance_prompt", "replication"} <= names
+        assert "creativity" in names
+
+    @pytest.mark.asyncio
+    async def test_deprecated_flag_warns_and_is_not_sent(self, tmp_path):
+        from venice_ai.cli.commands.image.upscale import _upscale_async
+
+        input_file = tmp_path / "in.png"
+        input_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+
+        ctx = MagicMock()
+        ctx.obj = {"plain": True}
+        ctx.exit = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.image.upscale = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n" + b"\x00" * 200)
+
+        with (
+            patch("venice_ai.cli.config.ensure_api_key", return_value="key"),
+            patch("venice_ai.cli.commands.image.upscale.VeniceClient") as MockClient,
+            patch("click.echo"),
+        ):
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cm.__aexit__ = AsyncMock(return_value=None)
+            MockClient.return_value = mock_cm
+
+            with pytest.warns(DeprecationWarning, match="creativity"):
+                await _upscale_async(
+                    ctx=ctx,
+                    input_file=str(input_file),
+                    scale=None,
+                    creativity=None,
+                    output=None,
+                    save_dir=str(tmp_path),
+                    open_image=False,
+                    enhance=True,
+                )
+
+        kwargs = mock_client.image.upscale.await_args.kwargs
+        assert "enhance" not in kwargs

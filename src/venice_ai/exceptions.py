@@ -96,6 +96,7 @@ class VeniceAPIErrorCode(StrEnum):
     API_KEY_USD_SPEND_LIMIT_EXCEEDED = "API_KEY_USD_SPEND_LIMIT_EXCEEDED"
     # 403
     UNAUTHORIZED = "UNAUTHORIZED"
+    MODEL_PRIVACY_RESTRICTED = "MODEL_PRIVACY_RESTRICTED"
     API_ACCESS_DISABLED = "API_ACCESS_DISABLED"
     X402_WALLET_MISMATCH = "X402_WALLET_MISMATCH"
     # 400
@@ -327,12 +328,31 @@ class RateLimitError(APIError):
             ``x-ratelimit-reset-requests`` header.
         cached_rate_limit_headers: Pre-extracted rate-limit headers (lowercase keys)
             for use by distributed backend state synchronisation.
+        custom_message: The API's ``customMessage``, naming which cap tripped
+            (may be ``None``). Several different limits all surface as a 429 —
+            the per-minute request cap, the per-day credit cap, and two rolling
+            30-second error budgets: failed requests, and requests asking a
+            model for a feature it does not support. They need different
+            responses, and only this message distinguishes them. An
+            unsupported-feature trip in particular will keep recurring until
+            the request itself changes, so retrying it unchanged is futile.
+        is_error_budget: Whether this 429 came from one of the two rolling
+            30-second error budgets (too many failed requests, or too many
+            requests for an unsupported feature) rather than a throughput cap.
+            Detected from the response headers: those responses set
+            ``x-ratelimit-resets`` instead of the per-window
+            ``x-ratelimit-reset-requests`` / ``-tokens``. Worth branching on,
+            because the budgets exist precisely to stop clients retrying into
+            a wall — a fast retry re-trips them, and for the failed-request
+            budget it counts against the budget again.
     """
 
     retry_after_seconds: int | None
     remaining_requests: int | None
     reset_requests_timestamp: float | None
     cached_rate_limit_headers: dict[str, str]
+    custom_message: str | None
+    is_error_budget: bool
 
     def __init__(
         self,
@@ -345,8 +365,12 @@ class RateLimitError(APIError):
         remaining_requests: int | None = None,
         reset_requests_timestamp: float | None = None,
         cached_rate_limit_headers: dict[str, str] | None = None,
+        custom_message: str | None = None,
+        is_error_budget: bool = False,
     ) -> None:
         super().__init__(message, request=request, response=response, body=body)
+        self.custom_message = custom_message
+        self.is_error_budget = is_error_budget
         self.retry_after_seconds = retry_after_seconds
         self.remaining_requests = remaining_requests
         self.reset_requests_timestamp = reset_requests_timestamp
@@ -679,6 +703,30 @@ def _parse_retry_after_header(
             return None
 
 
+#: Header that only the rolling error-budget 429s set. The per-window limits
+#: use the suffixed ``x-ratelimit-reset-requests`` / ``-tokens``, and
+#: ``/crypto/rpc`` uses the singular ``X-RateLimit-Reset``, so the plural form
+#: is what distinguishes an error-budget trip.
+_ERROR_BUDGET_HEADER = "x-ratelimit-resets"
+
+
+def _is_error_budget_response(
+    rate_limit_headers: dict[str, str] | None,
+    response: Any,
+) -> bool:
+    """Whether a 429's headers mark it as an error-budget trip."""
+    for source in (rate_limit_headers, getattr(response, "headers", None)):
+        if not source:
+            continue
+        try:
+            keys = {str(key).lower() for key in source}
+        except TypeError:  # pragma: no cover - non-iterable header mapping
+            continue
+        if _ERROR_BUDGET_HEADER in keys:
+            return True
+    return False
+
+
 def _make_status_error(
     message: str | None,
     *,
@@ -706,6 +754,7 @@ def _make_status_error(
 
     # Parse error details from response body
     error_code: str | None = None
+    custom_message: str | None = None
     if isinstance(body, dict):
         error_data = body.get("error")
         if isinstance(error_data, dict):
@@ -713,10 +762,13 @@ def _make_status_error(
             if detail:
                 err_msg = f"{base_message}: {detail}"
             error_code = error_data.get("code")
+            custom_message = error_data.get("customMessage")
         elif isinstance(error_data, str):
             err_msg = f"{base_message}: {error_data}"
         if error_code is None:
             error_code = body.get("code")
+        if custom_message is None:
+            custom_message = body.get("customMessage")
     elif isinstance(body, str) and body.strip():
         err_msg = f"{base_message}: {body}"
 
@@ -755,6 +807,8 @@ def _make_status_error(
                 remaining_requests=_safe_int_parse(remaining_requests_str),
                 reset_requests_timestamp=ms_epoch_to_seconds(_safe_float_parse(reset_requests_str)),
                 cached_rate_limit_headers=headers,
+                custom_message=custom_message,
+                is_error_budget=_is_error_budget_response(rate_limit_headers, response),
             )
             exc.code = error_code
             return exc

@@ -124,6 +124,38 @@ async def _preflight_validate_force_instrumental(
         )
 
 
+async def _preflight_validate_loop(
+    client: VeniceClient,
+    model_id: str,
+    loop: bool | None,
+) -> None:
+    """Pre-flight check ``loop`` against the model's spec.
+
+    Mirrors :func:`_preflight_validate_force_instrumental`: best-effort, only
+    raises when we can prove the request will fail. The API rejects the
+    *presence* of the field on models that don't support it, so any non-None
+    value triggers the check.
+
+    ``spec.supports_loop=None`` (capability undeclared) defers to the server —
+    that's different from a declared ``False``.
+    """
+    if loop is None:
+        return
+    try:
+        entry = await client.models.get(model_id)
+    except Exception:  # noqa: BLE001 - catalog miss => let server validate
+        return
+    spec = entry.model_spec
+    if not isinstance(spec, MusicModelSpec):
+        return
+    if spec.supports_loop is False:
+        raise ValueError(
+            f"loop is not supported by model {model_id!r}; "
+            f"omit the parameter or pick a loop-capable music model "
+            f"(check ``client.models.get(model_id).model_spec.supports_loop``)."
+        )
+
+
 class MusicJob:
     """Manages the lifecycle of an async music generation request.
 
@@ -352,6 +384,7 @@ class Music(APIResource["VeniceClient"]):
         voice: str | None = None,
         language_code: str | None = None,
         speed: float | None = None,
+        loop: bool | None = None,
     ) -> MusicQueueResponse:
         """Queue a music generation request.
 
@@ -381,6 +414,10 @@ class Music(APIResource["VeniceClient"]):
             language_code: BCP-47 language hint for the lyrics
                 (e.g. ``"en"``, ``"ja"``).
             speed: Playback-speed multiplier where supported.
+            loop: If ``True``, renders the clip so its end splices back into
+                its start without an audible seam. Only supported when
+                ``/models`` reports ``supports_loop=true``. Defaults to
+                ``None`` (model default applies).
 
         Returns:
             :class:`MusicQueueResponse` containing the ``queue_id`` to poll
@@ -397,6 +434,7 @@ class Music(APIResource["VeniceClient"]):
         validate_model_id(model, "model")
         await _preflight_validate_music_duration(self._client, model, duration_seconds)
         await _preflight_validate_force_instrumental(self._client, model, force_instrumental)
+        await _preflight_validate_loop(self._client, model, loop)
         request = MusicQueueRequest.model_validate(
             {
                 "model": model,
@@ -408,6 +446,7 @@ class Music(APIResource["VeniceClient"]):
                 "voice": voice,
                 "language_code": language_code,
                 "speed": speed,
+                "loop": loop,
             }
         )
         body = request.model_dump(exclude_none=True)
@@ -622,6 +661,7 @@ class Music(APIResource["VeniceClient"]):
         voice: str | None = None,
         language_code: str | None = None,
         speed: float | None = None,
+        loop: bool | None = None,
     ) -> MusicJob:
         """Submit a music generation and return a managed :class:`MusicJob`.
 
@@ -647,6 +687,8 @@ class Music(APIResource["VeniceClient"]):
             voice: Named voice preset for vocal-capable models.
             language_code: BCP-47 language hint for the lyrics.
             speed: Playback-speed multiplier where supported.
+            loop: If ``True``, renders the clip so its end splices back into
+                its start seamlessly. Requires ``supports_loop=true``.
 
         Returns:
             A :class:`MusicJob` ready to use as an async context manager.
@@ -685,6 +727,7 @@ class Music(APIResource["VeniceClient"]):
             voice=voice,
             language_code=language_code,
             speed=speed,
+            loop=loop,
         )
         return MusicJob(client=self._client, queue_response=queue_response)
 

@@ -172,6 +172,18 @@ def _build_consumption_limit(limit_usd, limit_diem, limit_vcu) -> "ConsumptionLi
     help="Period over which the consumption limit resets.",
 )
 @click.option(
+    "--model-privacy",
+    "model_privacy",
+    type=click.Choice(["ALL", "PRIVATE_TEXT", "PRIVATE_ONLY"]),
+    default=None,
+    help=(
+        "Restrict which models this key may call, by privacy tier. "
+        "PRIVATE_TEXT requires text and embedding models to be Private, TEE, "
+        "or E2EE; PRIVATE_ONLY requires it of every model. "
+        "Defaults to the account setting."
+    ),
+)
+@click.option(
     "--expiry",
     "expiry",
     default=None,
@@ -187,6 +199,7 @@ def create_key(
     limit_diem,
     limit_vcu,
     limit_period,
+    model_privacy,
     expiry,
     output_json,
 ):
@@ -202,6 +215,8 @@ def create_key(
 
       venice-py api-keys create --name "Capped" --limit-usd 50 --limit-period MONTH
 
+      venice-py api-keys create --name "Private" --model-privacy PRIVATE_ONLY
+
       venice-py api-keys create --name "My App" --json
     """
     asyncio.run(
@@ -213,6 +228,7 @@ def create_key(
             limit_diem=limit_diem,
             limit_vcu=limit_vcu,
             limit_period=limit_period,
+            model_privacy=model_privacy,
             expiry=expiry,
             output_json=output_json,
         )
@@ -228,6 +244,7 @@ async def _create_key_async(
     limit_diem=None,
     limit_vcu=None,
     limit_period=None,
+    model_privacy=None,
     expiry=None,
     output_json=False,
 ):
@@ -245,6 +262,7 @@ async def _create_key_async(
         apiKeyType=cast(Literal["INFERENCE", "ADMIN"], api_key_type),
         consumptionLimit=consumption_limit,
         limitPeriod=limit_period,
+        modelPrivacy=model_privacy,
         expiresAt=expiry,
     )
 

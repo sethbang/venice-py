@@ -72,6 +72,7 @@ import asyncio
 import base64
 import io
 import logging
+import warnings
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -96,6 +97,7 @@ from ..types.api import (
     ImageUpscaleRequest,
     SimpleImageGenerationRequest,
     SimpleImageGenerationResponse,
+    StyleReference,
 )
 from ..validation.validators import validate_model_id
 
@@ -367,6 +369,9 @@ class Image(APIResource["VeniceClient"]):
         lora_strength: int | None = None,
         num_images: int | None = None,
         quality: Literal["low", "medium", "high"] | None = None,
+        enhance_prompt: bool | None = None,
+        disable_prompt_optimization_thinking: bool | None = None,
+        style_references: list[StyleReference | dict] | None = None,
         resolution: str | None = None,
         return_binary: Literal[False] = ...,
         safe_mode: bool | None = None,
@@ -392,6 +397,9 @@ class Image(APIResource["VeniceClient"]):
         lora_strength: int | None = None,
         num_images: int | None = None,
         quality: Literal["low", "medium", "high"] | None = None,
+        enhance_prompt: bool | None = None,
+        disable_prompt_optimization_thinking: bool | None = None,
+        style_references: list[StyleReference | dict] | None = None,
         resolution: str | None = None,
         return_binary: Literal[True] = ...,
         safe_mode: bool | None = None,
@@ -416,6 +424,9 @@ class Image(APIResource["VeniceClient"]):
         lora_strength: int | None = None,
         num_images: int | None = None,
         quality: Literal["low", "medium", "high"] | None = None,
+        enhance_prompt: bool | None = None,
+        disable_prompt_optimization_thinking: bool | None = None,
+        style_references: list[StyleReference | dict] | None = None,
         resolution: str | None = None,
         return_binary: bool | None = None,
         safe_mode: bool | None = None,
@@ -518,6 +529,14 @@ class Image(APIResource["VeniceClient"]):
             lora_strength=lora_strength,
             variants=num_images,
             quality=quality,
+            enhance_prompt=enhance_prompt,
+            disable_prompt_optimization_thinking=disable_prompt_optimization_thinking,
+            # The public signature also takes plain dicts for convenience;
+            # pydantic coerces them (and rejects malformed ones) on construction.
+            style_references=cast(
+                "list[StyleReference] | None",
+                style_references,
+            ),
             resolution=resolution,
             return_binary=return_binary,
             safe_mode=safe_mode,
@@ -571,6 +590,9 @@ class Image(APIResource["VeniceClient"]):
         lora_strength: int | None = None,
         num_images: int | None = None,
         quality: Literal["low", "medium", "high"] | None = None,
+        enhance_prompt: bool | None = None,
+        disable_prompt_optimization_thinking: bool | None = None,
+        style_references: list[StyleReference | dict] | None = None,
         resolution: str | None = None,
         return_binary: bool | None = None,
         safe_mode: bool | None = None,
@@ -610,6 +632,9 @@ class Image(APIResource["VeniceClient"]):
             "lora_strength": lora_strength,
             "num_images": num_images,
             "quality": quality,
+            "enhance_prompt": enhance_prompt,
+            "disable_prompt_optimization_thinking": disable_prompt_optimization_thinking,
+            "style_references": style_references,
             "resolution": resolution,
             "return_binary": return_binary,
             "safe_mode": safe_mode,
@@ -627,12 +652,13 @@ class Image(APIResource["VeniceClient"]):
         self,
         *,
         image: str | bytes | BinaryIO | Path,
+        scale: float | None = None,
+        creativity: float | None = None,
+        timeout: float | aiohttp.ClientTimeout | None = None,
         enhance: bool | None = None,
         enhanceCreativity: float | None = None,
         enhancePrompt: str | None = None,
         replication: float | None = None,
-        scale: float | None = None,
-        timeout: float | aiohttp.ClientTimeout | None = None,
     ) -> bytes:
         """
         Upscale an image using Venice AI's image upscaling API asynchronously.
@@ -644,16 +670,14 @@ class Image(APIResource["VeniceClient"]):
         :param image: Image to upscale. Can be a file path (string or :class:`pathlib.Path`),
             raw image bytes, or a file-like object.
 
-        :param enhance: Optional. Whether to enhance image quality during upscaling.
-        :type enhance: Optional[bool]
-        :param enhanceCreativity: Optional. Creativity level for enhancement (0.0-1.0, where 1.0 is most creative).
-        :type enhanceCreativity: Optional[float]
-        :param enhancePrompt: Optional. Text to image style to apply during prompt enhancement.
-        :type enhancePrompt: Optional[str]
-        :param replication: Optional. Replication factor for matching the original image (0.0-1.0, where 1.0 matches exactly).
-        :type replication: Optional[float]
-        :param scale: Optional. Scaling factor for upscaling (e.g., ``2.0`` for 2x upscaling).
+        :param scale: Optional. Scaling factor for upscaling. Must be ``2`` or
+                      ``4``; ``1`` is rejected. Defaults to ``2``.
         :type scale: Optional[float]
+        :param creativity: Optional. How much detail and texture the upscaler
+                           adds — higher adds more, lower stays closer to the
+                           source. The server clamps this to ``0``-``0.02``
+                           (default ``0.01``).
+        :type creativity: Optional[float]
         :param timeout: Optional. Request timeout configuration.
         :type timeout: Optional[Union[float, aiohttp.ClientTimeout]]
 
@@ -698,18 +722,29 @@ class Image(APIResource["VeniceClient"]):
         image_b64 = base64.b64encode(image_content).decode("utf-8")
 
         # Create and validate the Pydantic request model
-        # Build kwargs, omitting enhance when None so the model default (True) applies
+        _removed = {
+            "enhance": enhance,
+            "enhanceCreativity": enhanceCreativity,
+            "enhancePrompt": enhancePrompt,
+            "replication": replication,
+        }
+        _supplied = [name for name, value in _removed.items() if value is not None]
+        if _supplied:
+            warnings.warn(
+                f"{', '.join(_supplied)} no longer affect POST /image/upscale — Venice "
+                "removed the fields server-side, so they have had no effect for some time "
+                "and are now ignored. Use `creativity` instead (the server clamps it to "
+                "0-0.02; note that is a different range to enhanceCreativity's 0-1). "
+                "These parameters are removed in 3.0.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         upscale_kwargs: dict[str, Any] = {"image": image_b64}
         if scale is not None:
             upscale_kwargs["scale"] = scale
-        if enhance is not None:
-            upscale_kwargs["enhance"] = enhance
-        if enhanceCreativity is not None:
-            upscale_kwargs["enhanceCreativity"] = enhanceCreativity
-        if enhancePrompt is not None:
-            upscale_kwargs["enhancePrompt"] = enhancePrompt
-        if replication is not None:
-            upscale_kwargs["replication"] = replication
+        if creativity is not None:
+            upscale_kwargs["creativity"] = creativity
         upscale_request = ImageUpscaleRequest(**upscale_kwargs)
 
         ext, mime_type = detect_image_format(image_content)
@@ -770,6 +805,8 @@ class Image(APIResource["VeniceClient"]):
         resolution: str | None = None,
         output_format: Literal["jpeg", "png", "webp"] | None = None,
         quality: Literal["low", "medium", "high"] | None = None,
+        enhance_prompt: bool | None = None,
+        disable_prompt_optimization_thinking: bool | None = None,
         timeout: float | aiohttp.ClientTimeout | None = None,
     ) -> bytes:
         """
@@ -881,6 +918,8 @@ class Image(APIResource["VeniceClient"]):
             resolution=resolution,
             output_format=output_format,
             quality=quality,
+            enhance_prompt=enhance_prompt,
+            disable_prompt_optimization_thinking=disable_prompt_optimization_thinking,
         )
         payload = edit_request.model_dump(exclude_none=True)
 
@@ -1073,6 +1112,8 @@ class Image(APIResource["VeniceClient"]):
         aspect_ratio: str | None = None,
         output_format: Literal["jpeg", "png", "webp"] | None = None,
         quality: Literal["low", "medium", "high"] | None = None,
+        enhance_prompt: bool | None = None,
+        disable_prompt_optimization_thinking: bool | None = None,
     ) -> bytes:
         """Edit an image using up to 3 layered inputs (POST /image/multi-edit).
 
@@ -1187,6 +1228,10 @@ class Image(APIResource["VeniceClient"]):
             payload["output_format"] = output_format
         if quality is not None:
             payload["quality"] = quality
+        if enhance_prompt is not None:
+            payload["enhance_prompt"] = enhance_prompt
+        if disable_prompt_optimization_thinking is not None:
+            payload["disable_prompt_optimization_thinking"] = disable_prompt_optimization_thinking
 
         response = await self._client._request(
             method="POST",

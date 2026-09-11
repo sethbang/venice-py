@@ -4,13 +4,36 @@ Image generation, editing, and upscaling request models for Venice.ai API.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from ...identifiers import ModelId
 
 # ============================================================================
 # Image Generation Request Models
 # ============================================================================
+
+
+class StyleReference(BaseModel):
+    """One style reference image guiding the aesthetic of a generated image."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    image: str = Field(
+        ...,
+        description=(
+            "Style reference as a base64 string (raw or data URI) or an "
+            "http(s) URL. Must be under 8MB."
+        ),
+    )
+    strength: float | None = Field(
+        None,
+        ge=0.1,
+        le=1,
+        description=(
+            "How strongly the reference guides the output (0.1-1, default 0.5). "
+            "Ignored by models where ``supportsStyleReferenceStrength`` is false."
+        ),
+    )
 
 
 class ImageGenerationRequest(BaseModel):
@@ -96,6 +119,32 @@ class ImageGenerationRequest(BaseModel):
         ),
     )
 
+    enhance_prompt: bool | None = Field(
+        None,
+        description=(
+            "Rewrite the prompt before generation to add clarifying visual detail. "
+            "Charges additional credits when a rewrite happens and adds up to ~30s "
+            "before generation starts. The rewritten prompt comes back URL-encoded "
+            "in the ``x-venice-enhanced-prompt`` response header, exposed as "
+            "``ImageGenerationResponse.enhanced_prompt``."
+        ),
+    )
+    disable_prompt_optimization_thinking: bool | None = Field(
+        None,
+        description=(
+            "Skip the model's prompt-optimization thinking step for faster "
+            "generation. Supported only by models that advertise it; ignored "
+            "rather than rejected by the rest. Omit for the model default."
+        ),
+    )
+    style_references: list[StyleReference] | None = Field(
+        None,
+        description=(
+            "Style reference images guiding the aesthetic of the output. Only "
+            "supported by models with ``supportsStyleReferences``."
+        ),
+    )
+
 
 class SimpleImageGenerationRequest(BaseModel):
     """OpenAI-compatible image generation request"""
@@ -155,42 +204,34 @@ class SimpleImageGenerationRequest(BaseModel):
 
 
 class ImageUpscaleRequest(BaseModel):
-    """Image upscale request"""
+    """Image upscale request.
+
+    ``POST /image/upscale`` takes exactly three fields. The older ``enhance``,
+    ``enhancePrompt``, ``enhanceCreativity`` and ``replication`` fields were
+    removed server-side and are no longer sent.
+    """
 
     image: str | Any = Field(..., description="Image to upscale (file upload or base64 string)")
 
-    # Upscaling parameters
-    scale: float | None = Field(2, ge=1, le=4, description="Scale factor for upscaling")
-    enhance: bool = Field(False, description="Whether to enhance during upscaling")
-
-    # Enhancement parameters
-    enhanceCreativity: float | None = Field(
-        0.5, ge=0, le=1, description="How much enhancement AI can change image"
+    scale: float | None = Field(
+        2,
+        ge=2,
+        le=4,
+        description=(
+            "Scale factor for upscaling. Must be 2 or 4 — 1 is rejected. A scale "
+            "of 4 on a large image is dynamically reduced to keep the result "
+            "within the maximum size limit."
+        ),
     )
-    enhancePrompt: str | None = Field(
-        None, max_length=1500, description="Style to apply during enhancement"
+    creativity: float | None = Field(
+        None,
+        description=(
+            "How much detail and texture the upscaler adds; higher values add "
+            "more, lower stay closer to the source. The server clamps this to "
+            "0-0.02 (default 0.01) rather than rejecting out-of-range values, so "
+            "the SDK forwards whatever you pass."
+        ),
     )
-    replication: float | None = Field(
-        0.35, ge=0, le=1, description="How strongly to preserve original lines/noise"
-    )
-
-    @field_validator("enhance", mode="before")
-    @classmethod
-    def coerce_enhance_to_bool(cls, v: Any) -> bool:
-        """Coerce string values to bool for API compatibility."""
-        if isinstance(v, str):
-            return v.lower() in ("true", "1", "yes")
-        return bool(v)
-
-    @field_validator("scale", "enhance")
-    @classmethod
-    def validate_scale_enhance_combination(cls, v: Any, info: ValidationInfo) -> Any:
-        scale = info.data.get("scale", 2)
-        enhance = info.data.get("enhance", False)
-
-        if scale == 1 and not enhance:
-            raise ValueError("Scale of 1 requires enhance to be true")
-        return v
 
 
 class ImageEditRequest(BaseModel):
@@ -247,6 +288,25 @@ class ImageEditRequest(BaseModel):
             "Output quality for quality-aware edit models (e.g. gpt-image-2-edit) "
             "per the edit docs. Model-dependent and sent only when set; omit for "
             "models that don't support it."
+        ),
+    )
+
+    enhance_prompt: bool | None = Field(
+        None,
+        description=(
+            "Rewrite the prompt before generation to add clarifying visual detail. "
+            "Charges additional credits when a rewrite happens and adds up to ~30s "
+            "before generation starts. The rewritten prompt comes back URL-encoded "
+            "in the ``x-venice-enhanced-prompt`` response header, exposed as "
+            "``ImageGenerationResponse.enhanced_prompt``."
+        ),
+    )
+    disable_prompt_optimization_thinking: bool | None = Field(
+        None,
+        description=(
+            "Skip the model's prompt-optimization thinking step for faster "
+            "generation. Supported only by models that advertise it; ignored "
+            "rather than rejected by the rest. Omit for the model default."
         ),
     )
 
@@ -326,10 +386,29 @@ class ImageMultiEditRequest(BaseModel):
         ),
     )
 
+    # ============================================================================
+    # Export All Models
+    # ============================================================================
 
-# ============================================================================
-# Export All Models
-# ============================================================================
+    enhance_prompt: bool | None = Field(
+        None,
+        description=(
+            "Rewrite the prompt before generation to add clarifying visual detail. "
+            "Charges additional credits when a rewrite happens and adds up to ~30s "
+            "before generation starts. The rewritten prompt comes back URL-encoded "
+            "in the ``x-venice-enhanced-prompt`` response header, exposed as "
+            "``ImageGenerationResponse.enhanced_prompt``."
+        ),
+    )
+    disable_prompt_optimization_thinking: bool | None = Field(
+        None,
+        description=(
+            "Skip the model's prompt-optimization thinking step for faster "
+            "generation. Supported only by models that advertise it; ignored "
+            "rather than rejected by the rest. Omit for the model default."
+        ),
+    )
+
 
 __all__ = [
     "ImageGenerationRequest",

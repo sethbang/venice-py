@@ -41,3 +41,26 @@ class TestEmbeddingsValidateInput:
         items = [f"text_{i}" for i in range(2048)]
         req = EmbeddingsRequest(input=items, model="text-embedding-ada-002", **_OPTS)
         assert len(req.input) == 2048
+
+
+class TestEmbeddingsTextOnly:
+    """Token-ID array inputs are rejected client-side.
+
+    The API stopped accepting token-ID arrays for embeddings; requests that
+    pass them return a validation error rather than failing upstream, so the
+    SDK fails fast with a clearer message than a server round-trip gives.
+    """
+
+    def test_flat_token_id_array_raises(self):
+        with pytest.raises(ValidationError, match="text"):
+            EmbeddingsRequest(input=[1, 2, 3], model="text-embedding-bge-m3", **_OPTS)  # type: ignore[arg-type]
+
+    def test_nested_token_id_array_raises(self):
+        with pytest.raises(ValidationError, match="text"):
+            EmbeddingsRequest(input=[[1, 2], [3, 4]], model="text-embedding-bge-m3", **_OPTS)  # type: ignore[arg-type]
+
+    def test_string_list_still_accepted(self):
+        request = EmbeddingsRequest(
+            input=["hello", "world"], model="text-embedding-bge-m3", **_OPTS
+        )
+        assert request.input == ["hello", "world"]

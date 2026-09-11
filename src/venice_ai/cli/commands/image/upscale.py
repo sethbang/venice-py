@@ -3,6 +3,7 @@ Image upscaling command.
 """
 
 import asyncio
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -26,15 +27,34 @@ from ...utils import (
 @click.command(name="upscale")
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option("--scale", type=float, default=None, help="Scale factor (e.g. 2.0 for 2x)")
-@click.option("--enhance/--no-enhance", default=None, help="Apply AI enhancement during upscaling")
+@click.option(
+    "--creativity",
+    type=float,
+    default=None,
+    help="Detail/texture the upscaler adds; server clamps to 0-0.02 (default 0.01)",
+)
+@click.option(
+    "--enhance/--no-enhance",
+    default=None,
+    help="[deprecated] No longer supported by the API; ignored. Use --creativity.",
+)
 @click.option(
     "--enhance-creativity",
     type=float,
     default=None,
-    help="Enhancement creativity (0.0-1.0)",
+    help="[deprecated] No longer supported by the API; ignored. Use --creativity.",
 )
-@click.option("--enhance-prompt", default=None, help="Style prompt for enhancement")
-@click.option("--replication", type=float, default=None, help="Replication factor (0.0-1.0)")
+@click.option(
+    "--enhance-prompt",
+    default=None,
+    help="[deprecated] No longer supported by the API; ignored.",
+)
+@click.option(
+    "--replication",
+    type=float,
+    default=None,
+    help="[deprecated] No longer supported by the API; ignored.",
+)
 @click.option("--output", "-o", default=None, help="Output file path")
 @click.option(
     "--save-dir",
@@ -47,6 +67,7 @@ def upscale_image(
     ctx: click.Context,
     input_file: str,
     scale: float | None,
+    creativity: float | None,
     enhance: bool | None,
     enhance_creativity: float | None,
     enhance_prompt: str | None,
@@ -61,20 +82,21 @@ def upscale_image(
 
         venice-py image upscale photo.jpg --scale 2
 
-        venice-py image upscale photo.png --scale 4 --enhance --save-dir ./upscaled
+        venice-py image upscale photo.png --scale 4 --creativity 0.02 --save-dir ./upscaled
     """
     asyncio.run(
         _upscale_async(
             ctx,
             input_file,
             scale,
-            enhance,
-            enhance_creativity,
-            enhance_prompt,
-            replication,
+            creativity,
             output,
             save_dir,
             open_image,
+            enhance=enhance,
+            enhance_creativity=enhance_creativity,
+            enhance_prompt=enhance_prompt,
+            replication=replication,
         )
     )
 
@@ -83,15 +105,32 @@ async def _upscale_async(
     ctx: click.Context,
     input_file: str,
     scale: float | None,
-    enhance: bool | None,
-    enhance_creativity: float | None,
-    enhance_prompt: str | None,
-    replication: float | None,
+    creativity: float | None,
     output: str | None,
     save_dir: str,
     open_image: bool,
+    *,
+    enhance: bool | None = None,
+    enhance_creativity: float | None = None,
+    enhance_prompt: str | None = None,
+    replication: float | None = None,
 ) -> None:
     """Async implementation of image upscaling"""
+    _removed = {
+        "--enhance": enhance,
+        "--enhance-creativity": enhance_creativity,
+        "--enhance-prompt": enhance_prompt,
+        "--replication": replication,
+    }
+    _supplied = [name for name, value in _removed.items() if value is not None]
+    if _supplied:
+        warnings.warn(
+            f"{', '.join(_supplied)} no longer affect upscaling — Venice removed the "
+            "fields server-side, so they are ignored. Use --creativity instead "
+            "(clamped to 0-0.02). These flags are removed in 3.0.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     plain = ctx.obj.get("plain", False) or is_plain_mode()
 
     input_path = Path(input_file)
@@ -102,14 +141,8 @@ async def _upscale_async(
     upscale_kwargs: dict[str, Any] = {"image": str(input_path)}
     if scale is not None:
         upscale_kwargs["scale"] = scale
-    if enhance is not None:
-        upscale_kwargs["enhance"] = enhance
-    if enhance_creativity is not None:
-        upscale_kwargs["enhanceCreativity"] = enhance_creativity
-    if enhance_prompt is not None:
-        upscale_kwargs["enhancePrompt"] = enhance_prompt
-    if replication is not None:
-        upscale_kwargs["replication"] = replication
+    if creativity is not None:
+        upscale_kwargs["creativity"] = creativity
 
     if plain:
         click.echo(f"Upscaling: {input_path}")

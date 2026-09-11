@@ -87,7 +87,7 @@ async def basic_upscaling() -> bool:
             # parameter is available on image.edit() (see image_editing.py).
             upscaled_bytes = await client.image.upscale(
                 image=base_image_path,
-                scale=2.0,
+                scale=2,
                 timeout=120.0,  # seconds; raise for very large images
             )
 
@@ -121,13 +121,13 @@ async def basic_upscaling() -> bool:
             return False
 
 
-async def upscaling_with_enhancement() -> bool:
-    """Demonstrate upscaling with AI enhancement.
+async def upscaling_with_added_detail() -> bool:
+    """Demonstrate upscaling with added detail via ``creativity``.
 
     Returns ``True`` on success, ``False`` if the sample image or the upscale
     call failed.
     """
-    print("\n✨ Upscaling with Enhancement")
+    print("\n✨ Upscaling with Added Detail")
     print("-" * 40)
 
     # Generate a sample image
@@ -137,13 +137,13 @@ async def upscaling_with_enhancement() -> bool:
 
     async with VeniceClient() as client:
         try:
-            print("\n🎨 Upscaling with AI enhancement...")
+            print("\n🎨 Upscaling with extra detail...")
 
-            # Upscale with enhancement
+            # `creativity` is the only tuning knob; the server clamps it to 0-0.02.
             enhanced_bytes = await client.image.upscale(
                 image=base_image_path,
-                scale=2.0,
-                enhance=True,
+                scale=2,
+                creativity=0.02,
             )
 
             if not isinstance(enhanced_bytes, bytes):
@@ -156,10 +156,10 @@ async def upscaling_with_enhancement() -> bool:
             with open(output_path, "wb") as f:
                 f.write(enhanced_bytes)
 
-            print("✅ Enhanced upscaling complete!")
+            print("✅ Upscaling complete!")
             print(f"💾 Saved to: {output_path}")
             print(f"📏 Size: {len(enhanced_bytes)} bytes")
-            print("🎨 AI enhancement applied for better quality")
+            print("🎨 Maximum creativity applied for extra detail")
 
             return True
 
@@ -168,13 +168,13 @@ async def upscaling_with_enhancement() -> bool:
             return False
 
 
-async def creative_enhancement() -> bool:
-    """Demonstrate creative enhancement with custom prompts.
+async def creativity_sweep() -> bool:
+    """Compare the upscaler's ``creativity`` settings side by side.
 
-    Returns ``True`` only if every enhancement style succeeded; ``False`` if
-    the sample image failed or any individual enhancement failed.
+    Returns ``True`` only if every setting succeeded; ``False`` if the sample
+    image failed or any individual upscale failed.
     """
-    print("\n🎭 Creative Enhancement with Prompts")
+    print("\n🎭 Creativity Sweep")
     print("-" * 40)
 
     # Generate a sample image
@@ -186,36 +186,23 @@ async def creative_enhancement() -> bool:
     async with VeniceClient() as client:
         try:
             # Different enhancement styles with more distinct characteristics
+            # The endpoint takes no style prompt — `creativity` is the whole
+            # dial, and the server clamps it to 0-0.02.
             enhancements = [
-                {
-                    "prompt": "increase saturation and make colors more vibrant and vivid, enhance contrast",
-                    "creativity": 0.6,
-                    "name": "vibrant",
-                },
-                {
-                    "prompt": "add fine details, textures, and sharpness, make everything crisp and clear",
-                    "creativity": 0.4,
-                    "name": "detailed",
-                },
-                {
-                    "prompt": "dramatic cinematic lighting with strong shadows and golden highlights",
-                    "creativity": 0.8,
-                    "name": "dramatic",
-                },
+                {"creativity": 0.0, "name": "faithful"},
+                {"creativity": 0.01, "name": "default"},
+                {"creativity": 0.02, "name": "detailed"},
             ]
 
             for enhancement in enhancements:
-                print(f"\n🎨 Enhancement: {enhancement['name']}")
-                print(f"   Prompt: {enhancement['prompt']}")
+                print(f"\n🎨 Setting: {enhancement['name']}")
                 print(f"   Creativity: {enhancement['creativity']}")
 
                 try:
                     enhanced_bytes = await client.image.upscale(
                         image=base_image_path,
-                        scale=2.0,
-                        enhance=True,
-                        enhanceCreativity=enhancement["creativity"],
-                        enhancePrompt=enhancement["prompt"],
+                        scale=2,
+                        creativity=enhancement["creativity"],
                     )
 
                     if not isinstance(enhanced_bytes, bytes):
@@ -301,8 +288,7 @@ async def batch_upscaling() -> bool:
                 try:
                     upscaled_bytes = await client.image.upscale(
                         image=path,
-                        scale=2.0,
-                        enhance=True,
+                        scale=2,
                     )
 
                     if not isinstance(upscaled_bytes, bytes):
@@ -434,8 +420,7 @@ async def upscale_from_bytes() -> bool:
 
             upscaled_bytes = await client.image.upscale(
                 image=image_bytes,  # Pass bytes directly
-                scale=2.0,
-                enhance=True,
+                scale=2,
             )
 
             if not isinstance(upscaled_bytes, bytes):
@@ -472,8 +457,8 @@ async def main() -> int:
 
     results: list[tuple[str, bool]] = [
         ("basic_upscaling", await basic_upscaling()),
-        ("upscaling_with_enhancement", await upscaling_with_enhancement()),
-        ("creative_enhancement", await creative_enhancement()),
+        ("upscaling_with_added_detail", await upscaling_with_added_detail()),
+        ("creativity_sweep", await creativity_sweep()),
         ("batch_upscaling", await batch_upscaling()),
         ("different_scale_factors", await different_scale_factors()),
         ("upscale_from_bytes", await upscale_from_bytes()),

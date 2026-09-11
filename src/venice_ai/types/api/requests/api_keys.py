@@ -20,6 +20,12 @@ class CreateApiKeyRequest(BaseModel):
     apiKeyType: Literal["INFERENCE", "ADMIN"] = Field(..., description="API key type")
     description: str = Field(..., description="API key description")
     consumptionLimit: ConsumptionLimit | None = Field(None, description="Spending limits")
+    modelPrivacy: Literal["ALL", "PRIVATE_TEXT", "PRIVATE_ONLY"] | None = Field(
+        default=None,
+        description=(
+            "Which models this key may call, by privacy tier. ``ALL`` allows every model. ``PRIVATE_TEXT`` requires text and embedding models to be Private, TEE, or E2EE while other modalities may be Anonymous or Private. ``PRIVATE_ONLY`` requires every model to be Private, TEE, or E2EE; Anonymous models are rejected. Omit to let the account default apply."
+        ),
+    )
     limitPeriod: Literal["EPOCH", "MONTH", "LIFETIME"] | None = Field(
         default=None, description="Period over which the consumption limit resets"
     )
@@ -44,6 +50,16 @@ class UpdateApiKeyRequest(BaseModel):
     expiresAt: str | None = Field(default=None, description="New expiration date (ISO 8601)")
     consumptionLimit: ConsumptionLimit | None = Field(
         default=None, description="Epoch consumption limits"
+    )
+    modelPrivacy: Literal["ALL", "PRIVATE_TEXT", "PRIVATE_ONLY"] | None = Field(
+        default=None,
+        description=(
+            "Which models this key may call, by privacy tier. ``ALL`` allows every "
+            "model. ``PRIVATE_TEXT`` requires text and embedding models to be "
+            "Private, TEE, or E2EE while other modalities may be Anonymous or "
+            "Private. ``PRIVATE_ONLY`` requires every model to be Private, TEE, or "
+            "E2EE; Anonymous models are rejected. Omit to let the account default apply."
+        ),
     )
     limitPeriod: Literal["EPOCH", "MONTH", "LIFETIME"] | None = Field(
         default=None, description="Period over which the consumption limit resets"
@@ -70,6 +86,16 @@ class Web3CreateApiKeyRequest(BaseModel):
     # Optional parameters
     description: str | None = Field("Web3 API Key", description="API key description")
     consumptionLimit: ConsumptionLimit | None = Field(None, description="Spending limits")
+    modelPrivacy: Literal["ALL", "PRIVATE_TEXT", "PRIVATE_ONLY"] | None = Field(
+        default=None,
+        description=(
+            "Which models this key may call, by privacy tier. ``ALL`` allows every "
+            "model. ``PRIVATE_TEXT`` requires text and embedding models to be "
+            "Private, TEE, or E2EE while other modalities may be Anonymous or "
+            "Private. ``PRIVATE_ONLY`` requires every model to be Private, TEE, or "
+            "E2EE; Anonymous models are rejected. Omit to let the account default apply."
+        ),
+    )
     limitPeriod: Literal["EPOCH", "MONTH", "LIFETIME"] | None = Field(
         default=None, description="Period over which the consumption limit resets"
     )

@@ -9,7 +9,7 @@ making them essential for modern natural language processing applications.
 Key Features:
     - **Text Embedding Generation**: Convert text into dense vector representations
     - **Batch Processing**: Generate embeddings for multiple texts in a single API call
-    - **Multiple Input Formats**: Support for text strings, token arrays, and mixed formats
+    - **Flexible Text Input**: Support for a single string or a batch of strings
     - **Configurable Dimensions**: Adjust embedding dimensions for performance optimization
     - **Format Control**: Choose between float arrays and base64-encoded representations
     - **Asynchronous Operations**: Full async/await support for scalable applications
@@ -94,7 +94,7 @@ class Embeddings(APIResource["VeniceClient"]):
         self,
         *,
         model: str,
-        input: str | list[str] | list[int] | list[list[int]],
+        input: str | list[str],
         dimensions: int | None = None,
         encoding_format: Literal["float", "base64"] | None = None,
         user: str | None = None,
@@ -112,10 +112,11 @@ class Embeddings(APIResource["VeniceClient"]):
             one, since available models change over time.
         :type model: str
         :param input: The input text(s) to generate embeddings for. Can be a single
-            string, a list of strings for batch processing, a list of token integers,
-            or a list of token lists. For batch processing, all inputs will be
+            string or a list of strings for batch processing. Token-ID arrays are
+            not accepted — the API validates embeddings input as text only.
+            For batch processing, all inputs will be
             processed together in a single API call.
-        :type input: Union[str, List[str], List[int], List[List[int]]]
+        :type input: Union[str, List[str]]
         :param dimensions: The number of dimensions for the output embeddings.
             If not specified, uses the model's default dimensionality. Some models
             support reducing dimensions for efficiency.
@@ -217,6 +218,15 @@ class Embeddings(APIResource["VeniceClient"]):
         if not input:  # Handles empty string and empty list
             raise InvalidRequestError(
                 "input cannot be empty.", request=None, response=None, body=None
+            )
+
+        if isinstance(input, list) and any(not isinstance(item, str) for item in input):
+            raise InvalidRequestError(
+                "input must be text. Token-ID arrays are not accepted — "
+                "pass the source text instead.",
+                request=None,
+                response=None,
+                body=None,
             )
 
         # Validate array length constraint

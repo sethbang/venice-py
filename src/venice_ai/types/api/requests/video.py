@@ -15,7 +15,7 @@ NOT hardcoded validators. Each model supports different subsets.
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def _validate_media_url(v: str) -> str:
@@ -61,6 +61,22 @@ class VideoElement(BaseModel):
         return v
 
 
+class VideoKeyframe(BaseModel):
+    """One keyframe image pinned to a frame position in the generated video."""
+
+    model_config = ConfigDict(extra="allow")
+
+    image_url: str = Field(..., description="Keyframe image as a URL or data URL.")
+    frame_index: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "Frame position in the generated 24 fps video. Must be unique across "
+            "keyframes and no greater than ``duration × 24``."
+        ),
+    )
+
+
 class SeedanceConsents(BaseModel):
     """Seedance face-media consent attestations.
 
@@ -102,13 +118,13 @@ class VideoRequestBase(BaseModel):
 
     model: str = Field(
         ...,
-        description="Video model ID (e.g., 'wan-2.6-text-to-video', 'ltx-2-fast-image-to-video')",
+        description="Video model ID (e.g., 'wan-2.6-text-to-video', 'wan-3-0-prime-image-to-video')",
     )
     prompt: str = Field(
         ...,
         min_length=1,
-        max_length=10000,
-        description="Text prompt for video generation (max 10000 chars on newer models)",
+        max_length=20000,
+        description="Text prompt for video generation (max 20000 chars on newer models)",
     )
     duration: str = Field(
         ...,
@@ -116,10 +132,10 @@ class VideoRequestBase(BaseModel):
     )
     negative_prompt: str | None = Field(
         None,
-        max_length=10000,
+        max_length=20000,
         description=(
             "Optional negative prompt. Per-model max length varies (default 2500, "
-            "up to 10000). The API has no default — omit to skip."
+            "up to 20000). The API has no default — omit to skip."
         ),
     )
     resolution: str | None = Field(
@@ -204,6 +220,98 @@ class VideoRequestBase(BaseModel):
         description=(
             "Up to 4 scene reference images for advanced element-aware models. Reference "
             "in prompt as @Image1, @Image2, etc."
+        ),
+    )
+    omni_reference_task_type: Literal["auto", "reference", "edit", "extend"] | None = Field(
+        None,
+        description=(
+            "Seedance 2.5 reference-to-video task-type hint forwarded to BytePlus. "
+            "Pre-guides the classification the model would otherwise infer from the "
+            "prompt; ``edit`` pairs with a source-matched ``duration``."
+        ),
+    )
+    reference_document_urls: list[str] | None = Field(
+        None,
+        max_length=1,
+        description=(
+            "For models with document / webpage Omni-Reference (Wan 3.0), up to 1 "
+            "URL or data URL. Venice fetches it and forwards it as a file (<=100 MB)."
+        ),
+    )
+    keyframes: list[VideoKeyframe] | None = Field(
+        None,
+        max_length=10,
+        description=(
+            "For keyframe-driven models: up to 10 images pinned to frame positions "
+            "in the generated 24 fps video."
+        ),
+    )
+
+    # ---- Enhancement (Topaz-style) models only -----------------------------
+    enhancement_model: str | None = Field(
+        None,
+        description=(
+            "Provider-side enhancement model. Allowed values are published per "
+            "model under ``constraints.topaz.models`` on ``GET /models``."
+        ),
+    )
+    compression: float | None = Field(
+        None, ge=0, le=1, description="Compression-artifact removal level (0.0-1.0)."
+    )
+    creativity: float | None = Field(
+        None, ge=0, le=1, description="How much new detail the model invents (0.0-1.0)."
+    )
+    grain: float | None = Field(None, ge=0, le=0.1, description="Film grain amount (0.0-0.1).")
+    halo: float | None = Field(None, ge=0, le=1, description="Halo reduction level (0.0-1.0).")
+    noise: float | None = Field(None, ge=0, le=1, description="Noise reduction level (0.0-1.0).")
+    realism: float | None = Field(
+        None, ge=0, le=1, description="Bias generated detail toward photorealism (0.0-1.0)."
+    )
+    recover_detail: float | None = Field(
+        None, ge=0, le=1, description="Recover original detail level (0.0-1.0)."
+    )
+    sharp: float | None = Field(
+        None,
+        ge=0,
+        le=1,
+        description="Output sharpness (0.0 softens, 0.5 neutral, 1.0 strong).",
+    )
+    softness: float | None = Field(
+        None, ge=1, le=5, description="Softness level (1 sharpest to 5 softest)."
+    )
+    h264_output: bool | None = Field(None, description="Output H.264 instead of the default H.265.")
+    output_format: Literal["mp4", "prores"] | None = Field(
+        None,
+        description=(
+            "For SDR-to-HDR enhancement: output container. ``mp4`` is 10-bit H265 "
+            "HDR10, ``prores`` is 10-bit ProRes."
+        ),
+    )
+    target_fps: int | None = Field(
+        None,
+        ge=16,
+        le=120,
+        description=(
+            "Target FPS for frame interpolation (16-120). Affects price: doubles it "
+            "on upscaling endpoints at >=48, and scales linearly on interpolation."
+        ),
+    )
+    slowdown_factor: Literal[1, 2, 4, 8] | None = Field(
+        None,
+        description=(
+            "Slow-motion factor for frame interpolation: 2 makes the output twice "
+            "as long at the target FPS, up to 8x. Multiplies the billed duration."
+        ),
+    )
+
+    bitrate_mode: Literal["standard", "high"] | None = Field(
+        None,
+        description=(
+            "Output encode bitrate. ``high`` is a higher-quality, larger-file "
+            "encode; omitting the field is equivalent to ``standard``. Supported "
+            "on public Seedance 2.0 (including Fast) and 2.5 models only — other "
+            "video families reject it. Queue-only: it does not change price, and "
+            "``/video/quote`` does not accept it."
         ),
     )
     consents: VideoConsents | None = Field(
@@ -340,6 +448,23 @@ class VideoQuoteRequest(BaseModel):
             "For video-to-video / upscale models, the source video "
             "(MP4/MOV/WebM). HTTP URL or data: URI."
         ),
+    )
+    enhancement_model: str | None = Field(
+        None,
+        description=(
+            "Provider-side enhancement model; published per model under "
+            "``constraints.topaz.models`` on ``GET /models``."
+        ),
+    )
+    target_fps: int | None = Field(
+        None,
+        ge=16,
+        le=120,
+        description="Target FPS for frame interpolation (16-120). Affects the quote.",
+    )
+    slowdown_factor: Literal[1, 2, 4, 8] | None = Field(
+        None,
+        description="Slow-motion factor; multiplies the billed duration.",
     )
     reference_video_total_duration: float | None = Field(
         None,

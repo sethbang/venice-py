@@ -36,6 +36,7 @@ from .api_keys import (
     RateLimitLogsResponse,
     RateLimitsData,
     RateLimitsResponse,
+    RateLimitType,
     TrailingSevenDaysUsage,
 )
 from .audio import (
@@ -210,6 +211,7 @@ from .requests import (
     SimpleImageGenerationRequest,
     SpecificToolChoice,
     StreamOptions,
+    StyleReference,
     SystemMessage,
     # Chat completion models
     TextContent,
@@ -364,6 +366,7 @@ __all__ = [
     "RateLimitsData",
     "RateLimitsResponse",
     "RateLimitLogEntry",
+    "RateLimitType",
     "RateLimitLogsResponse",
     # From billing module
     "InferenceDetails",
@@ -478,6 +481,7 @@ __all__ = [
     "ImageGenerationRequest",
     "SimpleImageGenerationRequest",
     "ImageUpscaleRequest",
+    "StyleReference",
     "ImageEditRequest",
     "ImageBackgroundRemoveRequest",
     "ImageMultiEditRequest",
