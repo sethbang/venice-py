@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-09-11
+
+### Added
+
+- **`ChatStream.reasoning_summary`** exposes a streamed model's plain-language reasoning with any encrypted reasoning block removed. The assembled `message.reasoning_content` must keep that block, because the API requires it back verbatim on the next turn, so rendering that field in a thinking panel shows users several KB of opaque token. Use `reasoning_summary` for display and `reasoning_content` for the round trip. `None` until the stream is consumed, and for models that emit no reasoning.
+
+- **`ChatCompletionChunkChoiceDelta.reasoning_encrypted`** models the flag the API sets on the single streaming delta whose `reasoning_content` is an encrypted reasoning block. Clients can now tell that block apart from the summary deltas around it without parsing the block's sentinel header.
+
 ### Fixed
 
 - **Streamed encrypted reasoning blocks now survive the round trip.** Reasoning models emit an encrypted reasoning item — an opaque, *unterminated* block the API requires back verbatim on the next turn — and mark the single delta carrying it with `reasoning_encrypted`. `ChatCompletionChunkChoiceDelta` did not model that field, so pydantic discarded it and both `ChatStream.collect()` and `collect_with_deltas()` joined every reasoning delta in arrival order. When a model emitted summary text *after* the block (routine on a long think), that prose was welded onto the end of the block, and echoing the assembled `reasoning_content` back — the standard multi-turn tool-calling pattern — failed at request setup with `400 The encrypted content for item rs_… could not be verified`. The delta now models `reasoning_encrypted`, the collectors accumulate flagged blocks separately, and the assembled `reasoning_content` places them last, preserving every delta in the shape the non-streaming endpoint already returns. The assembled message is flagged `reasoning_encrypted` to match, and the new `ChatStream.reasoning_summary` exposes the plain-language reasoning without the block — rendering `reasoning_content` in a thinking panel otherwise shows users several KB of opaque token.
@@ -809,7 +817,8 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.2.1...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/sethbang/venice-py/compare/v2.2.1...v2.3.0
 [2.2.1]: https://github.com/sethbang/venice-py/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/sethbang/venice-py/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/sethbang/venice-py/compare/v2.0.2...v2.1.0
