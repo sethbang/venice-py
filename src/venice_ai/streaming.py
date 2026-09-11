@@ -405,6 +405,26 @@ class Stream[ChunkType]:
                 await self._iterator.aclose()  # pyright: ignore[reportAttributeAccessIssue]
 
 
+def _assemble_reasoning(summary_parts: list[str], encrypted_parts: list[str]) -> str | None:
+    """Join reasoning deltas so the assembled field survives a round trip.
+
+    An encrypted reasoning block is unterminated: the server reads it from its
+    header to the end of ``reasoning_content``. Joining deltas in arrival order
+    therefore welds any summary the model emitted *after* the block onto its
+    token, and echoing that back is rejected. Summary text *before* it is
+    tolerated, so putting the block last preserves every delta and keeps the
+    field valid — the same shape the non-streaming endpoint returns.
+
+    This holds for the one block per response observed in practice. Because the
+    server parses to end-of-string, a flat text field cannot carry two blocks
+    under any ordering; should a response ever contain more, only the last would
+    be recoverable and the API would need a structured field to express it.
+    """
+    if not summary_parts and not encrypted_parts:
+        return None
+    return "".join(summary_parts) + "".join(encrypted_parts)
+
+
 class ChatStream(Stream["ChatCompletionChunk"]):
     """Enhanced stream for chat completions with convenience accessors.
 
@@ -436,6 +456,7 @@ class ChatStream(Stream["ChatCompletionChunk"]):
     ):
         super().__init__(iterator, client=client)
         self._final_response: ChatCompletionResponse | None = None
+        self._reasoning_summary: str | None = None
 
     @property
     def final_response(self) -> ChatCompletionResponse | None:
@@ -447,6 +468,20 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         final aggregated response.
         """
         return self._final_response
+
+    @property
+    def reasoning_summary(self) -> str | None:
+        """The plain-language reasoning summary, without any encrypted block.
+
+        ``None`` until :meth:`collect` or :meth:`collect_with_deltas` has
+        finished consuming the stream, and for models that emit no reasoning.
+
+        Use this to display a model's thinking. The assembled
+        ``message.reasoning_content`` deliberately still carries the encrypted
+        reasoning block, because the API requires it back verbatim on the next
+        turn; rendering that field shows users several KB of opaque token.
+        """
+        return self._reasoning_summary
 
     async def text_deltas(self) -> AsyncIterator[str]:
         """Yield only text content deltas, filtering empty/None.
@@ -479,7 +514,8 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         from .types.api.chat import ChatCompletionResponse
 
         text_parts: list[str] = []
-        reasoning_parts: list[str] = []
+        reasoning_summary_parts: list[str] = []
+        reasoning_encrypted_parts: list[str] = []
         tool_calls_by_index: dict[int, dict[str, str]] = {}
         model = ""
         stream_id = ""
@@ -508,7 +544,10 @@ class ChatStream(Stream["ChatCompletionChunk"]):
                     if choice.delta.content:
                         text_parts.append(choice.delta.content)
                     if choice.delta.reasoning_content:
-                        reasoning_parts.append(choice.delta.reasoning_content)
+                        if choice.delta.reasoning_encrypted:
+                            reasoning_encrypted_parts.append(choice.delta.reasoning_content)
+                        else:
+                            reasoning_summary_parts.append(choice.delta.reasoning_content)
                     if choice.delta.tool_calls:
                         for tc in choice.delta.tool_calls:
                             idx = tc.index or 0
@@ -538,6 +577,28 @@ class ChatStream(Stream["ChatCompletionChunk"]):
                 "before the final chunk arrived."
             )
 
+        message: dict[str, object] = {
+            "role": "assistant",
+            "content": "".join(text_parts) if text_parts else None,
+            "reasoning_content": _assemble_reasoning(
+                reasoning_summary_parts, reasoning_encrypted_parts
+            ),
+            "tool_calls": [
+                {
+                    "id": entry["id"],
+                    "type": "function",
+                    "function": {"name": entry["name"], "arguments": entry["arguments"]},
+                }
+                for _, entry in sorted(tool_calls_by_index.items())
+            ]
+            if tool_calls_by_index
+            else None,
+        }
+        # Flag the message the way the non-streaming endpoint does — but only when
+        # there is a block, so responses without reasoning gain no stray key.
+        if reasoning_encrypted_parts:
+            message["reasoning_encrypted"] = True
+
         payload: dict[str, object] = {
             "id": stream_id,
             "object": "chat.completion",
@@ -546,24 +607,7 @@ class ChatStream(Stream["ChatCompletionChunk"]):
             "choices": [
                 {
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "".join(text_parts) if text_parts else None,
-                        "reasoning_content": "".join(reasoning_parts) if reasoning_parts else None,
-                        "tool_calls": [
-                            {
-                                "id": entry["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": entry["name"],
-                                    "arguments": entry["arguments"],
-                                },
-                            }
-                            for _, entry in sorted(tool_calls_by_index.items())
-                        ]
-                        if tool_calls_by_index
-                        else None,
-                    },
+                    "message": message,
                     "finish_reason": finish_reason,
                 }
             ],
@@ -575,6 +619,9 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         if usage is not None:
             payload["usage"] = usage.model_dump()
         response = ChatCompletionResponse.model_validate(payload)
+        self._reasoning_summary = (
+            "".join(reasoning_summary_parts) if reasoning_summary_parts else None
+        )
         self._final_response = response
         return response
 
@@ -616,7 +663,8 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         from .types.api.chat import ChatCompletionResponse
 
         text_parts: list[str] = []
-        reasoning_parts: list[str] = []
+        reasoning_summary_parts: list[str] = []
+        reasoning_encrypted_parts: list[str] = []
         tool_calls_by_index: dict[int, dict[str, str]] = {}
         model = ""
         stream_id = ""
@@ -646,7 +694,10 @@ class ChatStream(Stream["ChatCompletionChunk"]):
                         text_parts.append(choice.delta.content)
                         yield choice.delta.content
                     if choice.delta.reasoning_content:
-                        reasoning_parts.append(choice.delta.reasoning_content)
+                        if choice.delta.reasoning_encrypted:
+                            reasoning_encrypted_parts.append(choice.delta.reasoning_content)
+                        else:
+                            reasoning_summary_parts.append(choice.delta.reasoning_content)
                     if choice.delta.tool_calls:
                         for tc in choice.delta.tool_calls:
                             idx = tc.index or 0
@@ -676,6 +727,28 @@ class ChatStream(Stream["ChatCompletionChunk"]):
                 "before the final chunk arrived."
             )
 
+        message: dict[str, object] = {
+            "role": "assistant",
+            "content": "".join(text_parts) if text_parts else None,
+            "reasoning_content": _assemble_reasoning(
+                reasoning_summary_parts, reasoning_encrypted_parts
+            ),
+            "tool_calls": [
+                {
+                    "id": entry["id"],
+                    "type": "function",
+                    "function": {"name": entry["name"], "arguments": entry["arguments"]},
+                }
+                for _, entry in sorted(tool_calls_by_index.items())
+            ]
+            if tool_calls_by_index
+            else None,
+        }
+        # Flag the message the way the non-streaming endpoint does — but only when
+        # there is a block, so responses without reasoning gain no stray key.
+        if reasoning_encrypted_parts:
+            message["reasoning_encrypted"] = True
+
         payload: dict[str, object] = {
             "id": stream_id,
             "object": "chat.completion",
@@ -684,30 +757,16 @@ class ChatStream(Stream["ChatCompletionChunk"]):
             "choices": [
                 {
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "".join(text_parts) if text_parts else None,
-                        "reasoning_content": "".join(reasoning_parts) if reasoning_parts else None,
-                        "tool_calls": [
-                            {
-                                "id": entry["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": entry["name"],
-                                    "arguments": entry["arguments"],
-                                },
-                            }
-                            for _, entry in sorted(tool_calls_by_index.items())
-                        ]
-                        if tool_calls_by_index
-                        else None,
-                    },
+                    "message": message,
                     "finish_reason": finish_reason,
                 }
             ],
         }
         if usage is not None:
             payload["usage"] = usage.model_dump()
+        self._reasoning_summary = (
+            "".join(reasoning_summary_parts) if reasoning_summary_parts else None
+        )
         self._final_response = ChatCompletionResponse.model_validate(payload)
 
 

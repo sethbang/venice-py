@@ -225,6 +225,22 @@ class ChatCompletionChunkChoiceDelta(BaseModel):
     regular content.
     """
 
+    reasoning_encrypted: bool | None = Field(default=None)
+    """Marks this delta's ``reasoning_content`` as an opaque encrypted block.
+
+    Reasoning models emit an encrypted reasoning item — a sentinel header and an
+    opaque token — that the API expects back verbatim on subsequent turns. It
+    arrives whole in a single delta, flagged with this field, interleaved with
+    the plain-language summary deltas around it.
+
+    The block is unterminated, so the server parses it from its header to the
+    end of the field. Any summary text concatenated *after* it is absorbed into
+    the token and the next turn is rejected with "encrypted content could not be
+    decrypted or parsed". Accumulators must therefore keep flagged deltas apart
+    from summary deltas and place the block last — see
+    :meth:`~venice_ai.streaming.ChatStream.collect`.
+    """
+
     tool_calls: list[ChatCompletionChunkToolCall] | None = Field(default=None)
     """Incremental tool call information.
 
