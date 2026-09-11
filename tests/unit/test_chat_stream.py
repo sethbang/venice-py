@@ -14,6 +14,7 @@ def _chunk(
     model: str = "llama-3.3-70b",
     content: str | None = None,
     reasoning_content: str | None = None,
+    reasoning_encrypted: bool | None = None,
     tool_calls: list[dict] | None = None,
     finish_reason: str | None = None,
     usage: dict | None = None,
@@ -33,6 +34,7 @@ def _chunk(
                 "delta": {
                     "content": content,
                     "reasoning_content": reasoning_content,
+                    "reasoning_encrypted": reasoning_encrypted,
                     "tool_calls": tool_calls,
                 },
                 "finish_reason": finish_reason,
@@ -399,3 +401,86 @@ class TestChunkTextProperty:
             ],
         )
         assert c.text == "first"
+
+
+# ---------------------------------------------------------------------------
+# encrypted reasoning blocks
+# ---------------------------------------------------------------------------
+
+# An encrypted reasoning block arrives whole in one delta, flagged with
+# ``reasoning_encrypted``. It is unterminated, so the server reads it from its
+# header to the end of the field: any summary the model streams afterwards must
+# not be concatenated onto it, or the next turn is rejected with "encrypted
+# content could not be decrypted or parsed".
+_ENVELOPE = "\n\n__ENCRYPTED_REASONING__id=rs_abc\ngAAAAABtoken=="
+
+
+def _interleaved_chunks():
+    """Summary, then the encrypted block, then *more* summary — the failing shape."""
+    return [
+        _chunk(reasoning_content="Planning the answer. "),
+        _chunk(reasoning_content=_ENVELOPE, reasoning_encrypted=True),
+        _chunk(reasoning_content="Still thinking."),
+        _chunk(content="Done.", finish_reason="stop"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_collect_puts_encrypted_block_last_so_it_round_trips():
+    response = await _stream(_interleaved_chunks()).collect()
+
+    reasoning = response.choices[0].message.reasoning_content
+    assert reasoning is not None
+    assert reasoning.endswith(_ENVELOPE), "summary must never trail the encrypted block"
+    assert reasoning == "Planning the answer. Still thinking." + _ENVELOPE
+
+
+@pytest.mark.asyncio
+async def test_collect_preserves_every_reasoning_delta():
+    response = await _stream(_interleaved_chunks()).collect()
+
+    reasoning = response.choices[0].message.reasoning_content or ""
+    assert len(reasoning) == len("Planning the answer. ") + len(_ENVELOPE) + len("Still thinking.")
+
+
+@pytest.mark.asyncio
+async def test_collect_surfaces_reasoning_encrypted_flag():
+    response = await _stream(_interleaved_chunks()).collect()
+
+    # Mirrors the non-streaming endpoint, which flags the message the same way.
+    assert response.choices[0].message.model_extra.get("reasoning_encrypted") is True
+
+
+@pytest.mark.asyncio
+async def test_reasoning_summary_excludes_the_encrypted_block():
+    stream = _stream(_interleaved_chunks())
+    await stream.collect()
+
+    assert stream.reasoning_summary == "Planning the answer. Still thinking."
+    assert "__ENCRYPTED_REASONING__" not in (stream.reasoning_summary or "")
+
+
+@pytest.mark.asyncio
+async def test_collect_with_deltas_puts_encrypted_block_last():
+    stream = _stream(_interleaved_chunks())
+    async for _ in stream.collect_with_deltas():
+        pass
+
+    assert stream.final_response is not None
+    reasoning = stream.final_response.choices[0].message.reasoning_content
+    assert reasoning is not None
+    assert reasoning.endswith(_ENVELOPE)
+    assert stream.reasoning_summary == "Planning the answer. Still thinking."
+
+
+@pytest.mark.asyncio
+async def test_unflagged_reasoning_keeps_arrival_order():
+    """Models that emit no encrypted block are unaffected."""
+    stream = _stream(
+        [_chunk(reasoning_content="a"), _chunk(reasoning_content="b", finish_reason="stop")]
+    )
+    response = await stream.collect()
+
+    assert response.choices[0].message.reasoning_content == "ab"
+    assert "reasoning_encrypted" not in response.choices[0].message.model_extra
+    assert stream.reasoning_summary == "ab"

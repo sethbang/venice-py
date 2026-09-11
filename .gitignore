@@ -191,9 +191,6 @@ website/docs/api/
 # Repo-internal brainstorming / specs / plans (not for the public repo)
 docs/superpowers/
 
-# Local per-release working checklists (not committed)
-RELEASE_CHECKLIST_v*.md
-
 # Local agent instructions and audit/scratch output (not for the public repo)
 CLAUDE.md
 out/
