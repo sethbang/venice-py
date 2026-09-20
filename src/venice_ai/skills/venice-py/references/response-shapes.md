@@ -4,7 +4,7 @@ Sourced from `src/venice_ai/types/api/`. This page exists because agents repeate
 
 ## `client.models.get(...)` — `model.model_spec` per type
 
-`ModelResponse` carries a `type: Literal["text", "image", "embedding", "tts", "asr", "music", "upscale", "inpaint", "video"]` and a `model_spec` whose subclass is dispatched by that type. There is **no shared base** beyond `ModelSpec`; treat the per-type fields below as canonical and use `getattr(spec, name, None)` in generic helpers.
+`ModelResponse` carries a `type: str` and a `model_spec` whose subclass is dispatched by that type. `type` is an open string, not a `Literal`: Venice adds model types to the live catalog between SDK releases (`decision` was the first), and a closed enum failed the whole `/models` parse the first time one appeared. Narrow against `KNOWN_MODEL_TYPES` (`text`, `image`, `video`, `inpaint`, `music`, `tts`, `asr`, `embedding`, `upscale`, `decision`) and treat anything outside it as a newer type rather than an invalid one. There is **no shared base** beyond `ModelSpec`; treat the per-type fields below as canonical and use `getattr(spec, name, None)` in generic helpers.
 
 | `model.type` | Spec class | Distinguishing fields |
 |---|---|---|

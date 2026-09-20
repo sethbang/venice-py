@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-09-19
+
+### Fixed
+
+- **A model type the SDK did not know about no longer fails the entire `/models` parse.** `ModelResponse.type` was a closed `Literal`, so when Venice added the `decision` type to the live catalog, `models.list()` raised `APIResponseValidationError` on the whole 364-model listing rather than on the one unrecognised entry — taking `models.get()`, `models.get_capabilities()` and every `resolve_*()` helper down with it, since they all read that listing. A single new catalog row, added server-side with no SDK release, took working applications offline.
+
+  `type` is now a plain `str`, matching how the SDK already treats `quantization`, model tiers and video quality. An unrecognised type parses, keeps its unmodelled `model_spec` fields, and falls back to the base `ModelSpec` instead of failing. `GenericCapabilities.type` was a second closed `Literal` with the same failure mode and is now open too; the `Capabilities` union switched to a callable discriminator so its catch-all arm can stay open, which a field discriminator does not permit.
+
+  The known values ship as `KNOWN_MODEL_TYPES`, importable from `venice_ai.types` and `venice_ai.types.api`, for callers that want to narrow. Treat anything outside it as a type this release predates rather than as invalid.
+
+  Note the deliberate asymmetry this introduces: *request* filters such as `models.list(type=...)` stay closed `Literal`s so a typo still fails at the call site. Only *response* fields are open, so data the SDK predates never fails a parse.
+
+  This is a patch release because the runtime behaviour is strictly more permissive — nothing that worked before changes. It does, however, widen a public `Literal` to `str`, so a caller relying on exhaustiveness checking over `ModelResponse.type` will see their type checker stop proving the match is exhaustive. Narrow against `KNOWN_MODEL_TYPES` and handle the fallback.
+
 ## [2.4.0] - 2026-09-11
 
 ### Added
