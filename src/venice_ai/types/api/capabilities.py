@@ -18,9 +18,9 @@ flags live where.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Discriminator, Field, Tag
 
 
 class ChatCapabilities(BaseModel):
@@ -106,24 +106,49 @@ class InpaintCapabilities(BaseModel):
 class GenericCapabilities(BaseModel):
     """Catch-all for model types with no current feature taxonomy.
 
-    Used for ``embedding``, ``tts``, ``asr``, ``music``, and ``upscale`` —
-    these resources don't expose feature flags today. Future versions may
-    promote any of them to a dedicated ``*Capabilities`` shape.
+    Used for ``embedding``, ``tts``, ``asr``, ``music``, ``upscale`` and
+    ``decision`` — these resources don't expose feature flags today. It is
+    also the landing arm for any model type this SDK release predates, so
+    ``type`` is an open ``str``. Future versions may promote any of them to a
+    dedicated ``*Capabilities`` shape.
     """
 
-    type: Literal["embedding", "tts", "asr", "music", "upscale"]
+    type: str
     privacy: Literal["private", "anonymized"] | None = None
 
 
+_DEDICATED_CAPABILITY_TYPES = frozenset({"chat", "image", "video", "inpaint"})
+
+
+def _capability_tag(value: Any) -> str:
+    """Route a capabilities payload to its union arm.
+
+    A callable discriminator rather than ``Field(discriminator="type")``
+    because :class:`GenericCapabilities` is the open catch-all arm: its
+    ``type`` is a plain ``str``, and Pydantic requires every arm of a
+    *field* discriminator to be a ``Literal``. Anything without a dedicated
+    shape — today ``embedding``/``tts``/``asr``/``music``/``upscale``/
+    ``decision``, tomorrow whatever Venice ships next — falls through to
+    ``generic`` instead of failing validation.
+    """
+    type_value = value.get("type") if isinstance(value, dict) else getattr(value, "type", None)
+    return type_value if type_value in _DEDICATED_CAPABILITY_TYPES else "generic"
+
+
 Capabilities = Annotated[
-    ChatCapabilities
-    | ImageCapabilities
-    | VideoCapabilities
-    | InpaintCapabilities
-    | GenericCapabilities,
-    Field(discriminator="type"),
+    Annotated[ChatCapabilities, Tag("chat")]
+    | Annotated[ImageCapabilities, Tag("image")]
+    | Annotated[VideoCapabilities, Tag("video")]
+    | Annotated[InpaintCapabilities, Tag("inpaint")]
+    | Annotated[GenericCapabilities, Tag("generic")],
+    Discriminator(_capability_tag),
 ]
-"""Discriminated union returned by :meth:`Models.get_capabilities`."""
+"""Discriminated union returned by :meth:`Models.get_capabilities`.
+
+``GenericCapabilities`` is the open arm — an unrecognised model ``type``
+lands there rather than raising, so a new Venice model type never breaks
+:meth:`Models.get_capabilities`.
+"""
 
 
 __all__ = [

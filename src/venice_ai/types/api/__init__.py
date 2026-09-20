@@ -119,6 +119,7 @@ from .images import (
     SimpleImageGenerationResponse,
 )
 from .models import (
+    KNOWN_MODEL_TYPES,
     ASRModelPricing,
     AsrModelSpec,
     AudioModelPricing,
@@ -345,6 +346,7 @@ __all__ = [
     "AsrModelSpec",
     "EmbeddingModelSpec",
     "UpscaleModelSpec",
+    "KNOWN_MODEL_TYPES",
     "ModelResponse",
     "ModelsListResponse",
     "ModelTraitsResponse",

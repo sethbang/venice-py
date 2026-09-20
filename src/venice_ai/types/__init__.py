@@ -51,6 +51,7 @@ all API interactions are properly validated and documented.
 # Import specific modules for namespace organization
 from . import api, enums, identifiers
 from .api import (
+    KNOWN_MODEL_TYPES,
     ApiKey,
     ApiKeyDetailsResponse,
     ApiKeysListResponse,
@@ -370,6 +371,7 @@ __all__ = [
     "AsrModelSpec",
     "EmbeddingModelSpec",
     "UpscaleModelSpec",
+    "KNOWN_MODEL_TYPES",
     "ModelResponse",
     "ModelsListResponse",
     "ModelTraitsResponse",

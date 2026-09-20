@@ -5,7 +5,7 @@ This module contains Pydantic models for the models API endpoints,
 including model listings, traits, compatibility, and specifications.
 """
 
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -802,6 +802,28 @@ _SPEC_BY_TYPE: dict[str, type[ModelSpec]] = {
 }
 
 
+KNOWN_MODEL_TYPES: Final[tuple[str, ...]] = (
+    "text",
+    "image",
+    "video",
+    "inpaint",
+    "music",
+    "tts",
+    "asr",
+    "embedding",
+    "upscale",
+    "decision",
+)
+"""Model ``type`` values this SDK release knows about.
+
+:attr:`ModelResponse.type` is a plain ``str``, not a ``Literal``, because
+Venice adds model types to the live catalog between SDK releases and a closed
+enum turns each new one into a hard parse failure for the *entire* catalog.
+Narrow against this tuple when you need to branch on a known type, and treat
+anything outside it as a type this release predates rather than as invalid.
+"""
+
+
 class ModelResponse(BaseModel):
     """Individual model information.
 
@@ -831,9 +853,17 @@ class ModelResponse(BaseModel):
             "tolerate any owner the API may report."
         ),
     )
-    type: Literal[
-        "embedding", "image", "text", "tts", "upscale", "inpaint", "video", "asr", "music"
-    ] = Field(..., description="Model type")
+    type: str = Field(
+        ...,
+        description=(
+            "Model type, e.g. ``text``, ``image`` or ``decision``. Deliberately "
+            "a plain ``str`` rather than a closed ``Literal``: Venice adds model "
+            "types to the live catalog between SDK releases, and validating "
+            "against a fixed enum failed the whole ``/models`` parse the first "
+            "time an unrecognised type appeared. Compare against "
+            "``KNOWN_MODEL_TYPES`` to narrow."
+        ),
+    )
     model_spec: ModelSpec = Field(..., description="Detailed model specifications")
     context_length: int | None = Field(
         default=None,
@@ -928,6 +958,7 @@ __all__ = [
     "AsrModelSpec",
     "EmbeddingModelSpec",
     "UpscaleModelSpec",
+    "KNOWN_MODEL_TYPES",
     "ModelResponse",
     "ModelsListResponse",
     "ModelTraitsResponse",
