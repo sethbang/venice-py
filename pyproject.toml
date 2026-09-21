@@ -58,7 +58,7 @@ rich = { version = "^15.0.0", optional = true } # For rich terminal output in da
 # tiktoken / textual / psutil are deliberately absent: no module under src/ imports
 # any of them, so shipping them in the `all` extra only inflated the install. The
 # two that tests do use (tiktoken, psutil) stay in the dev group below.
-filelock = { version = "^3.29.0", optional = true }
+filelock = { version = ">=3.29,<5.0", optional = true }
 Pillow = { version = "^12.2.0", optional = true } # For image processing (e.g., dimension checks)
 redis = { version = "^8.0.0", optional = true }
 pydantic-settings = { version = "^2.14.1", optional = true }
