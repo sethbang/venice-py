@@ -338,6 +338,7 @@ To catch these patterns automatically in user code, run **`venice-py lint <path>
 - `references/characters-and-augment.md` — `client.characters`, `client.augment.search/scrape/parse_text`
 - `references/response-shapes.md` — where fields actually live (`model_spec` per type, billing balance nesting, augment results, audio response, etc.)
 - `references/billing.md` — `client.billing.*` (`get_balance`, `get_usage_history`, `iter_usage_history`, beta analytics)
+- `references/decisions.md` — beta `client.decisions` (typed `noul` / `choice` / `score` judgments from "System One" models)
 
 ## Scripts
 
@@ -362,4 +363,5 @@ Paths below are relative to the SDK repo's `examples/` directory. Available at [
 - `models/model_lifecycle.py` — context_length, deprecation, reasoning-effort metadata
 - `embeddings/basic_embeddings.py` — embeddings + `cosine_similarity` helper
 - `headers/header_access_example.py` — `_response` / headers / rate limits
+- `decisions/ticket_routing.py` — typed `noul` / `choice` / `score` judgments, gated on `.confidence`
 - `best_practices/pydantic_models.py` — full Pydantic pattern

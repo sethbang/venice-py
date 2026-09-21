@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 
 from ...identifiers import ModelId
 from .common import (
+    ANON_USER_ID_DESCRIPTION,
+    AnonUserId,
     AudioContent,
     FileContent,
     FileObject,
@@ -357,6 +359,11 @@ class ChatCompletionRequest(BaseModel):
         if isinstance(v, list) and len(v) > 4:
             raise ValueError("Stop sequences limited to 4 items")
         return v
+
+    anon_user_id: AnonUserId | None = Field(
+        default=None,
+        description=ANON_USER_ID_DESCRIPTION,
+    )
 
 
 # ============================================================================

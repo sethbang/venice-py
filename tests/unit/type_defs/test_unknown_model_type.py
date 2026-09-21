@@ -13,15 +13,16 @@ base ``ModelSpec``, and — the actual regression — must not stop its
 known-type siblings from validating.
 
 The ``decision`` payload below is recorded verbatim from the live API on
-2026-09-18. This release has no dedicated spec class for it, which is
-precisely the situation these tests cover.
+2026-09-18. It now has a dedicated spec class, so the synthetic ``teleport``
+type stands in for the case these tests exist for: a type the SDK has never
+heard of.
 """
 
 import pytest
 
 from venice_ai.types.api import KNOWN_MODEL_TYPES, ModelResponse, ModelsListResponse, TextModelSpec
 from venice_ai.types.api.capabilities import GenericCapabilities
-from venice_ai.types.api.models import ModelSpec
+from venice_ai.types.api.models import DecisionModelSpec, ModelSpec
 
 # Verbatim /models entry for the Jev decision model, live API 2026-09-18.
 JEV_ENTRY = {
@@ -68,11 +69,10 @@ class TestUnknownModelTypeParses:
         m = ModelResponse.model_validate(dict(JEV_ENTRY, type="teleport", id="future-model"))
         assert m.type == "teleport"
 
-    @pytest.mark.parametrize("model_type", ["decision", "teleport"])
-    def test_unknown_type_falls_back_to_base_spec(self, model_type):
+    def test_unknown_type_falls_back_to_base_spec(self):
         """No dispatch entry means the base ``ModelSpec``, not a failure."""
-        m = ModelResponse.model_validate(dict(JEV_ENTRY, type=model_type))
-        assert isinstance(m.model_spec, ModelSpec)
+        m = ModelResponse.model_validate(dict(JEV_ENTRY, type="teleport"))
+        assert type(m.model_spec) is ModelSpec
         assert m.model_spec.name == "Jev (System One)"
 
     def test_unknown_type_keeps_its_unmodelled_fields(self):
@@ -92,6 +92,31 @@ class TestUnknownModelTypeParses:
         assert parsed.data[1].type == "decision"
 
 
+class TestDecisionModelSpec:
+    """``decision`` dispatches to its own spec subclass."""
+
+    def test_dispatches_to_decision_spec(self):
+        m = ModelResponse.model_validate(JEV_ENTRY)
+        assert isinstance(m.model_spec, DecisionModelSpec)
+
+    def test_token_budget_fields_typed(self):
+        m = ModelResponse.model_validate(JEV_ENTRY)
+        spec = m.model_spec
+        assert isinstance(spec, DecisionModelSpec)
+        assert spec.maxStateTokens == 32000
+        assert spec.maxTotalTokens == 64000
+
+    def test_token_budgets_optional(self):
+        """Both budgets are documented 'only present for decision models' —
+        an entry omitting them must still parse."""
+        entry = dict(JEV_ENTRY)
+        entry["model_spec"] = {"name": "Budgetless"}
+        m = ModelResponse.model_validate(entry)
+        assert isinstance(m.model_spec, DecisionModelSpec)
+        assert m.model_spec.maxStateTokens is None
+        assert m.model_spec.maxTotalTokens is None
+
+
 class TestKnownModelTypes:
     """The closed Literal is gone, so callers narrow via this constant."""
 
@@ -103,8 +128,6 @@ class TestKnownModelTypes:
         assert from_types is from_api
 
     def test_contains_decision(self):
-        """``decision`` is live in the catalog even though this release
-        ships no dedicated spec class for it."""
         assert "decision" in KNOWN_MODEL_TYPES
 
     def test_covers_every_dispatchable_spec(self):
@@ -121,3 +144,40 @@ class TestGenericCapabilitiesUnknownType:
     def test_accepts_unknown_type(self, model_type):
         caps = GenericCapabilities(type=model_type, privacy="anonymized")
         assert caps.type == model_type
+
+
+class TestCatalogWithoutDecisionModels:
+    """Accounts that cannot see decision models must be unaffected.
+
+    ``decision`` models are beta/Pro-gated, so they are absent from the
+    catalog for many accounts — which is why the closed-``Literal`` crash only
+    ever reproduced on accounts that *could* see Jev. Nothing added for the
+    decision type may make the SDK depend on one being present.
+    """
+
+    def test_catalog_parses_without_any_decision_entry(self):
+        parsed = ModelsListResponse.model_validate(
+            {"object": "list", "type": "all", "data": [KNOWN_TEXT_ENTRY]}
+        )
+        assert len(parsed.data) == 1
+        assert all(m.type != "decision" for m in parsed.data)
+
+    @pytest.mark.asyncio
+    async def test_resolve_decision_raises_a_clear_error(self):
+        """Not an obscure IndexError or a silent fallback to a chat model."""
+        from unittest.mock import AsyncMock
+
+        from venice_ai.resources.models import Models
+
+        class StubClient:
+            def __init__(self) -> None:
+                self.get = AsyncMock(
+                    return_value=ModelsListResponse.model_validate(
+                        {"object": "list", "type": "all", "data": [KNOWN_TEXT_ENTRY]}
+                    )
+                )
+                self.models = Models(self)
+
+        client = StubClient()
+        with pytest.raises(ValueError, match="No available decision models found"):
+            await client.models.resolve_decision()

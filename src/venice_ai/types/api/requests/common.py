@@ -9,9 +9,17 @@ the core model uses snake_case.
 """
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    ValidationInfo,
+    field_validator,
+)
 
 # ---------------------------------------------------------------------------
 # Re-exports from canonical location (core/models/common)
@@ -99,6 +107,52 @@ class DateRangeParams(BaseModel):
 # Export All Models
 # ============================================================================
 
+
+#: Printable-ASCII range the API accepts for ``anon_user_id``.
+ANON_USER_ID_PATTERN = r"^[\x20-\x7E]+$"
+
+
+def _reject_delimiter(value: str) -> str:
+    """``||`` is the delimiter Venice joins the id to its own user id with."""
+    if "||" in value:
+        raise ValueError("anon_user_id must not contain '||' — it is a reserved delimiter")
+    return value
+
+
+#: Optional identifier for the API customer's own end user.
+#:
+#: Venice combines it with the Venice user id when attributing a request to an
+#: upstream provider. It is **not** the OpenAI-compatible ``user`` field, which
+#: Venice discards — passing ``user`` does nothing, and the two are not aliases.
+AnonUserId = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=128, pattern=ANON_USER_ID_PATTERN),
+    AfterValidator(_reject_delimiter),
+]
+
+#: Field definition shared by every endpoint that accepts ``anon_user_id``, so
+#: the description and constraints cannot drift apart across the seven models.
+ANON_USER_ID_DESCRIPTION = (
+    "Optional identifier for the API customer's end user, combined with the "
+    "Venice user id when attributing the request to upstream providers. "
+    "Printable ASCII, 1-128 characters, and must not contain '||'. Distinct "
+    "from the OpenAI-compatible `user` field, which Venice discards."
+)
+
+
+_ANON_USER_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(AnonUserId)
+
+
+def validate_anon_user_id(value: str) -> str:
+    """Validate an ``anon_user_id`` outside a request model.
+
+    ``image.multi_edit()`` assembles its body as a plain dict rather than
+    through :class:`ImageMultiEditRequest`, so it would otherwise skip the
+    constraints every other endpoint enforces.
+    """
+    return _ANON_USER_ID_ADAPTER.validate_python(value)
+
+
 __all__ = [
     # Content types
     "TextContent",
@@ -133,6 +187,11 @@ __all__ = [
     "ReasoningEffortLevel",
     "ReasoningSummary",
     "ReasoningConfig",
+    # End-user attribution
+    "AnonUserId",
+    "ANON_USER_ID_PATTERN",
+    "ANON_USER_ID_DESCRIPTION",
+    "validate_anon_user_id",
     # Utility models
     "PaginationParams",
     "DateRangeParams",

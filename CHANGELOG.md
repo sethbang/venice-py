@@ -5,7 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.5.0] - 2026-09-21
+
+### Added
+
+- **`client.decisions` — decision ("System One") models.** `decisions.create()` calls `POST /decisions`, which evaluates a `state` against a map of typed questions and returns one structured answer per question instead of prose. Three question types are modelled: `NoulQuestion` (a yes/no judgment returned as a calibrated probability), `ChoiceQuestion` (pick one option, with the full probability distribution and a confidence) and `ScoreQuestion` (a probability-weighted position on an ordered rubric, which can land between levels). `state` accepts a string or structured data, and questions may be passed as the typed models or as plain dicts.
+
+  Answers come back as a discriminated union — `NoulAnswer`, `ChoiceAnswer`, `ScoreAnswer` — with `DecisionResponse.noul()`, `.choice()` and `.score()` narrowing by question id so call sites do not each need an `isinstance` check. The union's fourth arm, `UnknownAnswer`, mirrors the catch-all arm in Venice's own schema: an answer type added later parses and keeps its payload rather than failing the response.
+
+  `POST /systemone` is the same endpoint under the path TypeSafe's SDKs use, so it is reachable by pointing those at `TYPESAFE_BASE_URL=https://api.venice.ai/api`; this SDK targets `/decisions` and does not duplicate the method. The endpoint is documented as **beta** — Venice reserves the right to change its request and response schemas without notice.
+
+- **`models.resolve_decision()`** resolves a decision model at runtime, so calling code never hardcodes a model ID. Decision models are beta-flagged today, so unlike `resolve_chat()` this shortcut does not filter beta models out — doing so would leave no candidates. `models.list(type="decision")`, `resolve(type="decision")` and the `venice-py models --type decision` / `venice-py models resolve --type decision` CLI filters accept the new type.
+
+- **`DecisionModelSpec`** types the two token budgets decision models report in place of a context window: `maxStateTokens` (the state plus the single longest question) and `maxTotalTokens` (the state plus all questions combined).
+
+- **`anon_user_id` on all seven endpoints that accept it**, reached through `chat.completions.create()`, `responses.create()`, `image.create()`, `image.submit()`, `image.simple_generate()`, `image.edit()`, `image.multi_edit()` and `image.background_remove()` — eight methods, because `create()` and `submit()` both post to `/image/generate`. Venice combines it with your Venice user id when attributing a request to an upstream provider. It is validated locally to the API's constraints: printable ASCII, 1-128 characters, and no `||` (the delimiter Venice joins the two ids with).
+
+  This lands as two different changes depending on the endpoint. On the five **image** requests the field was **silently dropped** — those models take pydantic's default `extra="ignore"`, so a caller who passed it got a successful request and no attribution, with nothing to indicate it had been discarded. On **`chat/completions` and `responses`** (`extra="allow"`) it already reached the wire, but unvalidated; those calls now raise a local `ValidationError` for a value the API would have rejected with a 400. If you were passing an id that violates the constraints, you will see the failure earlier and more clearly than before.
+
+  `anon_user_id` is **not** an alias of the OpenAI-compatible `user` field, which Venice discards. Both can be set, and they are sent as separate fields.
+
+- **`camera_trajectory` on `video.submit()` / `video.run()`** — 2-12 `CameraKeyframe` poses describing the camera path, for H3 Max Multi-Angle. Requires `image_url`, and the output aspect ratio follows that image.
+
+  Two of its constraints cannot be expressed in JSON Schema and so are not enforced anywhere upstream of the API: **`time` must strictly increase** across the trajectory, and **total absolute azimuth travel is capped at 32 turns**. Both are validated locally. The travel figure is cumulative and uses absolute values, so a back-and-forth path accumulates rather than cancelling out.
+
+- **`client.voice_changer` — the `/audio/voice-changer/*` job family.** Converts an existing recording into a target voice, preserving the original timing. `run()` returns a `VoiceChangerJob` (an async context manager, like `MusicJob`/`VideoJob`) with the low-level `submit()` / `quote()` / `retrieve()` / `cancel()` underneath. The source can be a local file (uploaded as multipart) or an `audio_url` Venice fetches itself; passing both or neither raises before anything is uploaded. Also adds the `venice-py audio voice-change` CLI subcommand.
+
+  Three things differ from the music and video job families, and reasoning by analogy from those gets each one wrong:
+
+  * `quote(duration_seconds=...)` takes a **bare count of seconds** — `60`, not the `"60s"` form the video endpoints accept. `"60s"` is rejected.
+  * `retrieve()` has **two** outcomes, not three: a `PROCESSING` JSON body or the converted audio as `audio/mpeg`, discriminated by content type. The spec declares no `FAILED` status, so `wait()` never returns a failure to branch on — a failed conversion raises an `APIError` carrying `credits_refunded`.
+  * There is no download URL. The audio arrives inline on `status.data`; `VoiceChangerCompletedStatus` has no `url` or `expires_at`.
+
+  The **source** length is the billable quantity, and the quote is only an estimate — the charge is computed from the length Venice measures when the recording is queued, reported as `duration_seconds` on the queue response and on `job.duration_seconds`.
+
+  **Scope of verification.** The endpoints are live: a quote against a music model returns the server's own contract error. But the live catalog contains no model reporting `voice_changer: true`, and the spec's example id `elevenlabs-voice-changer` 404s, so **the queue→retrieve→complete happy path could not be exercised end to end or recorded to a cassette.** It is implemented against the spec and unit-tested with mocks. `resolve_voice_changer()` raising, and `quote()` surfacing the server's rejection, were verified live.
+
+- **Voice-changer capability fields on `MusicModelSpec`** — `voice_changer`, `supports_background_noise_removal`, `supports_seed`, `supports_custom_voice_id`, `accepted_audio_formats` and `max_source_audio_duration_seconds`. The four booleans are typed `bool` defaulting to `False` rather than `bool | None`, following the `uncensored` precedent: the API sends them only when true, so an absent field is a definite "no" rather than "undeclared".
+
+- **`models.resolve_voice_changer()`** — voice changing is a *capability*, not a model type. These models report `type="music"` with `voice_changer=true`, so `resolve_music()` can hand back a music generator that the voice-changer endpoints reject. This filters on the flag. It raises a `ValueError` naming the condition when no such model is in the catalog, which is the case on accounts without the capability.
+
+### Fixed
+
+- **`image.edit(quality=...)` no longer fails every call.** `POST /image/edit` declares `additionalProperties: false` and has no `quality` field, so the server rejected the whole request with `400 Unrecognized key(s) in object: 'quality'` — the parameter was not ignored, it was fatal. The SDK exposed `quality` on `edit()` and put it on the wire unconditionally, so **every call that set it had been failing**. Verified against the live endpoint: the identical request returns `200` without the field and `400` with it. It is now dropped before the request is built, so those calls succeed. Passing it raises a `DeprecationWarning`; the parameter is removed in 3.0.0.
+
+  `quality` is genuinely supported on `POST /image/multi-edit`, where the SDK models it correctly — `image.multi_edit()` is the migration target. `ImageEditRequest` no longer declares the field at all, so it cannot reach the wire from a hand-built request either.
+
+- **`venice-py models --type <t>` no longer reports "No models match" for a type it simply never fetched.** The CLI lists models by fetching each type in turn and filtering the union, but the list of types to fetch was hand-maintained and had drifted from `ModelListType`. Because the filter can only narrow what was already fetched, a missing type was indistinguishable from an empty result — `--type decision` printed "No models match the specified filters" while `jev-latest` was live in the catalog. The list is now derived from `ModelListType`, so a new type is covered as soon as it is declared.
+
+- **`from venice_ai.resources import Decisions` now works.** The resource was wired onto `VeniceClient` but never added to the package's import block or `__all__`, so it was reachable only as `client.decisions`. Every resource attached to the client is now checked against the package exports by a test.
+
+### Deprecated
+
+- **`image.edit(quality=...)`** is accepted and ignored, and is removed in 3.0.0. See the entry under Fixed — the endpoint never accepted it. Use `image.multi_edit(quality=...)`.
 
 ## [2.4.1] - 2026-09-19
 
@@ -883,7 +935,10 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.3.0...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/sethbang/venice-py/compare/v2.4.1...v2.5.0
+[2.4.1]: https://github.com/sethbang/venice-py/compare/v2.4.0...v2.4.1
+[2.4.0]: https://github.com/sethbang/venice-py/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/sethbang/venice-py/compare/v2.2.1...v2.3.0
 [2.2.1]: https://github.com/sethbang/venice-py/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/sethbang/venice-py/compare/v2.1.0...v2.2.0

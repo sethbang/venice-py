@@ -28,6 +28,8 @@ examples/
 │   └── agent_loop.py            # Agent loop via run_with_tools (auto tool dispatch)
 ├── responses/                   # OpenAI-style Responses API (Alpha)
 │   └── responses_api.py         # responses.create — typed output blocks
+├── decisions/                   # Decision ("System One") models (Beta)
+│   └── ticket_routing.py        # Typed noul/choice/score judgments + confidence gating
 ├── embeddings/                  # Text embedding examples
 │   ├── basic_embeddings.py      # Simple text vectorization
 │   ├── similarity_search.py     # Semantic similarity analysis
@@ -47,6 +49,7 @@ examples/
 │   ├── text_to_speech.py        # Basic TTS generation
 │   ├── speech_to_text.py        # Speech-to-text transcription
 │   ├── voice_cloning.py         # Clone a voice from a sample, then synthesize
+│   ├── voice_changer.py         # Re-voice an existing recording (job family)
 │   ├── voice_options.py         # Different voices and settings
 │   └── long_text_streaming.py   # Stream TTS audio for long-form text
 ├── video/                       # Video generation examples

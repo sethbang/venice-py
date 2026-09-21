@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...identifiers import ModelId
+from .common import ANON_USER_ID_DESCRIPTION, AnonUserId
 
 # ============================================================================
 # Image Generation Request Models
@@ -145,6 +146,11 @@ class ImageGenerationRequest(BaseModel):
         ),
     )
 
+    anon_user_id: AnonUserId | None = Field(
+        default=None,
+        description=ANON_USER_ID_DESCRIPTION,
+    )
+
 
 class SimpleImageGenerationRequest(BaseModel):
     """OpenAI-compatible image generation request"""
@@ -202,6 +208,11 @@ class SimpleImageGenerationRequest(BaseModel):
     )
     user: str | None = Field(None, description="User identifier (compatibility only)")
 
+    anon_user_id: AnonUserId | None = Field(
+        default=None,
+        description=ANON_USER_ID_DESCRIPTION,
+    )
+
 
 class ImageUpscaleRequest(BaseModel):
     """Image upscale request.
@@ -235,7 +246,12 @@ class ImageUpscaleRequest(BaseModel):
 
 
 class ImageEditRequest(BaseModel):
-    """Image edit request"""
+    """Image edit request.
+
+    ``POST /image/edit`` declares ``additionalProperties: false`` and does not
+    accept ``quality``. It is valid on ``POST /image/multi-edit``, which is
+    where :class:`ImageMultiEditRequest` models it.
+    """
 
     prompt: str = Field(
         ...,
@@ -282,15 +298,6 @@ class ImageEditRequest(BaseModel):
             "inferred from resolution (PNG for 1K edits, JPEG for 2K/4K edits)."
         ),
     )
-    quality: Literal["low", "medium", "high"] | None = Field(
-        default=None,
-        description=(
-            "Output quality for quality-aware edit models (e.g. gpt-image-2-edit) "
-            "per the edit docs. Model-dependent and sent only when set; omit for "
-            "models that don't support it."
-        ),
-    )
-
     enhance_prompt: bool | None = Field(
         None,
         description=(
@@ -310,6 +317,11 @@ class ImageEditRequest(BaseModel):
         ),
     )
 
+    anon_user_id: AnonUserId | None = Field(
+        default=None,
+        description=ANON_USER_ID_DESCRIPTION,
+    )
+
 
 class ImageBackgroundRemoveRequest(BaseModel):
     """Request model for background removal."""
@@ -317,6 +329,11 @@ class ImageBackgroundRemoveRequest(BaseModel):
     image: str | None = Field(default=None, description="Base64-encoded image data")
     image_url: str | None = Field(
         default=None, description="URL of the image to remove the background from"
+    )
+
+    anon_user_id: AnonUserId | None = Field(
+        default=None,
+        description=ANON_USER_ID_DESCRIPTION,
     )
 
 
@@ -407,6 +424,11 @@ class ImageMultiEditRequest(BaseModel):
             "generation. Supported only by models that advertise it; ignored "
             "rather than rejected by the rest. Omit for the model default."
         ),
+    )
+
+    anon_user_id: AnonUserId | None = Field(
+        default=None,
+        description=ANON_USER_ID_DESCRIPTION,
     )
 
 

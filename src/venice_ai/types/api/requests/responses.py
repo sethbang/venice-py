@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .common import ReasoningConfig, Tool, VeniceParameters
+from .common import ANON_USER_ID_DESCRIPTION, AnonUserId, ReasoningConfig, Tool, VeniceParameters
 
 
 class ResponsesRequest(BaseModel):
@@ -76,6 +76,11 @@ class ResponsesRequest(BaseModel):
     )
     venice_parameters: VeniceParameters | None = Field(
         default=None, description="Venice-specific request parameters."
+    )
+
+    anon_user_id: AnonUserId | None = Field(
+        default=None,
+        description=ANON_USER_ID_DESCRIPTION,
     )
 
 

@@ -150,9 +150,11 @@ from .rate_limiting import (
     RateLimiterMode,
     SimpleRateLimiter,
 )
+from .resources.decisions import Decisions
 from .resources.image import ImageJob
 from .resources.music import Music, MusicJob
 from .resources.video import VideoJob
+from .resources.voice_changer import VoiceChanger, VoiceChangerJob
 from .streaming import BytesResponse, ChatStream, Stream
 from .types.api.audio import AudioResponse
 from .types.api.capabilities import (
@@ -170,6 +172,15 @@ from .types.api.chat import (
     ToolCall,
     ToolCallFunction,
     ToolLoopResult,
+)
+from .types.api.decisions import (
+    ChoiceAnswer,
+    DecisionAnswer,
+    DecisionResponse,
+    DecisionUsage,
+    NoulAnswer,
+    ScoreAnswer,
+    UnknownAnswer,
 )
 from .types.api.images import ImageGenerationResponse
 from .types.api.requests.api_keys import CreateApiKeyRequest
@@ -193,6 +204,13 @@ from .types.api.requests.common import (
     StreamOptions,
     TextContent,
     VeniceParameters,
+)
+from .types.api.requests.decisions import (
+    ChoiceQuestion,
+    CreateDecisionRequest,
+    NoulCriteria,
+    NoulQuestion,
+    ScoreQuestion,
 )
 from .types.api.requests.responses import ResponsesRequest
 from .types.api.responses import (
@@ -289,6 +307,19 @@ __all__ = [
     "ToolLoopResult",
     # Model capability discovery
     "Capabilities",
+    "ChoiceAnswer",
+    "DecisionAnswer",
+    "DecisionResponse",
+    "DecisionUsage",
+    "NoulAnswer",
+    "ScoreAnswer",
+    "UnknownAnswer",
+    "ChoiceQuestion",
+    "CreateDecisionRequest",
+    "NoulCriteria",
+    "NoulQuestion",
+    "ScoreQuestion",
+    "Decisions",
     "ChatCapabilities",
     "ImageCapabilities",
     "VideoCapabilities",
@@ -357,6 +388,8 @@ __all__ = [
     "ImageJob",
     # Video job abstraction
     "VideoJob",
+    "VoiceChanger",
+    "VoiceChangerJob",
     # Music resource + job abstraction
     "Music",
     "MusicJob",

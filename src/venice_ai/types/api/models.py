@@ -743,6 +743,56 @@ class MusicModelSpec(ModelSpec):
     max_speed: float | None = Field(default=None, description="Maximum supported speed multiplier.")
     default_speed: float | None = Field(default=None, description="Default speed multiplier.")
 
+    # ---- Voice-changer capability ------------------------------------------
+    # Voice changing is not a distinct model type: these models report
+    # ``type="music"`` and are distinguished by ``voice_changer``. The three
+    # booleans below follow the ``uncensored`` convention rather than the
+    # ``supports_*`` one — the API sends them only when true, so an absent
+    # field is a definite "no", not "undeclared".
+    voice_changer: bool = Field(
+        default=False,
+        description=(
+            "Whether this model converts an existing recording into a target "
+            "voice via ``/audio/voice-changer/*`` rather than generating music. "
+            "Sent only when true."
+        ),
+    )
+    supports_background_noise_removal: bool = Field(
+        default=False,
+        description=(
+            "Whether the model accepts ``remove_background_noise`` on a "
+            "voice-changer queue request. Sent only when true."
+        ),
+    )
+    supports_seed: bool = Field(
+        default=False,
+        description=(
+            "Whether the model accepts a ``seed`` for reproducible conversion. Sent only when true."
+        ),
+    )
+    supports_custom_voice_id: bool = Field(
+        default=False,
+        description=(
+            "Whether ``voice`` accepts a provider Voice ID rather than only a "
+            "member of ``voices``. Sent only when true."
+        ),
+    )
+    accepted_audio_formats: list[str] | None = Field(
+        default=None,
+        description=(
+            "Source-recording containers this model accepts (e.g. "
+            "``['mp3', 'wav', 'm4a']``). ``None`` means undeclared."
+        ),
+    )
+    max_source_audio_duration_seconds: int | None = Field(
+        default=None,
+        description=(
+            "Longest source recording this model will convert, in seconds. "
+            "Voice changing preserves timing, so this bounds both the input "
+            "and the billed quantity."
+        ),
+    )
+
 
 class TtsModelSpec(ModelSpec):
     """Spec for text-to-speech models (``type='tts'``)."""
@@ -786,6 +836,32 @@ class UpscaleModelSpec(ModelSpec):
     """
 
 
+class DecisionModelSpec(ModelSpec):
+    """Spec for decision models (``type='decision'``).
+
+    Decision models (Venice's "System One" class, e.g. Jev) answer typed
+    questions about a ``state`` instead of generating text; see
+    :class:`venice_ai.resources.decisions.Decisions`. They budget tokens
+    differently from chat models — there is no ``availableContextTokens``;
+    instead two separate ceilings apply to a ``/decisions`` request.
+    """
+
+    maxStateTokens: int | None = Field(
+        default=None,
+        description=(
+            "Maximum tokens for ``state`` plus the single longest question. "
+            "Only present for decision models."
+        ),
+    )
+    maxTotalTokens: int | None = Field(
+        default=None,
+        description=(
+            "Maximum tokens for ``state`` plus all questions combined. "
+            "Only present for decision models."
+        ),
+    )
+
+
 # Dispatch map: model type string → typed spec class.
 # Used by ``ModelResponse._coerce_spec_subclass`` to upgrade the raw
 # ``model_spec`` dict into the right subclass during validation.
@@ -799,6 +875,7 @@ _SPEC_BY_TYPE: dict[str, type[ModelSpec]] = {
     "asr": AsrModelSpec,
     "embedding": EmbeddingModelSpec,
     "upscale": UpscaleModelSpec,
+    "decision": DecisionModelSpec,
 }
 
 
@@ -958,6 +1035,7 @@ __all__ = [
     "AsrModelSpec",
     "EmbeddingModelSpec",
     "UpscaleModelSpec",
+    "DecisionModelSpec",
     "KNOWN_MODEL_TYPES",
     "ModelResponse",
     "ModelsListResponse",

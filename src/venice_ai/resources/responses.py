@@ -57,6 +57,7 @@ class Responses(APIResource["VeniceClient"]):
         tool_choice: str | dict[str, Any] | None = None,
         web_search: bool | None = None,
         venice_parameters: Any | None = None,
+        anon_user_id: str | None = None,
         stream: Literal[False] = False,
     ) -> ResponsesResponse: ...
 
@@ -76,6 +77,7 @@ class Responses(APIResource["VeniceClient"]):
         tool_choice: str | dict[str, Any] | None = None,
         web_search: bool | None = None,
         venice_parameters: Any | None = None,
+        anon_user_id: str | None = None,
         stream: Literal[True],
     ) -> AsyncIterable[ResponsesStreamEvent]: ...
 
@@ -94,6 +96,7 @@ class Responses(APIResource["VeniceClient"]):
         tool_choice: str | dict[str, Any] | None = None,
         web_search: bool | None = None,
         venice_parameters: Any | None = None,
+        anon_user_id: str | None = None,
         stream: bool = False,
     ) -> ResponsesResponse | AsyncIterable[ResponsesStreamEvent]:
         """Create a response using the Responses API (Alpha).
@@ -174,6 +177,7 @@ class Responses(APIResource["VeniceClient"]):
             tool_choice=tool_choice,
             web_search=web_search,
             venice_parameters=venice_parameters,
+            anon_user_id=anon_user_id,
         )
         body = request.model_dump(exclude_none=True)
         # /responses documents only a subset of venice_parameters; the SDK reuses

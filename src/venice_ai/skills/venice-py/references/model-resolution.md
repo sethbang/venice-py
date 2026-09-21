@@ -118,6 +118,14 @@ inpaint_model = await client.models.resolve_inpaint(...)
 music_model   = await client.models.resolve_music(...)
 ```
 
+### `resolve_decision`
+
+```python
+decision_model = await client.models.resolve_decision(...)
+```
+
+Returns a decision ("System One") model for `client.decisions.create()`. Unlike `resolve_chat`, this one does **not** filter beta models — every decision model is beta-flagged today, so excluding them would leave no candidates. See `references/decisions.md`.
+
 ## `resolve_cheapest_video` — the price-aware shortcut
 
 Video generation is the most expensive Venice modality and prices vary widely between models. `resolve_cheapest_video` issues one `POST /video/quote` per candidate and picks the lowest:

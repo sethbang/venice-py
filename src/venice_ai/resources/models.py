@@ -54,6 +54,7 @@ from ..types.api.models import (
     ImageModelConstraints,
     InpaintModelConstraints,
     ModelResponse,
+    MusicModelSpec,
     VideoModelConstraints,
 )
 
@@ -77,6 +78,7 @@ type ModelListType = Literal[
     "upscale",
     "inpaint",
     "video",
+    "decision",
     "all",
     "code",
 ]
@@ -99,7 +101,7 @@ class Models(APIResource["VeniceClient"]):
         - List all available models with detailed metadata
         - Discover models by semantic traits (fastest, best, default, etc.)
         - Access compatibility mappings for external model migration
-        - Filter models by type (text, image, embedding, TTS, upscale)
+        - Filter models by type (text, image, embedding, TTS, upscale, decision)
         - Retrieve comprehensive model specifications and pricing
 
     Args:
@@ -142,7 +144,7 @@ class Models(APIResource["VeniceClient"]):
 
         :param type: Filter for model type. Valid API values: ``"text"``,
             ``"image"``, ``"embedding"``, ``"tts"``, ``"asr"``, ``"music"``, ``"upscale"``,
-            ``"inpaint"``, ``"video"``, ``"all"``, ``"code"``. The SDK also accepts
+            ``"inpaint"``, ``"video"``, ``"decision"``, ``"all"``, ``"code"``. The SDK also accepts
             ``"chat"`` as an alias for ``"text"`` to match the user-facing language used
             elsewhere (e.g. :py:meth:`resolve(type="chat") <resolve>`). If not provided,
             the SDK sends ``type="all"`` so the response is the union of every model
@@ -255,7 +257,7 @@ class Models(APIResource["VeniceClient"]):
         :param type: Optional filter for model type. Only compatibility mappings for
             models of the specified type will be returned. Valid values include
             ``"asr"``, ``"embedding"``, ``"image"``, ``"music"``, ``"text"``,
-            ``"tts"``, ``"upscale"``, ``"inpaint"``, and ``"video"``.
+            ``"tts"``, ``"upscale"``, ``"inpaint"``, ``"video"``, and ``"decision"``.
             Defaults to ``"text"`` per the API spec.
 
 
@@ -445,7 +447,8 @@ class Models(APIResource["VeniceClient"]):
                 )
             return InpaintCapabilities()
 
-        # Catch-all for embedding / tts / asr / music / upscale.
+        # Catch-all for embedding / tts / asr / music / upscale / decision,
+        # plus any model type this release predates.
         return GenericCapabilities(type=entry.type, privacy=privacy)
 
     # NOTE: ``type`` deliberately shadows the builtin to give the public API a
@@ -455,7 +458,7 @@ class Models(APIResource["VeniceClient"]):
         self,
         *,
         type: Literal[
-            "chat", "embedding", "image", "video", "tts", "asr", "inpaint", "music"
+            "chat", "embedding", "image", "video", "tts", "asr", "inpaint", "music", "decision"
         ] = "chat",
         # Chat capability filters
         require_function_calling: bool = False,
@@ -552,6 +555,11 @@ class Models(APIResource["VeniceClient"]):
                 )
             case "music":
                 return await selector.select_music_model(
+                    preferred_models=preferred_models,
+                    exclude_models=exclude_set,
+                )
+            case "decision":
+                return await selector.select_decision_model(
                     preferred_models=preferred_models,
                     exclude_models=exclude_set,
                 )
@@ -799,4 +807,74 @@ class Models(APIResource["VeniceClient"]):
         """Shortcut for ``resolve(type="music", ...)``."""
         return await self.resolve(
             type="music", preferred_models=preferred_models, exclude_models=exclude_models
+        )
+
+    async def resolve_voice_changer(
+        self,
+        *,
+        preferred_models: builtins.list[str] | None = None,
+        exclude_models: builtins.list[str] | None = None,
+    ) -> str:
+        """Pick a voice-changer model dynamically.
+
+        Voice changing is **not** a distinct model type. Those models are
+        registered under ``type="music"`` and are identified by
+        ``voice_changer=True`` on their :class:`MusicModelSpec`, so
+        ``resolve_music()`` may well hand back a music *generator* that the
+        ``/audio/voice-changer/*`` endpoints reject. This shortcut filters on
+        the capability flag instead.
+
+        :param preferred_models: Preferred model IDs in priority order. The
+            first preferred id present in the candidate set wins.
+        :param exclude_models: Model IDs to exclude from selection.
+
+        :return: Selected voice-changer model ID.
+        :raises ValueError: If no voice-changer model is available to this
+            account. The capability is not enabled everywhere, so this is an
+            expected condition worth handling rather than a bug.
+
+        Example::
+
+            async with VeniceClient() as client:
+                model = await client.models.resolve_voice_changer()
+                job = await client.voice_changer.run(model=model, file="source.mp3")
+        """
+        music = await self.list(type="music")
+        excluded = set(exclude_models or [])
+
+        candidates = [
+            entry.id
+            for entry in music.data
+            if entry.id not in excluded
+            and isinstance(entry.model_spec, MusicModelSpec)
+            and entry.model_spec.voice_changer
+        ]
+
+        if not candidates:
+            raise ValueError(
+                "No available voice-changer models found. Voice-changer models "
+                "report type='music' with voice_changer=true; none in the current "
+                "catalog does, so the capability is not enabled for this account."
+            )
+
+        for preferred in preferred_models or []:
+            if preferred in candidates:
+                return preferred
+        return candidates[0]
+
+    async def resolve_decision(
+        self,
+        *,
+        preferred_models: builtins.list[str] | None = None,
+        exclude_models: builtins.list[str] | None = None,
+    ) -> str:
+        """Shortcut for ``resolve(type="decision", ...)``.
+
+        Resolves a decision ("System One") model for
+        :meth:`client.decisions.create() <venice_ai.resources.decisions.Decisions.create>`.
+        Decision models are beta-flagged today, so unlike
+        :meth:`resolve_chat` this shortcut does not filter them out.
+        """
+        return await self.resolve(
+            type="decision", preferred_models=preferred_models, exclude_models=exclude_models
         )

@@ -99,6 +99,7 @@ from ..types.api import (
     SimpleImageGenerationResponse,
     StyleReference,
 )
+from ..types.api.requests.common import validate_anon_user_id
 from ..validation.validators import validate_model_id
 
 logger = logging.getLogger(__name__)
@@ -379,6 +380,7 @@ class Image(APIResource["VeniceClient"]):
         steps: int | None = None,
         style_preset: str | None = None,
         width: int | None = None,
+        anon_user_id: str | None = None,
     ) -> ImageGenerationResponse: ...
 
     @overload
@@ -407,6 +409,7 @@ class Image(APIResource["VeniceClient"]):
         steps: int | None = None,
         style_preset: str | None = None,
         width: int | None = None,
+        anon_user_id: str | None = None,
     ) -> bytes: ...
 
     async def create(
@@ -434,6 +437,7 @@ class Image(APIResource["VeniceClient"]):
         steps: int | None = None,
         style_preset: str | None = None,
         width: int | None = None,
+        anon_user_id: str | None = None,
         timeout: float | aiohttp.ClientTimeout | None = None,
     ) -> ImageGenerationResponse | bytes:
         """
@@ -543,6 +547,7 @@ class Image(APIResource["VeniceClient"]):
             seed=seed,
             steps=steps,
             style_preset=style_preset,
+            anon_user_id=anon_user_id,
             width=width,
         )
 
@@ -600,6 +605,7 @@ class Image(APIResource["VeniceClient"]):
         steps: int | None = None,
         style_preset: str | None = None,
         width: int | None = None,
+        anon_user_id: str | None = None,
     ) -> ImageJob:
         """Build an :class:`ImageJob` for parallel-friendly image generation.
 
@@ -642,6 +648,7 @@ class Image(APIResource["VeniceClient"]):
             "steps": steps,
             "style_preset": style_preset,
             "width": width,
+            "anon_user_id": anon_user_id,
         }
         # Drop None values so each kwarg behaves identically to a direct
         # ``Image.create`` call where the caller omits the same argument.
@@ -807,6 +814,7 @@ class Image(APIResource["VeniceClient"]):
         quality: Literal["low", "medium", "high"] | None = None,
         enhance_prompt: bool | None = None,
         disable_prompt_optimization_thinking: bool | None = None,
+        anon_user_id: str | None = None,
         timeout: float | aiohttp.ClientTimeout | None = None,
     ) -> bytes:
         """
@@ -850,6 +858,13 @@ class Image(APIResource["VeniceClient"]):
             When omitted, the format is inferred from resolution (PNG for 1K
             edits, JPEG for 2K/4K edits).
         :type output_format: Optional[Literal["jpeg", "png", "webp"]]
+        :param quality: Deprecated and ignored. ``POST /image/edit`` does not
+            accept a quality field and rejects the whole request when one is
+            sent, so every call that passed this failed with HTTP 400. It is
+            now dropped before the request is built. Use
+            :meth:`multi_edit`, where ``quality`` is genuinely supported.
+            Removed in 3.0.0.
+        :type quality: Optional[Literal["low", "medium", "high"]]
         :param timeout: Optional. Request timeout configuration. Pass a float
             (seconds) or an :class:`aiohttp.ClientTimeout` instance. Overrides
             the client-level default for this call only.
@@ -909,6 +924,17 @@ class Image(APIResource["VeniceClient"]):
 
         headers = {"Accept": "image/*"}
 
+        if quality is not None:
+            warnings.warn(
+                "quality is not accepted by POST /image/edit — the endpoint declares "
+                "additionalProperties: false and rejects the whole request with HTTP 400 "
+                "when it is present, so every call that set it has been failing. It is "
+                "now dropped instead of sent. Use image.multi_edit(), where quality is "
+                "supported. This parameter is removed in 3.0.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         edit_request = ImageEditRequest(
             prompt=prompt,
             model=model,
@@ -917,9 +943,9 @@ class Image(APIResource["VeniceClient"]):
             safe_mode=safe_mode,
             resolution=resolution,
             output_format=output_format,
-            quality=quality,
             enhance_prompt=enhance_prompt,
             disable_prompt_optimization_thinking=disable_prompt_optimization_thinking,
+            anon_user_id=anon_user_id,
         )
         payload = edit_request.model_dump(exclude_none=True)
 
@@ -1006,6 +1032,7 @@ class Image(APIResource["VeniceClient"]):
         *,
         image: str | bytes | BinaryIO | Path | None = None,
         image_url: str | None = None,
+        anon_user_id: str | None = None,
     ) -> bytes:
         """Remove background from an image (POST /image/background-remove).
 
@@ -1047,7 +1074,7 @@ class Image(APIResource["VeniceClient"]):
 
         if image_url is not None:
             # URL mode — send as {"image_url": "..."} per the API spec
-            request = ImageBackgroundRemoveRequest(image_url=image_url)
+            request = ImageBackgroundRemoveRequest(image_url=image_url, anon_user_id=anon_user_id)
             payload = request.model_dump(exclude_none=True)
 
             response = await self._client._request(
@@ -1078,7 +1105,7 @@ class Image(APIResource["VeniceClient"]):
             else:
                 # JSON mode (base64 or data URI)
                 image_value = str(image)
-                request = ImageBackgroundRemoveRequest(image=image_value)
+                request = ImageBackgroundRemoveRequest(image=image_value, anon_user_id=anon_user_id)
                 payload = request.model_dump(exclude_none=True)
 
                 response = await self._client._request(
@@ -1114,6 +1141,7 @@ class Image(APIResource["VeniceClient"]):
         quality: Literal["low", "medium", "high"] | None = None,
         enhance_prompt: bool | None = None,
         disable_prompt_optimization_thinking: bool | None = None,
+        anon_user_id: str | None = None,
     ) -> bytes:
         """Edit an image using up to 3 layered inputs (POST /image/multi-edit).
 
@@ -1232,6 +1260,10 @@ class Image(APIResource["VeniceClient"]):
             payload["enhance_prompt"] = enhance_prompt
         if disable_prompt_optimization_thinking is not None:
             payload["disable_prompt_optimization_thinking"] = disable_prompt_optimization_thinking
+        if anon_user_id is not None:
+            # multi_edit builds its body by hand, so the constraints that
+            # ImageMultiEditRequest would apply are enforced explicitly here.
+            payload["anon_user_id"] = validate_anon_user_id(anon_user_id)
 
         response = await self._client._request(
             method="POST",
@@ -1270,6 +1302,7 @@ class Image(APIResource["VeniceClient"]):
         moderation: Literal["low", "auto"] | None = None,
         output_compression: int | None = None,
         user: str | None = None,
+        anon_user_id: str | None = None,
     ) -> SimpleImageGenerationResponse:
         """Generate an image via the OpenAI-compatible ``POST /images/generations`` endpoint.
 
@@ -1312,6 +1345,7 @@ class Image(APIResource["VeniceClient"]):
             moderation=moderation,
             output_compression=output_compression,
             user=user,
+            anon_user_id=anon_user_id,
         )
         body = request.model_dump(exclude_none=True)
         return await self._client.post(

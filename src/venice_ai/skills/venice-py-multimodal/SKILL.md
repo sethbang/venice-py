@@ -266,6 +266,7 @@ except VideoGenerationError as e:
 - `references/audio-tts-stt.md` — voice catalog, formats, streaming TTS, STT options
 - `references/music.md` — v2 separation rationale, job lifecycle, quote-before-run
 - `references/video.md` — text-to-video, image-to-video, upscale, advanced fields
+- `references/voice-changer.md` — `client.voice_changer`, re-voicing an existing recording (capability, not a model type)
 - `references/job-lifecycle.md` — the unified `async with job:` pattern shared by music + video
 
 ## Examples to read
@@ -273,6 +274,6 @@ except VideoGenerationError as e:
 Paths below are relative to the SDK repo's `examples/` directory.
 
 - `image/text_to_image.py`, `image/image_upscaling.py`, `image/image_editing.py`, `image/quality_control.py`, `image/background_removal.py`, `image/style_variants.py`, `image/batch_generation.py`, `image/multi_edit.py`
-- `audio/text_to_speech.py`, `audio/speech_to_text.py`, `audio/voice_cloning.py`, `audio/voice_options.py`
+- `audio/text_to_speech.py`, `audio/speech_to_text.py`, `audio/voice_cloning.py`, `audio/voice_options.py`, `audio/voice_changer.py`
 - `music/music_generation.py`
 - `video/text_to_video.py`, `video/image_to_video.py`, `video/upscale.py`, `video/advanced_fields.py`

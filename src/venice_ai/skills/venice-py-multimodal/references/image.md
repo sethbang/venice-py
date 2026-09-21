@@ -106,6 +106,11 @@ Path("edited.png").write_bytes(edited)
 as raw `bytes`. There is no mask, strength, seed, or steps parameter; the model
 edits the whole image per the prompt.
 
+**There is no `quality` on `edit()`.** `POST /image/edit` declares
+`additionalProperties: false` and rejects the entire request with a `400`
+(`Unrecognized key(s) in object: 'quality'`) when one is sent — it is not
+ignored. Quality tiers apply to `create()`/`submit()` and `multi_edit()`.
+
 `resolution` is honored only by models with resolution-based pricing; others
 reject it with a `400`. Since the catalog exposes no per-model flag for it, the
 robust pattern is to try with `resolution` and retry without on
