@@ -43,6 +43,8 @@ RESOURCES: list[str] = [
     "x402",
     "crypto",
     "responses",
+    "decisions",
+    "voice_changer",
 ]
 
 # Mapping from "resource.method" → (status, [cli_invocations], note).
@@ -249,6 +251,18 @@ KNOWN_CLI_MAP: dict[str, tuple[str, list[str], str]] = {
         ["venice-py models resolve --type cheapest-video"],
         "Renders the CheapestVideoResult with all-quotes table.",
     ),
+    "models.resolve_decision": (
+        "covered",
+        ["venice-py models resolve --type decision"],
+        "Beta-only model class; the decision arm never applies --include-beta.",
+    ),
+    "models.resolve_voice_changer": (
+        "missing",
+        [],
+        "Voice-changer is a capability on type='music', not a resolve() type, so "
+        "`models resolve --type` cannot express it. The audio voice-change command "
+        "calls it internally to pick a default model.",
+    ),
     "models.resolve_embedding": (
         "covered",
         ["venice-py models resolve --type embedding"],
@@ -434,6 +448,39 @@ KNOWN_CLI_MAP: dict[str, tuple[str, list[str], str]] = {
         "missing",
         [],
         "Whole `crypto` resource has no CLI surface.",
+    ),
+    # ---- voice_changer ----
+    "voice_changer.submit": (
+        "partial",
+        ["venice-py audio voice-change <source>"],
+        "CLI drives run() (submit + poll + download); submit() alone is not exposed.",
+    ),
+    "voice_changer.run": (
+        "covered",
+        ["venice-py audio voice-change <source>", "venice-py audio voice-change --url <url>"],
+        "",
+    ),
+    "voice_changer.quote": (
+        "covered",
+        ["venice-py audio voice-change --quote-only --duration <seconds>"],
+        "",
+    ),
+    "voice_changer.retrieve": (
+        "partial",
+        ["venice-py audio voice-change <source>"],
+        "Polled internally by the job; no standalone retrieve command.",
+    ),
+    "voice_changer.cancel": (
+        "partial",
+        ["venice-py audio voice-change <source>"],
+        "Runs via the job context manager on exit; not separately invocable.",
+    ),
+    # ---- decisions ----
+    "decisions.create": (
+        "missing",
+        [],
+        "Beta /decisions endpoint has no CLI surface; questions are a nested "
+        "typed map that does not reduce cleanly to flags.",
     ),
     # ---- responses ----
     "responses.create": (

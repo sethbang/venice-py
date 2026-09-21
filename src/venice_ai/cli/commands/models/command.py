@@ -2,11 +2,14 @@
 Main command handler for models listing
 """
 
+from typing import get_args
+
 import click
 from rich.panel import Panel
 
 from venice_ai import VeniceClient
 from venice_ai.exceptions import VeniceError
+from venice_ai.resources.models import ModelListType
 
 from ...config import get_client_kwargs
 from ...utils import console, print_error, print_info
@@ -14,6 +17,23 @@ from .comparator import ModelComparator
 from .filters import FilterOptions, ModelFilter
 from .formatters import ModelFormatter
 from .sorter import ModelSorter
+
+#: ``ModelListType`` members that are not concrete model types: ``"chat"`` is
+#: an SDK-side alias for ``"text"``, and ``"all"``/``"code"`` are cross-cutting
+#: views. Everything else names a type the catalog can be filtered by.
+ALIAS_MODEL_TYPES = frozenset({"chat", "all", "code"})
+
+
+def concrete_model_types() -> list[ModelListType]:
+    """Every real model type, derived from ``ModelListType``.
+
+    Hand-listing these silently stops covering new types: the ``--type`` filter
+    can only narrow what was already fetched, so a missing type reads as
+    "No models match the specified filters" rather than as an error. That is
+    exactly how ``--type decision`` came to return nothing while the model was
+    live in the catalog.
+    """
+    return [t for t in get_args(ModelListType.__value__) if t not in ALIAS_MODEL_TYPES]
 
 
 async def list_models(
@@ -57,21 +77,8 @@ async def list_models(
             all_models = []
             seen_ids = set()
             # Fetch every real model type so --type video|asr|music returns
-            # results instead of silently empty. Mirrors the ModelListType
-            # enum's concrete values (excludes the chat/all/code aliases).
-            from venice_ai.resources.models import ModelListType
-
-            model_types_to_fetch: list[ModelListType] = [
-                "text",
-                "image",
-                "tts",
-                "embedding",
-                "upscale",
-                "inpaint",
-                "video",
-                "asr",
-                "music",
-            ]
+            # results instead of silently empty.
+            model_types_to_fetch: list[ModelListType] = concrete_model_types()
 
             for mtype in model_types_to_fetch:
                 try:

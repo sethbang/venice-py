@@ -644,6 +644,49 @@ venice-py audio voices --region af --json
 venice-py audio voices --model tts-kokoro
 ```
 
+### `venice-py audio voice-change`
+
+Convert a recording into a different voice. The model re-voices what was
+already said and preserves the original timing, so the **source** length is
+what you are billed for.
+
+```bash
+venice-py audio voice-change [SOURCE] [OPTIONS]
+```
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--url` | | | Public http(s) URL of the source, instead of a local file |
+| `--model` | `-m` | runtime * | Voice-changer model to use |
+| `--voice` | `-v` | model default | Target voice |
+| `--remove-background-noise` | | `false` | Strip background noise before converting |
+| `--seed` | | | Seed for reproducible output |
+| `--output` | `-o` | `converted.mp3` | Where to write the converted audio |
+| `--quote-only` | | `false` | Price a conversion and exit without converting |
+| `--duration` | | | Source length in whole seconds, for `--quote-only` |
+| `--poll-interval` | | `3.0` | Seconds between status polls |
+
+> \* No static default — resolved at runtime via `models.resolve_voice_changer()`, which filters `type="music"` by the `voice_changer` capability flag. Voice changing is not its own model type.
+
+```bash
+# Convert a local recording
+venice-py audio voice-change recording.mp3 -o converted.mp3
+
+# Pick a target voice and clean up the source
+venice-py audio voice-change recording.mp3 --voice Aria --remove-background-noise
+
+# Convert from a URL instead of uploading
+venice-py audio voice-change --url https://example.com/clip.mp3 -o out.mp3
+
+# Price 90 seconds without converting anything
+venice-py audio voice-change --quote-only --duration 90
+```
+
+Provide exactly one of `SOURCE` or `--url`. The quote is an estimate — the
+charge is computed from the length Venice measures when the recording is
+queued. This capability is not enabled on every account; when no
+voice-changer model is in the catalog the command reports that and exits.
+
 ---
 
 ## Video
@@ -904,7 +947,7 @@ venice-py models [OPTIONS]
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--type` | `-t` | Filter by type — can be repeated. Choices: `text`, `image`, `embedding`, `tts`, `asr`, `music`, `upscale`, `inpaint`, `video`. An unknown value errors instead of returning nothing. |
+| `--type` | `-t` | Filter by type — can be repeated. Choices: `text`, `image`, `embedding`, `tts`, `asr`, `music`, `upscale`, `inpaint`, `video`, `decision`. An unknown value errors instead of returning nothing. |
 
 ### Capability Filtering
 

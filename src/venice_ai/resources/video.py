@@ -25,6 +25,7 @@ from ..exceptions import InvalidRequestError, VideoGenerationError
 from ..helpers import normalize_duration_seconds
 from ..types.api.models import VideoModelSpec
 from ..types.api.requests.video import (
+    CameraKeyframe,
     VideoCompleteRequest,
     VideoConsents,
     VideoElement,
@@ -363,6 +364,7 @@ class Video(APIResource["VeniceClient"]):
         omni_reference_task_type: Literal["auto", "reference", "edit", "extend"] | None = None,
         reference_document_urls: list[str] | None = None,
         keyframes: list[VideoKeyframe | dict] | None = None,
+        camera_trajectory: list[CameraKeyframe | dict] | None = None,
         enhancement_model: str | None = None,
         compression: float | None = None,
         creativity: float | None = None,
@@ -508,6 +510,7 @@ class Video(APIResource["VeniceClient"]):
             "omni_reference_task_type": omni_reference_task_type,
             "reference_document_urls": reference_document_urls,
             "keyframes": keyframes,
+            "camera_trajectory": camera_trajectory,
             "enhancement_model": enhancement_model,
             "compression": compression,
             "creativity": creativity,
@@ -841,6 +844,7 @@ class Video(APIResource["VeniceClient"]):
         omni_reference_task_type: Literal["auto", "reference", "edit", "extend"] | None = None,
         reference_document_urls: list[str] | None = None,
         keyframes: list[VideoKeyframe | dict] | None = None,
+        camera_trajectory: list[CameraKeyframe | dict] | None = None,
         enhancement_model: str | None = None,
         compression: float | None = None,
         creativity: float | None = None,
@@ -892,6 +896,7 @@ class Video(APIResource["VeniceClient"]):
             omni_reference_task_type=omni_reference_task_type,
             reference_document_urls=reference_document_urls,
             keyframes=keyframes,
+            camera_trajectory=camera_trajectory,
             enhancement_model=enhancement_model,
             compression=compression,
             creativity=creativity,

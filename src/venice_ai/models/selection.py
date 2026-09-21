@@ -1503,6 +1503,39 @@ class DynamicModelSelector:
             selector=selector,
         )
 
+    async def select_decision_model(
+        self,
+        preferred_models: list[str] | None = None,
+        exclude_models: set[str] | None = None,
+        selector: ModelSelectorType | None = None,
+    ) -> str:
+        """
+        Select a suitable decision ("System One") model.
+
+        Note that decision models are currently beta-flagged; unlike the chat
+        and video selectors this one does not offer an ``exclude_beta`` filter,
+        because applying it would leave no candidates at all.
+
+        Args:
+            preferred_models: List of preferred models in priority order
+            exclude_models: Set of models to exclude from selection
+            selector: Optional custom selection function. Takes precedence over
+                default_selector. Receives list of model dicts, returns model ID.
+
+        Returns:
+            Selected model ID
+
+        Raises:
+            ValueError: If no suitable decision model found
+        """
+        return await self._select_simple_model(
+            "decision",
+            "decision",
+            preferred_models=preferred_models,
+            exclude_models=exclude_models,
+            selector=selector,
+        )
+
     async def select_models_for_concurrency_test(
         self,
         count: int = 2,

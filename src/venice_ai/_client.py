@@ -34,6 +34,7 @@ from .resources.billing import Billing
 from .resources.characters import Characters
 from .resources.chat import ChatResource
 from .resources.crypto import Crypto
+from .resources.decisions import Decisions
 from .resources.embeddings import Embeddings
 from .resources.image import Image
 from .resources.models import Models
@@ -41,6 +42,7 @@ from .resources.music import Music
 from .resources.responses import Responses
 from .resources.tee import Tee
 from .resources.video import Video
+from .resources.voice_changer import VoiceChanger
 from .resources.x402 import X402
 from .streaming import Stream
 from .utils import NOT_GIVEN, NotGiven, serialize_form_value
@@ -80,10 +82,12 @@ class VeniceClient:
     audio: Audio
     music: Music
     billing: Billing
+    decisions: Decisions
     embeddings: Embeddings
     api_keys: ApiKeys
     characters: Characters
     video: Video
+    voice_changer: VoiceChanger
     crypto: Crypto
     tee: Tee
 
@@ -354,10 +358,12 @@ class VeniceClient:
         self.audio = Audio(self)
         self.music = Music(self)
         self.billing = Billing(self)
+        self.decisions = Decisions(self)
         self.embeddings = Embeddings(self)
         self.api_keys = ApiKeys(self)
         self.characters = Characters(self)
         self.video = Video(self)
+        self.voice_changer = VoiceChanger(self)
         self.augment = Augment(self)
         self.x402 = X402(self)
         self.crypto = Crypto(self)

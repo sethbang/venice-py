@@ -58,6 +58,16 @@ from .common import (
     # Venice-specific components
     VeniceParameters,
 )
+from .decisions import (
+    ChoiceQuestion,
+    CreateDecisionRequest,
+    DecisionInstructions,
+    DecisionQuestion,
+    DecisionState,
+    NoulCriteria,
+    NoulQuestion,
+    ScoreQuestion,
+)
 from .embeddings import (
     EmbeddingsRequest,
 )
@@ -78,6 +88,7 @@ from .music import (
 )
 from .responses import ResponsesRequest
 from .video import (
+    CameraKeyframe,
     SeedanceConsents,
     VideoCompleteRequest,
     VideoConsents,
@@ -88,6 +99,12 @@ from .video import (
     VideoRetrieveRequest,
     VideoTextToVideoRequest,
     VideoTranscriptionRequest,
+)
+from .voice_changer import (
+    CompleteVoiceChangerRequest,
+    QueueVoiceChangerRequest,
+    QuoteVoiceChangerRequest,
+    RetrieveVoiceChangerRequest,
 )
 
 # ============================================================================
@@ -156,6 +173,7 @@ __all__ = [
     "DeleteApiKeyQueryParams",
     # Video requests
     "VideoRequestBase",
+    "CameraKeyframe",
     "VideoConsents",
     "SeedanceConsents",
     "VideoTextToVideoRequest",
@@ -170,4 +188,18 @@ __all__ = [
     "MusicQuoteRequest",
     "MusicRetrieveRequest",
     "MusicCompleteRequest",
+    # Voice-changer requests
+    "CompleteVoiceChangerRequest",
+    "QueueVoiceChangerRequest",
+    "QuoteVoiceChangerRequest",
+    "RetrieveVoiceChangerRequest",
+    # Decision requests
+    "CreateDecisionRequest",
+    "DecisionState",
+    "DecisionInstructions",
+    "DecisionQuestion",
+    "NoulQuestion",
+    "NoulCriteria",
+    "ChoiceQuestion",
+    "ScoreQuestion",
 ]

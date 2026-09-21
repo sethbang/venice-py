@@ -44,7 +44,18 @@ from .resolve import resolve as resolve_command
     "model_type",
     multiple=True,
     type=click.Choice(
-        ["text", "image", "embedding", "tts", "asr", "music", "upscale", "inpaint", "video"]
+        [
+            "text",
+            "image",
+            "embedding",
+            "tts",
+            "asr",
+            "music",
+            "upscale",
+            "inpaint",
+            "video",
+            "decision",
+        ]
     ),
     help="Filter by model type (repeatable)",
 )

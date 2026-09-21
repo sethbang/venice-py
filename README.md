@@ -302,6 +302,45 @@ response = await client.chat.completions.create(
 )
 ```
 
+### Decision Models (Beta)
+
+Decision ("System One") models answer *typed questions* about a piece of state
+instead of generating text. Reach for these over `chat.completions` when the
+task is a bounded-answer-set judgment — routing, moderation, triage, scoring —
+and you were going to ask a chat model for JSON and parse it.
+
+```python
+from venice_ai.types.api import ChoiceQuestion, NoulQuestion, ScoreQuestion
+
+model = await client.models.resolve_decision()
+response = await client.decisions.create(
+    model=model,
+    state="My payouts have been failing for three days.",
+    questions={
+        "is_urgent": NoulQuestion(instructions="Does this need an urgent response?"),
+        "team": ChoiceQuestion(
+            instructions="Which team should handle this?",
+            criteria={"billing": "Payments and refunds", "technical": "Bugs and outages"},
+        ),
+        "frustration": ScoreQuestion(
+            instructions="How frustrated is the customer?",
+            criteria=["Calm", "Annoyed", "Furious"],
+        ),
+    },
+)
+
+team = response.choice("team")           # narrows the answer union by id
+if team.confidence > 0.8:                # gate on calibration, not the top answer
+    route_to(team.choice)
+```
+
+Every question is evaluated in parallel and in isolation against the same
+state, so one question cannot see another's answer. `noul` is a probability in
+`[0, 1]`, not a bool. Venice documents `POST /decisions` as unstable: request
+and response schemas may change without notice.
+
+[-> `examples/decisions/ticket_routing.py`](https://github.com/sethbang/venice-py/blob/main/examples/decisions/ticket_routing.py)
+
 ### Web Scrape, Search & Text Parsing (Augment)
 
 ```python
@@ -538,6 +577,8 @@ Rate limiting, distributed state, monitoring, observability, and performance tun
 | `video` | Async video generation | `run()` → `VideoJob`, low-level `submit()` / `quote()` / `retrieve()` / `cancel()` | [text_to_video.py](https://github.com/sethbang/venice-py/blob/main/examples/video/text_to_video.py) |
 | `audio` | TTS / ASR | `create_speech()`, `transcribe()` | [text_to_speech.py](https://github.com/sethbang/venice-py/blob/main/examples/audio/text_to_speech.py) |
 | `music` | Async music generation | `run()` → `MusicJob`, low-level `submit()` / `quote()` / `retrieve()` / `cancel()` | [music_generation.py](https://github.com/sethbang/venice-py/blob/main/examples/music/music_generation.py) |
+| `decisions` | Typed judgments from decision models (Beta) | `create()` | [ticket_routing.py](https://github.com/sethbang/venice-py/blob/main/examples/decisions/ticket_routing.py) |
+| `voice_changer` | Async voice conversion | `run()` → `VoiceChangerJob`, low-level `submit()` / `quote()` / `retrieve()` / `cancel()` | [voice_changer.py](https://github.com/sethbang/venice-py/blob/main/examples/audio/voice_changer.py) |
 | `embeddings` | Text embeddings | `create()` | [basic_embeddings.py](https://github.com/sethbang/venice-py/blob/main/examples/embeddings/basic_embeddings.py) |
 | `models` | Model discovery | `list()`, `get()` | [list_models.py](https://github.com/sethbang/venice-py/blob/main/examples/models/list_models.py) |
 | `billing` | Usage analytics | `get_balance()`, `get_usage_history()`, `get_usage_analytics()` | [usage_analytics.py](https://github.com/sethbang/venice-py/blob/main/examples/billing/usage_analytics.py) |

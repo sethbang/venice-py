@@ -4,8 +4,14 @@ Two things this protects:
 
 1. The kwarg's ``Literal`` membership matches the OpenAPI enum (``asr``,
    ``embedding``, ``image``, ``music``, ``text``, ``tts``, ``upscale``,
-   ``inpaint``, ``video``, ``all``, ``code``) plus the SDK-level alias
-   ``chat`` (which the validator normalises to ``text``).
+   ``inpaint``, ``video``, ``decision``, ``all``, ``code``) plus the
+   SDK-level alias ``chat`` (which the validator normalises to ``text``).
+
+   Note the deliberate asymmetry with :attr:`ModelResponse.type`, which is an
+   open ``str``. A *request* filter stays a closed ``Literal`` so a typo fails
+   at the call site; a *response* field stays open so a model type the SDK
+   predates never fails the parse. Widening this kwarg is not the same fix as
+   widening that field, and is not licensed by it.
 2. Calling ``list()`` with no kwarg sends ``type=all`` on the wire, not the
    server's text-only default.
 
@@ -25,10 +31,12 @@ import pytest
 from venice_ai.resources.models import Models
 from venice_ai.types.api import ModelsListResponse
 
-# Source of truth: the OpenAPI ``listModels`` enum at
-# ``_GLOBAL/venice-docs/docs.venice.ai/swagger.yaml.md`` (operationId
-# ``listModels``). Plus the SDK's ``chat`` alias and the documented but
-# undocumented-in-enum ``all`` / ``code`` values.
+# Source of truth: the OpenAPI ``listModels`` enum served live at
+# ``https://api.venice.ai/doc/api/swagger.yaml`` (operationId ``listModels``).
+# Plus the SDK's ``chat`` alias and the documented but undocumented-in-enum
+# ``all`` / ``code`` values. Re-fetch the spec before editing this set — the
+# cached copy under ``_GLOBAL/venice-docs/`` lags the live one and was missing
+# ``decision`` entirely.
 _EXPECTED_TYPE_MEMBERS = frozenset(
     {
         # Official API enum
@@ -41,6 +49,7 @@ _EXPECTED_TYPE_MEMBERS = frozenset(
         "upscale",
         "inpaint",
         "video",
+        "decision",
         # Documented in the description but not the enum block
         "all",
         "code",
@@ -127,3 +136,30 @@ async def test_list_chat_alias_normalised_to_text_on_wire():
     mock_client.get.assert_called_once_with(
         "models", params={"type": "text"}, cast_to=ModelsListResponse, force_direct=True
     )
+
+
+class TestCliFetchesEveryConcreteType:
+    """``venice-py models --type X`` can only narrow what it already fetched.
+
+    The CLI lists models by fetching each type in turn and then filtering the
+    union. It used to hand-list the types to fetch, so ``--type decision``
+    reported "No models match the specified filters" while ``jev-latest`` was
+    live in the catalog — a missing type is indistinguishable from an empty
+    result. The list is derived from ``ModelListType`` now; these guard the
+    derivation.
+    """
+
+    def test_every_concrete_type_is_fetched(self):
+        from venice_ai.cli.commands.models.command import (
+            ALIAS_MODEL_TYPES,
+            concrete_model_types,
+        )
+
+        expected = _EXPECTED_TYPE_MEMBERS - ALIAS_MODEL_TYPES
+        assert set(concrete_model_types()) == expected
+
+    def test_aliases_are_real_members(self):
+        """A typo'd alias name would silently fetch a bogus type instead."""
+        from venice_ai.cli.commands.models.command import ALIAS_MODEL_TYPES
+
+        assert ALIAS_MODEL_TYPES <= _EXPECTED_TYPE_MEMBERS

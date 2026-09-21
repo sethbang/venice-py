@@ -77,6 +77,80 @@ class VideoKeyframe(BaseModel):
     )
 
 
+class CameraKeyframe(BaseModel):
+    """One camera pose pinned to a normalized time in the generated video.
+
+    Distinct from :class:`VideoKeyframe`, which pins an *image* to a frame
+    index. This pins where the *camera* is, relative to its initial position.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    time: float = Field(
+        ...,
+        ge=0,
+        le=1,
+        description=(
+            "Normalized position in the clip, 0 (start) to 1 (end). Must be "
+            "strictly increasing across the trajectory."
+        ),
+    )
+    azimuth: float = Field(
+        ...,
+        description=(
+            "Horizontal camera angle in degrees, signed. Unbounded per keyframe, "
+            "but total absolute travel across the trajectory is capped at 32 turns."
+        ),
+    )
+    elevation: float = Field(
+        ...,
+        ge=-90,
+        le=90,
+        description="Vertical camera angle in degrees.",
+    )
+    distance: float = Field(
+        ...,
+        gt=0,
+        description=("Camera distance relative to its initial position; 1 leaves it unchanged."),
+    )
+
+
+#: Maximum total absolute azimuth travel across a trajectory, in degrees.
+#: The spec states the limit as "at most 32 turns".
+MAX_AZIMUTH_TRAVEL_DEGREES = 32 * 360
+
+
+def _validate_camera_trajectory(
+    keyframes: list[CameraKeyframe] | None,
+) -> list[CameraKeyframe] | None:
+    """Enforce the two constraints JSON Schema cannot express.
+
+    Both are stated in the spec's prose only, so nothing upstream of the API
+    rejects them: strictly increasing ``time``, and total absolute azimuth
+    travel of at most 32 turns.
+    """
+    if not keyframes:
+        return keyframes
+
+    for earlier, later in zip(keyframes, keyframes[1:], strict=False):
+        if later.time <= earlier.time:
+            raise ValueError(
+                "camera_trajectory times must be strictly increasing; "
+                f"got {earlier.time} followed by {later.time}"
+            )
+
+    travel = sum(
+        abs(later.azimuth - earlier.azimuth)
+        for earlier, later in zip(keyframes, keyframes[1:], strict=False)
+    )
+    if travel > MAX_AZIMUTH_TRAVEL_DEGREES:
+        raise ValueError(
+            "camera_trajectory total absolute azimuth travel must be at most "
+            f"32 turns ({MAX_AZIMUTH_TRAVEL_DEGREES} degrees); got {travel}"
+        )
+    return keyframes
+
+
 class SeedanceConsents(BaseModel):
     """Seedance face-media consent attestations.
 
@@ -246,6 +320,23 @@ class VideoRequestBase(BaseModel):
             "in the generated 24 fps video."
         ),
     )
+    camera_trajectory: list[CameraKeyframe] | None = Field(
+        None,
+        min_length=2,
+        max_length=12,
+        description=(
+            "For H3 Max Multi-Angle only: 2-12 camera poses describing the path "
+            "the camera takes. Requires ``image_url``, and the output aspect "
+            "ratio follows that image. Omit to leave the camera path to the model."
+        ),
+    )
+
+    @field_validator("camera_trajectory")
+    @classmethod
+    def _check_camera_trajectory(
+        cls, v: list[CameraKeyframe] | None
+    ) -> list[CameraKeyframe] | None:
+        return _validate_camera_trajectory(v)
 
     # ---- Enhancement (Topaz-style) models only -----------------------------
     enhancement_model: str | None = Field(

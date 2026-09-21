@@ -29,6 +29,13 @@ Available Resources:
 
     Music: Asynchronous music generation mirroring the video lifecycle.
 
+    VoiceChanger: Asynchronous voice conversion over the same queue lifecycle,
+        re-voicing an existing recording rather than generating one. Voice
+        changing is a capability on music-type models, not a model type.
+
+    Decisions: Typed judgments from decision ("System One") models, which
+        answer a map of questions about a state instead of generating text.
+
     Characters: Access to pre-configured AI personalities and specialized
         assistants for enhanced conversational experiences.
 
@@ -103,6 +110,7 @@ from .billing import Billing
 from .characters import Characters
 from .chat.completions import ChatCompletions
 from .crypto import Crypto
+from .decisions import Decisions
 from .embeddings import Embeddings
 from .image import Image
 from .models import Models
@@ -110,6 +118,7 @@ from .music import Music
 from .responses import Responses
 from .tee import Tee
 from .video import Video
+from .voice_changer import VoiceChanger
 from .x402 import X402
 
 __all__ = [
@@ -120,6 +129,7 @@ __all__ = [
     "ChatCompletions",
     "Characters",
     "Crypto",
+    "Decisions",
     "Embeddings",
     "Image",
     "Models",
@@ -127,5 +137,6 @@ __all__ = [
     "Responses",
     "Tee",
     "Video",
+    "VoiceChanger",
     "X402",
 ]

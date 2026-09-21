@@ -2,7 +2,7 @@
 
 Wraps :meth:`venice_ai.resources.models.Models.resolve` and the eleven
 ``resolve_*`` shortcuts (chat / embedding / image / video / tts / asr /
-inpaint / music / video-upscale / cheapest-video) behind a single
+inpaint / music / decision / video-upscale / cheapest-video) behind a single
 ``--type`` flag.
 """
 
@@ -27,6 +27,7 @@ _TYPE_CHOICES = [
     "asr",
     "inpaint",
     "music",
+    "decision",
     "video-upscale",
     "cheapest-video",
 ]
@@ -199,7 +200,7 @@ async def _resolve_async(
             return
 
         # General resolve() path covers chat / embedding / image / video / tts /
-        # asr / inpaint / music. We pass only the kwargs that apply to the
+        # asr / inpaint / music / decision. We pass only the kwargs that apply to the
         # requested type — the SDK ignores irrelevant flags but staying tidy
         # makes failures easier to diagnose.
         kwargs: dict[str, Any] = {
