@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.5.0] - 2026-09-21
 
 ### Added
 
@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`DecisionModelSpec`** types the two token budgets decision models report in place of a context window: `maxStateTokens` (the state plus the single longest question) and `maxTotalTokens` (the state plus all questions combined).
 
-- **`anon_user_id` on the seven endpoints that accept it** — `chat.completions.create()`, `responses.create()`, `image.create()`, `image.submit()`, `image.simple_generate()`, `image.edit()`, `image.multi_edit()` and `image.background_remove()`. Venice combines it with your Venice user id when attributing a request to an upstream provider. It is validated locally to the API's constraints: printable ASCII, 1-128 characters, and no `||` (the delimiter Venice joins the two ids with).
+- **`anon_user_id` on all seven endpoints that accept it**, reached through `chat.completions.create()`, `responses.create()`, `image.create()`, `image.submit()`, `image.simple_generate()`, `image.edit()`, `image.multi_edit()` and `image.background_remove()` — eight methods, because `create()` and `submit()` both post to `/image/generate`. Venice combines it with your Venice user id when attributing a request to an upstream provider. It is validated locally to the API's constraints: printable ASCII, 1-128 characters, and no `||` (the delimiter Venice joins the two ids with).
 
   This lands as two different changes depending on the endpoint. On the five **image** requests the field was **silently dropped** — those models take pydantic's default `extra="ignore"`, so a caller who passed it got a successful request and no attribution, with nothing to indicate it had been discarded. On **`chat/completions` and `responses`** (`extra="allow"`) it already reached the wire, but unvalidated; those calls now raise a local `ValidationError` for a value the API would have rejected with a 400. If you were passing an id that violates the constraints, you will see the failure earlier and more clearly than before.
 
@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`camera_trajectory` on `video.submit()` / `video.run()`** — 2-12 `CameraKeyframe` poses describing the camera path, for H3 Max Multi-Angle. Requires `image_url`, and the output aspect ratio follows that image.
 
-  Two of its six constraints cannot be expressed in JSON Schema and so are not enforced anywhere upstream of the API: **`time` must strictly increase** across the trajectory, and **total absolute azimuth travel is capped at 32 turns**. Both are validated locally. The travel figure is cumulative and uses absolute values, so a back-and-forth path accumulates rather than cancelling out.
+  Two of its constraints cannot be expressed in JSON Schema and so are not enforced anywhere upstream of the API: **`time` must strictly increase** across the trajectory, and **total absolute azimuth travel is capped at 32 turns**. Both are validated locally. The travel figure is cumulative and uses absolute values, so a back-and-forth path accumulates rather than cancelling out.
 
 - **`client.voice_changer` — the `/audio/voice-changer/*` job family.** Converts an existing recording into a target voice, preserving the original timing. `run()` returns a `VoiceChangerJob` (an async context manager, like `MusicJob`/`VideoJob`) with the low-level `submit()` / `quote()` / `retrieve()` / `cancel()` underneath. The source can be a local file (uploaded as multipart) or an `audio_url` Venice fetches itself; passing both or neither raises before anything is uploaded. Also adds the `venice-py audio voice-change` CLI subcommand.
 
@@ -935,7 +935,10 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.3.0...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/sethbang/venice-py/compare/v2.4.1...v2.5.0
+[2.4.1]: https://github.com/sethbang/venice-py/compare/v2.4.0...v2.4.1
+[2.4.0]: https://github.com/sethbang/venice-py/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/sethbang/venice-py/compare/v2.2.1...v2.3.0
 [2.2.1]: https://github.com/sethbang/venice-py/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/sethbang/venice-py/compare/v2.1.0...v2.2.0
