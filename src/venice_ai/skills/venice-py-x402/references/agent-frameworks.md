@@ -132,7 +132,7 @@ For full control, drop down to `aiohttp` / `httpx` and use the SIWE-auth pattern
 ```python
 # Top up once (see balance-and-topup.md), then for each call:
 auth = X402Auth(private_key=...)
-header = auth.build_header()                    # cache within ttl_seconds (default 600)
+header = auth.build_header()                    # sign one per request; the nonce is single-use
 
 async with aiohttp.ClientSession() as http:
     async with http.post(

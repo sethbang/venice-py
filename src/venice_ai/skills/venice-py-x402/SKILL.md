@@ -90,13 +90,13 @@ async def chat_via_siwe(question: str) -> str:
         return response.text
 ```
 
-That's the entire mode-2 chat flow on SDK ≥ 2.0.0. The SIWE token is cached internally for `auth.ttl_seconds - 30s` (safety margin) so we don't re-sign on every call.
+That's the entire mode-2 chat flow on SDK ≥ 2.0.0. The SDK signs a fresh SIWE envelope for every request — Venice treats the nonce as single-use, so envelopes are never reused.
 
 Things to know:
 - The wallet must have non-zero prepaid balance — see Mode 3 for `client.x402.top_up_with(...)`.
 - Each chat / image / etc. call debits the ledger at Venice's posted rates. Monitor with `client.x402.balance(auth=auth)` or `response.balance_info.usd`.
 - When both `api_key=` and `auth=` are passed to `VeniceClient`, the API key wins for default Bearer auth; the auth instance is retained for explicit per-call `auth=` kwargs (e.g., `client.x402.balance(auth=auth)`).
-- Per-call `headers={"X-Sign-In-With-X": ...}` overrides the cached default if you need to force a fresh token (rare).
+- Per-call `headers={"X-Sign-In-With-X": ...}` overrides the default envelope if you need to sign one yourself (rare).
 
 #### "True" pay-per-request x402 (no prepaid balance)
 
@@ -175,14 +175,14 @@ These integrations are evolving. Don't trust a code snippet from training data �
 1. **Passing `wallet_address=` to `X402Auth`** — no such kwarg; address is derived. Use `auth.wallet_address` (property) to read it.
 2. **Calling a fictional `auth.payment_header(amount_usd=...)`** — doesn't exist. `X402Auth` signs SIWE only. For payment headers use `auth.build_payment_header(requirement)` or, for the common case, `client.x402.top_up_with(...)`.
 3. **Treating `PaymentRequiredError` as transient** — it's terminal. The structured requirements live on `e.body` (NOT `e.payment_instructions` — `venice-py lint` flags this as V601). Sign a payment, then retry the original op.
-4. **Signing SIWE on every call** instead of reusing one `X402Auth` instance within its TTL window — `VeniceClient(auth=auth)` caches the token internally, so this only matters for raw-HTTP code.
+4. **Reusing one signed SIWE envelope across calls** — Venice rejects a repeated nonce with `401 This nonce has already been used`, so a cached envelope makes every request after the first fail. Reuse the `X402Auth` *instance*, but call `build_header()` per request. `VeniceClient(auth=auth)` already does this for you, and re-signs on retries too.
 5. **Forgetting the `[x402]` extra** — `from venice_ai.auth.x402 import X402Auth` ImportError is a setup smell. (Solana settlement needs the separate `[x402-solana]` extra.)
 6. **Committing the private key** — the wallet IS the agent's credentials; see `references/wallet-security.md`.
 7. **Confusing the EVM and Solana auth classes** — `X402Auth` (EVM, `0x` key, `[x402]`) and `SolanaX402Auth` (base58 key, `[x402-solana]`) are different classes with different top-up methods (`top_up_with` vs `top_up_with_solana`). Neither takes `wallet_address=`.
 
 ## References
 
-- `references/siwe-auth.md` — SIWE token mechanics for Venice (message format, expiry, header placement, caching)
+- `references/siwe-auth.md` — SIWE token mechanics for Venice (message format, expiry, header placement, single-use nonces)
 - `references/agent-frameworks.md` — wiring patterns for Coinbase Agentkit, Eliza, x402-axios, OpenClaw, Hermes, NanoClaw
 - `references/balance-and-topup.md` — read flows, write flows, structured `PaymentRequiredError` handling
 - `references/wallet-security.md` — key management, scoped keys, dev vs prod isolation

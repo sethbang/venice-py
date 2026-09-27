@@ -49,14 +49,14 @@
     },
     {
       "id": 4,
-      "prompt": "[HELD-OUT TEST SET — do not iterate against] Write `siwe_token_cache.py`. Implement a small async helper `get_cached_auth(private_key, wallet, ttl_seconds=600)` that returns a Venice `X402Auth` instance, caching the underlying SIWE token across calls within the TTL window — so an agent making many calls doesn't sign on every request. Cache should be keyed by wallet address; on TTL expiry, refresh transparently. Demonstrate by calling `client.x402.balance(...)` 3 times in a row and asserting (via a print) that the cached auth was reused on calls 2 and 3 (e.g., by attaching a `creation_time` to the cached object). Pure async; one file at `outputs/siwe_token_cache.py`.",
-      "expected_output": "Python source file at outputs/siwe_token_cache.py demonstrating SIWE token caching with TTL and reuse semantics.",
+      "prompt": "[HELD-OUT TEST SET — do not iterate against] Write `siwe_auth_registry.py`. Implement a small async helper `get_auth(private_key, wallet)` that returns a Venice `X402Auth` instance from a registry keyed by wallet address, so an agent serving many wallets derives each account once instead of on every call. The signed SIWE envelope itself must NOT be cached: Venice treats the nonce as single-use and rejects a replayed envelope with a 401, so each request signs a fresh one via `auth.build_header()`. Demonstrate by calling `client.x402.balance(...)` 3 times in a row and printing evidence that (a) the same `X402Auth` object was reused on calls 2 and 3 (e.g. via `id()` or a `creation_time` attribute) and (b) the three requests carried three distinct envelopes. Pure async; one file at `outputs/siwe_auth_registry.py`.",
+      "expected_output": "Python source file at outputs/siwe_auth_registry.py that reuses one X402Auth instance per wallet while signing a fresh SIWE envelope for every request.",
       "files": [],
       "expectations": [
         "Code imports `X402Auth` from `venice_ai.auth.x402` — not a generic SIWE library standalone.",
-        "Cache implementation is keyed by wallet address (a dict, an LRU, or similar) — not a global single-slot mutable.",
-        "Code respects a TTL: cached entries expire and refresh on access after the TTL window.",
-        "Code demonstrates reuse: e.g., attaches a `creation_time` to each cached auth and prints whether calls 2 and 3 reused the same one.",
+        "The registry is keyed by wallet address (a dict, an LRU, or similar) — not a global single-slot mutable.",
+        "The `X402Auth` instance is reused across calls, and the code prints evidence of that reuse (e.g. `id()` or a `creation_time` attribute).",
+        "No signed envelope is cached or reused: `build_header()` is called once per request and the code shows three distinct envelopes. Storing a header and reattaching it within a TTL window is a failure, not a pass.",
         "Code uses `async with VeniceClient() as client:` and calls `client.x402.balance(auth=auth)` (Venice-specific, not generic).",
         "File parses with `ast.parse` and `pyflakes` is clean."
       ]

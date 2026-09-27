@@ -5,7 +5,7 @@ import contextlib
 import json
 import logging
 import os
-from collections.abc import AsyncIterator, Awaitable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -26,6 +26,7 @@ from .exceptions import (
     _make_status_error,
 )
 from .middleware import RetryOptions
+from .middleware.retry import _SIWE_HEADER, _active_siwe_resigner
 from .rate_limiting import RateLimiterProtocol
 from .resources.api_keys import ApiKeys
 from .resources.audio import Audio
@@ -179,8 +180,8 @@ class VeniceClient:
                 :class:`~venice_ai.auth.x402.X402Auth` for EVM wallets or
                 :class:`~venice_ai.auth.x402_solana.SolanaX402Auth` for
                 Solana. When set with ``api_key=None``,
-                the SDK skips ``Authorization: Bearer`` and attaches a
-                cached ``X-Sign-In-With-X`` header per request. When
+                the SDK skips ``Authorization: Bearer`` and signs a fresh
+                ``X-Sign-In-With-X`` header per request. When
                 both ``api_key`` and ``auth`` are set, the API key wins
                 for default request auth; the auth instance is stored
                 so callers can pass it explicitly to per-call ``auth=``
@@ -246,10 +247,6 @@ class VeniceClient:
                 "requires the [x402] extra) or auth=SolanaX402Auth(...) (Solana, "
                 "requires the [x402-solana] extra)."
             )
-
-        # Per-request SIWE token cache: (header_value, expires_at_unix_ts).
-        # Refreshed when the cached token's TTL expires (with a safety margin).
-        self._siwe_cache: tuple[str, float] | None = None
 
         # --- Base URL resolution ---
         if base_url is None or base_url == "":
@@ -831,14 +828,19 @@ class VeniceClient:
         }
 
     def _default_siwe_header(self) -> str | None:
-        """Return a cached / fresh SIWE token for SIWE-only (Mode 2) auth.
+        """Return a freshly signed SIWE token for SIWE-only (Mode 2) auth.
 
         When the client was constructed with a wallet ``auth`` (``X402Auth``
         or ``SolanaX402Auth``) and no ``api_key``, this returns the
         base64-encoded ``X-Sign-In-With-X`` header value to attach to
-        outgoing requests by default. The token
-        is cached for ``auth.ttl_seconds`` (with a 30-second safety margin)
-        so we don't re-sign on every call.
+        outgoing requests by default.
+
+        A new envelope is signed for every request. Venice treats a SIWE
+        nonce as single-use and answers a repeat with ``401 This nonce has
+        already been used``, so reusing one — even well inside its TTL —
+        makes every request after the first fail. Signing is one local
+        elliptic-curve operation, negligible beside the request it
+        authenticates.
 
         Returns ``None`` when no SIWE auth is configured, or when an API
         key is also set (in which case Bearer auth wins for default
@@ -848,20 +850,44 @@ class VeniceClient:
         if self._auth is None or self._api_key:
             return None
 
-        import time
+        return self._auth.build_header()
 
-        now = time.time()
-        if self._siwe_cache is not None:
-            cached_header, expires_at = self._siwe_cache
-            if now < expires_at:
-                return cached_header
+    def _resolve_siwe_resigner(
+        self,
+        headers: dict[str, str] | None,
+        siwe_auth: X402Auth | SolanaX402Auth | None,
+    ) -> Callable[[], str] | None:
+        """Return the callable that re-signs this request's SIWE envelope.
 
-        header = self._auth.build_header()
-        # 30-second safety margin to avoid races between token expiry on
-        # the server side and our send time.
-        expires_at = now + max(self._auth.ttl_seconds - 30, 1)
-        self._siwe_cache = (header, expires_at)
-        return header
+        The retry middleware replays the same request object, so a
+        wallet-authenticated retry needs a fresh envelope or the server rejects
+        the repeated nonce. This resolves *which* wallet should sign it, and
+        mirrors the header precedence in :meth:`_prepare_and_send_request`
+        exactly — getting the two out of step would sign a retry with a
+        different wallet than the one that signed the first attempt.
+
+        Args:
+            headers: Per-call headers, which override the client default.
+            siwe_auth: A per-call wallet that signs this request in place of
+                the client's own.
+
+        Returns:
+            A zero-argument callable producing a freshly signed header value,
+            or ``None`` when nothing should be re-signed.
+        """
+        if siwe_auth is not None:
+            return siwe_auth.build_header
+
+        # A caller that hand-rolled the header owns it: re-signing with the
+        # client's own wallet would swap in a signature from a different
+        # address. Leave it alone and let the caller manage its lifetime.
+        if headers and any(key.lower() == _SIWE_HEADER.lower() for key in headers):
+            return None
+
+        if self._auth is None or self._api_key:
+            return None
+
+        return self._auth.build_header
 
     async def _prepare_and_send_request(
         self,
@@ -874,6 +900,7 @@ class VeniceClient:
         params: dict[str, Any] | None = None,
         timeout: float | aiohttp.ClientTimeout | None = None,
         force_direct: bool = False,
+        siwe_auth: X402Auth | SolanaX402Auth | None = None,
     ) -> aiohttp.ClientResponse:
         """Shared request lifecycle for ``_request()`` and ``_stream_request()``.
 
@@ -894,6 +921,9 @@ class VeniceClient:
                 falls back to the client default when ``None``.
             force_direct: Bypass rate limiting for internal/administrative requests
                 that should never be queued. Overuse can cause 429 errors.
+            siwe_auth: A per-call wallet that signs this request in place of
+                the client's own. Every attempt, retries included, signs its
+                own envelope, since Venice accepts each nonce once.
 
         Returns:
             Raw ``aiohttp.ClientResponse`` with a 2xx status.
@@ -951,13 +981,20 @@ class VeniceClient:
             async def execute_http_request() -> aiohttp.ClientResponse:
                 session = await self._get_session()
                 request_headers = dict(session.headers)
-                # Default SIWE auth (Mode 2) is computed per-request because
-                # the cached SIWE token may have expired since the last call.
-                _siwe = self._default_siwe_header()
-                if _siwe is not None:
-                    request_headers["X-Sign-In-With-X"] = _siwe
+                # Default SIWE auth (Mode 2) is signed per-request: Venice
+                # rejects a reused nonce, so an envelope is never shared.
+                if siwe_auth is None:
+                    _siwe = self._default_siwe_header()
+                    if _siwe is not None:
+                        request_headers[_SIWE_HEADER] = _siwe
                 if headers:
                     request_headers.update(headers)
+                if siwe_auth is not None:
+                    # A per-call wallet signs here, not at the call site: the
+                    # rate limiter re-invokes this callable for each 429 retry,
+                    # so an envelope minted once and captured would be resent
+                    # after the server had already spent its nonce.
+                    request_headers[_SIWE_HEADER] = siwe_auth.build_header()
 
                 kwargs = self._build_request_kwargs(
                     method,
@@ -968,7 +1005,15 @@ class VeniceClient:
                     params,
                     timeout,
                 )
-                return await session.request(**kwargs)
+                # Published inside the closure because a scheduler may run it
+                # in a worker task created before this call, which would never
+                # see a value set outside; reset immediately so a long-lived
+                # worker cannot carry this wallet into the next request.
+                token = _active_siwe_resigner.set(self._resolve_siwe_resigner(headers, siwe_auth))
+                try:
+                    return await session.request(**kwargs)
+                finally:
+                    _active_siwe_resigner.reset(token)
 
             # Submit through scheduler for queueing and rate limit management
             logger.debug(f"Routing request through scheduler. Path: {path}, Model: {model_id}")
@@ -995,20 +1040,23 @@ class VeniceClient:
             # Get the session and prepare headers
             session = await self._get_session()
             request_headers = dict(session.headers)
-            # Default SIWE auth (Mode 2) is computed per-request — see
-            # _default_siwe_header() for caching semantics.
-            _siwe = self._default_siwe_header()
-            if _siwe is not None:
-                request_headers["X-Sign-In-With-X"] = _siwe
+            # Default SIWE auth (Mode 2) is signed per-request — see
+            # _default_siwe_header() for the single-use nonce requirement.
+            if siwe_auth is None:
+                _siwe = self._default_siwe_header()
+                if _siwe is not None:
+                    request_headers[_SIWE_HEADER] = _siwe
             if headers:
                 request_headers.update(headers)
+            if siwe_auth is not None:
+                request_headers[_SIWE_HEADER] = siwe_auth.build_header()
 
             # Redact sensitive headers before logging
             safe_headers = request_headers.copy()
             for _sensitive in (
                 "Authorization",
                 "X-API-Key",
-                "X-Sign-In-With-X",
+                _SIWE_HEADER,
                 "X-402-Payment",
             ):
                 if _sensitive in safe_headers:
@@ -1028,8 +1076,15 @@ class VeniceClient:
 
             from .utils.errors import wrap_aiohttp_errors
 
-            async with wrap_aiohttp_errors():
-                response = await session.request(**kwargs)
+            # Let the retry middleware re-sign this request's envelope; see
+            # _resolve_siwe_resigner(). Reset on the way out so the signer
+            # never outlives the request it belongs to.
+            token = _active_siwe_resigner.set(self._resolve_siwe_resigner(headers, siwe_auth))
+            try:
+                async with wrap_aiohttp_errors():
+                    response = await session.request(**kwargs)
+            finally:
+                _active_siwe_resigner.reset(token)
 
         # Validate response status (common for both paths)
         if not response.ok:
@@ -1117,6 +1172,7 @@ class VeniceClient:
         raw_response: bool = False,
         timeout: float | aiohttp.ClientTimeout | None = None,
         force_direct: bool = False,
+        siwe_auth: X402Auth | SolanaX402Auth | None = None,
     ) -> T | Any | aiohttp.ClientResponse | bytes:
         """
         Makes an HTTP request to the Venice AI API.
@@ -1136,6 +1192,9 @@ class VeniceClient:
             raw_response: If `True`, returns the raw `aiohttp.ClientResponse`.
             timeout: The timeout for this specific request.
             force_direct: If `True`, bypasses the rate limiter.
+            siwe_auth: A per-call wallet that signs this request in place of
+                the client's own. Every attempt, retries included, signs its
+                own envelope, since Venice accepts each nonce once.
 
         Returns:
             The parsed response, which can be a Pydantic model, a dictionary,
@@ -1164,6 +1223,7 @@ class VeniceClient:
             params=params,
             timeout=timeout,
             force_direct=force_direct,
+            siwe_auth=siwe_auth,
         )
 
         # Handle raw response requests
