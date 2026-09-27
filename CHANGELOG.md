@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A privacy mode the SDK does not know about no longer fails the entire `/models` parse.** `ModelSpec.privacy` was a closed `Literal["private", "anonymized"]`, the same failure mode 2.4.1 fixed for `ModelResponse.type`: a single catalog row carrying a third mode would raise `APIResponseValidationError` on the whole listing, taking `models.get()`, `get_capabilities()` and every `resolve_*()` helper down with it, since they all read that listing.
+
+  The field was closed in three places, and widening only the wire model would have moved the crash one layer down rather than removing it — `get_capabilities()` reads `spec.privacy` and forwards it into `ChatCapabilities` and `GenericCapabilities`, both of which declared the same `Literal`. All three are now plain `str`.
+
+  The known values ship as `KNOWN_PRIVACY_MODES`, importable from `venice_ai.types` and `venice_ai.types.api`. Narrowing must **fail closed**: test `privacy == "private"` rather than excluding the modes you know about, so a mode added later is never mistaken for zero-retention. `select_model(require_private=True)` already compared against `"private"` exactly and is unaffected.
+
+  As in 2.4.1, this widens a public `Literal` to `str`, so a caller relying on exhaustiveness checking over `privacy` will see their type checker stop proving the match is exhaustive.
+
 ## [2.5.0] - 2026-09-21
 
 ### Added

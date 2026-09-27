@@ -572,11 +572,13 @@ class ModelSpec(BaseModel):
         default=None, description="The name of the model (swagger does not require it)."
     )
     offline: bool = Field(default=False, description="Is this model presently offline?")
-    privacy: Literal["private", "anonymized"] | None = Field(
+    privacy: str | None = Field(
         default=None,
         description=(
-            "Data privacy level. 'private' = no data stored, 'anonymized' = "
-            "provider stores anonymized data."
+            "Data privacy level. 'private' = zero data retention; 'anonymized' "
+            "= processed by a third-party provider with identifying "
+            "information stripped. Known values are in KNOWN_PRIVACY_MODES; "
+            "treat any other value as not private."
         ),
     )
     traits: list[str] = Field(default_factory=list, description="Model traits")
@@ -898,6 +900,25 @@ Venice adds model types to the live catalog between SDK releases and a closed
 enum turns each new one into a hard parse failure for the *entire* catalog.
 Narrow against this tuple when you need to branch on a known type, and treat
 anything outside it as a type this release predates rather than as invalid.
+"""
+
+
+KNOWN_PRIVACY_MODES: Final[tuple[str, ...]] = (
+    "private",
+    "anonymized",
+)
+""":attr:`ModelSpec.privacy` values this SDK release knows about.
+
+``private`` means zero data retention. ``anonymized`` means the model runs at a
+third-party provider: Venice proxies the request with identifying information
+stripped, so the provider processes the prompt but sees Venice as the customer.
+
+The field is a plain ``str`` for the same reason :attr:`ModelResponse.type`
+is: it is a *response* field, and a closed enum turns a value Venice adds
+server-side into a hard parse failure for the entire catalog. Narrow against
+this tuple when you need to branch, and treat anything outside it as a mode
+this release predates rather than as invalid — but note that a privacy filter
+must still fail closed, treating an unknown mode as *not* private.
 """
 
 

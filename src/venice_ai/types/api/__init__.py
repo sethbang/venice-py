@@ -129,6 +129,7 @@ from .images import (
 )
 from .models import (
     KNOWN_MODEL_TYPES,
+    KNOWN_PRIVACY_MODES,
     ASRModelPricing,
     AsrModelSpec,
     AudioModelPricing,
@@ -379,6 +380,7 @@ __all__ = [
     "UpscaleModelSpec",
     "DecisionModelSpec",
     "KNOWN_MODEL_TYPES",
+    "KNOWN_PRIVACY_MODES",
     "ChoiceAnswer",
     "DecisionAnswer",
     "DecisionResponse",
