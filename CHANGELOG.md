@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.5.1] - 2026-09-27
 
 ### Fixed
 
@@ -955,7 +955,8 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.5.0...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.5.1...HEAD
+[2.5.1]: https://github.com/sethbang/venice-py/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/sethbang/venice-py/compare/v2.4.1...v2.5.0
 [2.4.1]: https://github.com/sethbang/venice-py/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/sethbang/venice-py/compare/v2.3.0...v2.4.0
