@@ -315,13 +315,12 @@ class TestVideoElement:
     """Test VideoElement validation."""
 
     def test_video_url_retained_in_dump(self):
-        """elements[].video_url is supported and round-trips via model_dump."""
-        element = VideoElement(
-            frontal_image_url="https://example.com/a.png",
-            video_url="https://x",
-        )  # type: ignore
-        assert element.video_url == "https://x"
-        assert element.model_dump()["video_url"] == "https://x"
+        """A video-only element round-trips ``video_url`` via model_dump."""
+        element = VideoElement(video_url="https://example.com/donor.mp4")  # type: ignore[call-arg]
+        assert element.video_url == "https://example.com/donor.mp4"
+        assert element.model_dump(exclude_none=True) == {
+            "video_url": "https://example.com/donor.mp4"
+        }
 
     def test_reference_image_urls_max_items(self):
         """The inner reference_image_urls is capped at 3 (swagger maxItems: 3)."""
