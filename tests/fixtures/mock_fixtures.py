@@ -8,9 +8,26 @@ for testing various components in isolation.
 import asyncio
 from contextlib import contextmanager
 from typing import Any
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+
+
+def fake_event_loop() -> MagicMock:
+    """
+    A stand-in for the running event loop, for tests that patch
+    ``asyncio.get_running_loop``.
+
+    A patched ``get_running_loop`` is global, so code outside the test also
+    receives this loop, such as a weakref callback fired by garbage collection
+    of an earlier test's loop. A plain ``MagicMock`` would drop the coroutine
+    passed to ``create_task`` and leave a "never awaited" warning on whichever
+    test happens to be running. This one closes it instead, as a loop that
+    never runs tasks should.
+    """
+    loop = MagicMock()
+    loop.create_task.side_effect = lambda coro, **_: coro.close()
+    return loop
 
 
 @pytest.fixture

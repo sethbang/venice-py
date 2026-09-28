@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from redis.exceptions import ConnectionError, RedisError, ResponseError
 
+from tests.fixtures.mock_fixtures import fake_event_loop
 from venice_ai.core.backends.redis import RedisBackend
 
 
@@ -24,7 +25,7 @@ class TestRedisBackendConnectionPoolManagement:
 
         # Mock the first event loop
         with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop1 = MagicMock()
+            mock_loop1 = fake_event_loop()
             mock_loop1_id = id(mock_loop1)
             mock_get_loop.return_value = mock_loop1
 
@@ -47,7 +48,7 @@ class TestRedisBackendConnectionPoolManagement:
                 assert backend._connected is True
 
                 # Simulate event loop change
-                mock_loop2 = MagicMock()
+                mock_loop2 = fake_event_loop()
                 mock_loop2_id = id(mock_loop2)
                 mock_get_loop.return_value = mock_loop2
 
@@ -61,7 +62,7 @@ class TestRedisBackendConnectionPoolManagement:
         backend = RedisBackend(redis_url="redis://localhost:6379", namespace="test_namespace")
 
         with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = MagicMock()
+            mock_loop = fake_event_loop()
             mock_get_loop.return_value = mock_loop
 
             with (
@@ -92,7 +93,7 @@ class TestRedisBackendConnectionPoolManagement:
         backend._connected = True
 
         with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = MagicMock()
+            mock_loop = fake_event_loop()
             mock_get_loop.return_value = mock_loop
             backend._event_loop_id = id(mock_loop)  # Same loop: no pool switch
 
