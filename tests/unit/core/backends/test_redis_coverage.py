@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from redis.exceptions import ConnectionError, RedisError, ResponseError, TimeoutError
 
+from tests.fixtures.mock_fixtures import fake_event_loop
 from venice_ai.core.backends.redis import RedisBackend
 
 
@@ -44,7 +45,7 @@ class TestClusterModeConnection:
         )
 
         with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = MagicMock()
+            mock_loop = fake_event_loop()
             mock_get_loop.return_value = mock_loop
 
             with (
@@ -78,7 +79,7 @@ class TestClusterModeConnection:
             patch.object(RedisBackend, "_connection_pools", {1: MagicMock(), 2: MagicMock()}),
             patch("asyncio.get_running_loop") as mock_get_loop,
         ):
-            mock_loop = MagicMock()
+            mock_loop = fake_event_loop()
             mock_get_loop.return_value = mock_loop
 
             with (
@@ -116,7 +117,7 @@ class TestPingTimeoutHandling:
         )
 
         with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = MagicMock()
+            mock_loop = fake_event_loop()
             mock_get_loop.return_value = mock_loop
 
             with (
@@ -192,7 +193,7 @@ class TestRuntimeErrorHandling:
         )
 
         with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = MagicMock()
+            mock_loop = fake_event_loop()
             mock_get_loop.return_value = mock_loop
 
             with (
@@ -213,7 +214,7 @@ class TestRuntimeErrorHandling:
         )
 
         with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = MagicMock()
+            mock_loop = fake_event_loop()
             mock_get_loop.return_value = mock_loop
 
             with (
@@ -846,7 +847,7 @@ class TestCleanupAllPools:
     async def test_cleanup_all_pools_closed_loop(self):
         """Test cleanup_all_pools skips when loop is closed (lines 611-612)."""
         with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = MagicMock()
+            mock_loop = fake_event_loop()
             mock_loop.is_closed.return_value = True
             mock_get_loop.return_value = mock_loop
 
@@ -1050,7 +1051,7 @@ class TestEventLoopSwitchingBranches:
         created_tasks = []
 
         with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = MagicMock()
+            mock_loop = fake_event_loop()
             mock_get_loop.return_value = mock_loop
 
             # Use a real create_task but track it
@@ -1097,7 +1098,7 @@ class TestPartialBranchCoverage:
         )
 
         with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = MagicMock()
+            mock_loop = fake_event_loop()
             mock_get_loop.return_value = mock_loop
 
             with (
@@ -1129,7 +1130,7 @@ class TestPartialBranchCoverage:
         )
 
         with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = MagicMock()
+            mock_loop = fake_event_loop()
             mock_get_loop.return_value = mock_loop
 
             with (
