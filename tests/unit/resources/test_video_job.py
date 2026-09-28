@@ -270,10 +270,9 @@ async def test_aexit_benign_invalid_request_id_not_warned(
     queue_response,
     caplog,
 ):
-    """A 400 'Request ID is invalid' on cleanup is benign (the queue entry is
-    already gone — job reached a terminal state or was never completable), so a
-    normal queue→complete/abandon exit should not emit a WARNING. It is still
-    noted at DEBUG for diagnosability."""
+    """A 400 'Request ID is invalid' on cleanup after the job finished is
+    benign (the queue entry is already gone), so a normal queue→complete exit
+    should not emit a WARNING. It is still noted at DEBUG for diagnosability."""
 
     class _Resp:
         status = 400
@@ -283,8 +282,8 @@ async def test_aexit_benign_invalid_request_id_not_warned(
         "Request ID is invalid", response=_Resp()
     )
     with caplog.at_level(logging.DEBUG, logger="venice_ai.resources.video"):
-        async with VideoJob(mock_client, queue_response):
-            pass
+        async with VideoJob(mock_client, queue_response) as job:
+            job._status = VideoCompletedStatus(status="COMPLETED", url="https://x", expires_at=None)
 
     cleanup_recs = [r for r in caplog.records if "cleanup" in r.getMessage().lower()]
     assert cleanup_recs, "cleanup outcome should still be logged"

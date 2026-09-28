@@ -677,8 +677,8 @@ class Image(APIResource["VeniceClient"]):
         :param image: Image to upscale. Can be a file path (string or :class:`pathlib.Path`),
             raw image bytes, or a file-like object.
 
-        :param scale: Optional. Scaling factor for upscaling. Must be ``2`` or
-                      ``4``; ``1`` is rejected. Defaults to ``2``.
+        :param scale: Optional. Scaling factor for upscaling, any value from
+                      ``2`` to ``4`` inclusive; ``1`` is rejected. Defaults to ``2``.
         :type scale: Optional[float]
         :param creativity: Optional. How much detail and texture the upscaler
                            adds — higher adds more, lower stays closer to the

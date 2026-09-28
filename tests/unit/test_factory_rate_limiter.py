@@ -90,8 +90,17 @@ class TestAdaptiveFallbackWithoutPackage:
         )
         mock_client = MagicMock()
 
-        # Mock import failure for adaptive_rate_limiter
-        with patch.dict(sys.modules, {"adaptive_rate_limiter": None}):
+        # Mock import failure for adaptive_rate_limiter. Submodules imported
+        # earlier in the session stay cached in sys.modules and would satisfy
+        # ``from adaptive_rate_limiter.backends import ...`` without touching
+        # the parent, so block every cached submodule as well.
+        blocked = {
+            name: None
+            for name in list(sys.modules)
+            if name == "adaptive_rate_limiter" or name.startswith("adaptive_rate_limiter.")
+        }
+        blocked["adaptive_rate_limiter"] = None
+        with patch.dict(sys.modules, blocked):
             with pytest.raises(ImportError) as exc_info:
                 VeniceClientFactory._create_rate_limiter(
                     config, mock_client, account_id="test-account"
@@ -387,10 +396,13 @@ class TestAdaptiveIntelligentSuccessPath:
         ):
             VeniceClientFactory._create_rate_limiter(config, mock_client, account_id="test-account")
 
-        # Backend constructed with the backend.redis.redis_url, not rate_limiter.redis_url
+        # Backend constructed with the backend.redis.redis_url, not rate_limiter.redis_url,
+        # plus the pool size and cluster flag from the same RedisBackendConfig.
         mock_backend_cls.assert_called_once_with(
             redis_url="redis://from-backend:6379",
             account_id="test-account",
+            max_connections=20,
+            cluster_mode=False,
         )
 
 

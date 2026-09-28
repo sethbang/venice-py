@@ -34,7 +34,7 @@ async def make_clip(prompt: str, out_path: Path) -> Path:
 ```python
 await client.video.run(
     model=...,                                  # str — required
-    prompt=...,                                 # str — required (text-to-video)
+    prompt=...,                                 # str | None — required by generation models; upscale takes none
     duration_seconds="5s",                      # int | str — required (5, "5", "5s", "5 seconds")
     negative_prompt=None,                       # str | None — what to avoid
     resolution=None,                            # str | None — "720p", "1080p", "4k"
@@ -108,7 +108,6 @@ async with await client.video.run(
     video_url="https://example.com/source.mp4",   # or a data: URL
     upscale_factor=2,                              # 2× or 4×
     duration_seconds="5s",
-    prompt="upscale",                              # required & non-empty (min_length=1); content ignored for upscale
 ) as job:
     status = await job.wait()
     await job.download(Path("upscaled.mp4"), status)
@@ -171,7 +170,7 @@ from venice_ai.types.api.requests.video import VideoElement
 # Each element is a character/object you reference in the prompt as @Element1, @Element2, …
 elements = [
     VideoElement(
-        frontal_image_url="https://.../hero_front.png",          # required (URL or data: URI)
+        frontal_image_url="https://.../hero_front.png",          # URL or data: URI
         reference_image_urls=["https://.../hero_side.png"],      # optional extra references
     ),
     VideoElement(frontal_image_url="https://.../prop.png"),
@@ -187,8 +186,9 @@ async with await client.video.run(
     ...
 ```
 
-`VideoElement` fields are `frontal_image_url` (required) and `reference_image_urls`
-(optional) — not `type`/`url`/`duration`. You can also pass `elements` as plain
+Each `VideoElement` takes exactly one kind of media source: images
+(`frontal_image_url` and/or up to 3 `reference_image_urls`) or a single reference
+`video_url` — never both, and at least one. The fields are not `type`/`url`/`duration`. You can also pass `elements` as plain
 dicts. This is model-specific — many video models don't accept `elements` (it's
 for Kling O3 R2V and similar). Plain dicts also work; see `examples/video/advanced_fields.py`.
 
@@ -230,16 +230,18 @@ async with await client.video.run(
 `reference_audio_urls` is wired through both `run()` and `submit()`. See
 `examples/video/advanced_fields.py` for a runnable queue-and-cleanup demo.
 
-## Cancellation
+## Releasing storage (`cancel`)
+
+`cancel()` wraps `/video/complete`: it deletes the job's stored media and queue
+entry (best effort). It does **not** stop a generation that is still running;
+that job keeps going on the server and is billed. The `async with` block calls it
+on exit, and logs a WARNING if you leave before the job reached a terminal status.
 
 ```python
 async with await client.video.run(...) as job:
-    try:
-        status = await job.wait(max_polls=12)
-    except asyncio.TimeoutError:
-        await job.cancel()                         # explicit; the async with would also cancel
-        return
+    status = await job.wait()
     await job.download(...)
+# stored media released here
 ```
 
 ## Video transcription

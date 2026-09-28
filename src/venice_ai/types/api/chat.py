@@ -7,7 +7,7 @@ including streaming, tool calling, and Venice-specific features.
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -160,6 +160,22 @@ class LogProbToken(BaseModel):
     )
 
 
+KNOWN_FINISH_REASONS: Final[tuple[str, ...]] = (
+    "stop",
+    "length",
+    "tool_calls",
+    "content_filter",
+)
+"""``finish_reason`` values this SDK release knows about.
+
+:attr:`ChatChoice.finish_reason` and
+:attr:`~venice_ai.types.api.streaming.ChatCompletionChunkChoice.finish_reason`
+are plain ``str`` so a reason the server adds later is preserved rather than
+failing the whole response parse. Narrow against this tuple when branching on
+a known reason.
+"""
+
+
 class ChatChoice(BaseModel):
     """Chat completion choice object representing a single completion result.
 
@@ -171,8 +187,13 @@ class ChatChoice(BaseModel):
 
     index: int = Field(..., description="The index of the choice in the list")
     message: ChatMessage = Field(..., description="Assistant message response")
-    finish_reason: Literal["stop", "length", "tool_calls"] = Field(
-        ..., description="The reason the completion finished"
+    finish_reason: str | None = Field(
+        ...,
+        description=(
+            "The reason the completion finished, e.g. ``'stop'``, ``'length'``, "
+            "``'tool_calls'`` or ``'content_filter'``. Known values are in "
+            "KNOWN_FINISH_REASONS."
+        ),
     )
     logprobs: LogProbToken | None = None
     """Log probability information for tokens in this completion.

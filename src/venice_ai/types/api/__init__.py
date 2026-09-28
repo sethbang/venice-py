@@ -86,6 +86,7 @@ from .characters import (
     CharacterStats,
 )
 from .chat import (
+    KNOWN_FINISH_REASONS,
     ChatChoice,
     ChatCompletionResponse,
     ChatMessage,
@@ -261,8 +262,14 @@ from .requests import (
     Web3CreateApiKeyRequest,
 )
 from .responses import (
+    KNOWN_RESPONSE_FUNCTION_CALL_STATUSES,
+    KNOWN_RESPONSE_INCOMPLETE_REASONS,
+    KNOWN_RESPONSE_MESSAGE_STATUSES,
+    KNOWN_RESPONSE_STATUSES,
+    KNOWN_RESPONSE_WEB_SEARCH_CALL_STATUSES,
     ResponsesError,
     ResponsesFunctionCallOutput,
+    ResponsesIncompleteDetails,
     ResponsesMessageOutput,
     ResponsesOutputItem,
     ResponsesOutputText,
@@ -379,8 +386,14 @@ __all__ = [
     "EmbeddingModelSpec",
     "UpscaleModelSpec",
     "DecisionModelSpec",
+    "KNOWN_FINISH_REASONS",
     "KNOWN_MODEL_TYPES",
     "KNOWN_PRIVACY_MODES",
+    "KNOWN_RESPONSE_FUNCTION_CALL_STATUSES",
+    "KNOWN_RESPONSE_INCOMPLETE_REASONS",
+    "KNOWN_RESPONSE_MESSAGE_STATUSES",
+    "KNOWN_RESPONSE_STATUSES",
+    "KNOWN_RESPONSE_WEB_SEARCH_CALL_STATUSES",
     "ChoiceAnswer",
     "DecisionAnswer",
     "DecisionResponse",
@@ -527,6 +540,7 @@ __all__ = [
     # From responses module - Responses API (Alpha)
     "ResponsesError",
     "ResponsesFunctionCallOutput",
+    "ResponsesIncompleteDetails",
     "ResponsesMessageOutput",
     "ResponsesOutputItem",
     "ResponsesOutputText",

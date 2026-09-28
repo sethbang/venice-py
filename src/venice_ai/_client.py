@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -193,22 +194,27 @@ class VeniceClient:
             timeout: The default request timeout in seconds.
             default_timeout: A pre-configured ``aiohttp.ClientTimeout`` object
                 that overrides the ``timeout`` setting.
-            max_retries: The maximum number of retries for failed requests.
+            max_retries: The number of retries after the first attempt for a
+                retryable failure (``0`` disables retries). Overrides
+                ``config.http_client.max_retries``; ignored when
+                ``retry_options`` is given.
             rate_limiter: The ``RateLimiterProtocol`` instance for rate limiting
                 (injected by factory).
             config: A ``VeniceAIConfig`` object for configuring the central HTTP
-                client.
+                client: timeout, connection pool size, User-Agent and the
+                retry policy (``max_retries`` / ``retry_backoff_factor``).
             http_transport_options: Additional options for the
                 ``aiohttp.TCPConnector``, allowing fine-tuning of the HTTP
                 transport layer.
             rate_limiter_config: A dictionary with rate limiter settings.
             rate_limiter_config_path: The file path to a rate limiter
                 configuration file.
-            proxy: The URL of a proxy server to use for requests.
+            proxy: The URL of an HTTP proxy that every request is sent through.
             connector_limit: The maximum number of simultaneous connections
-                for the aiohttp connector.
+                for the aiohttp connector. Overrides
+                ``config.http_client.max_connections``.
             connector_limit_per_host: The maximum number of simultaneous
-                connections to a single host.
+                connections to a single host. Unlimited unless given.
             trust_env: If ``True``, the ``aiohttp`` connector will trust
                 environment variables for proxy settings.
             auto_decompress: If ``True``, ``aiohttp`` will automatically
@@ -217,7 +223,8 @@ class VeniceClient:
             headers: Default headers to include in every request.
             skip_auto_headers: A list of headers that ``aiohttp`` should not
                 automatically add.
-            retry_options: Configuration for the request retry strategy.
+            retry_options: Configuration for the request retry strategy. Takes
+                precedence over ``max_retries`` and ``config.http_client``.
             cost_tracker: Optional :class:`CostTracker` that the SDK will
                 feed every chat-completion and embeddings response into,
                 automatically. When ``None`` (default) no tracking is wired.
@@ -276,7 +283,7 @@ class VeniceClient:
         self._cookie_jar = cookie_jar
         self._headers = headers
         self._skip_auto_headers = skip_auto_headers
-        self._retry_options = retry_options
+        self._retry_options = self._resolve_retry_options(retry_options, max_retries, config)
         self._cost_tracker = cost_tracker
 
         # --- Rate limiter configuration ---
@@ -310,12 +317,21 @@ class VeniceClient:
             self._should_close_session = False
         else:
             if config is not None:
+                # Explicit connector keywords win over the config. There is no
+                # per-host default: every request goes to one host, so a
+                # per-host cap below ``max_connections`` would silently become
+                # the effective concurrency limit.
+                connector_limit_value = self._resolve_not_given(self._connector_limit)
+                if connector_limit_value is None:
+                    connector_limit_value = config.http_client.max_connections
                 self._venice_http_client = self._create_venice_http_client(
                     config=config,
                     api_key=self._api_key,
                     base_url=base_url,
-                    connector_limit=config.http_client.max_connections,
-                    connector_limit_per_host=config.http_client.max_keepalive_connections,
+                    connector_limit=connector_limit_value,
+                    connector_limit_per_host=self._resolve_not_given(
+                        self._connector_limit_per_host
+                    ),
                 )
                 self._session = None  # Will be lazy-loaded from VeniceHTTPClient
                 self._should_close_session = True
@@ -473,7 +489,36 @@ class VeniceClient:
                 Any | None,
                 self._retry_options if self._retry_options is not NOT_GIVEN else None,
             ),
+            proxy=cast(str | None, self._resolve_not_given(self._proxy)),
         )
+
+    @staticmethod
+    def _resolve_retry_options(
+        retry_options: RetryOptions | NotGiven,
+        max_retries: int | None,
+        config: VeniceAIConfig | None,
+    ) -> RetryOptions | NotGiven:
+        """Resolve the construction-time retry policy.
+
+        Precedence, most specific first: an explicit ``retry_options``, the
+        ``max_retries`` keyword, then ``config.http_client`` (``max_retries``
+        and ``retry_backoff_factor``). With none of them the retry middleware
+        uses :class:`RetryOptions` defaults.
+        """
+        if retry_options is not NOT_GIVEN and retry_options is not None:
+            return retry_options
+        if max_retries is None and config is None:
+            return NOT_GIVEN
+        options = RetryOptions()
+        if config is not None:
+            options = dataclasses.replace(
+                options,
+                max_attempts=config.http_client.max_retries,
+                exponential_base=config.http_client.retry_backoff_factor,
+            )
+        if max_retries is not None:
+            options = dataclasses.replace(options, max_attempts=max_retries)
+        return options
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """

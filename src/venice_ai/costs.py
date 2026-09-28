@@ -17,8 +17,12 @@ Key Features:
 Pricing Models:
     * **Input Tokens**: Cost for processing input text (prompts, messages)
     * **Output Tokens**: Cost for generating output text (completions, responses)
+    * **Cache Reads / Writes**: Prompt tokens served from or written to the
+      prompt cache, billed at ``cache_input`` / ``cache_write`` where the
+      model publishes those rates
+    * **Extended Context**: Long-context rates that apply to the whole request
+      once the prompt exceeds the model's ``context_token_threshold``
     * **Flat Rate Models**: Simple per-request pricing for some operations
-    * **Tiered Pricing**: Volume-based pricing with different rates
 
 Cost Types:
     * **USD**: Traditional US Dollar pricing for enterprise billing
@@ -48,13 +52,14 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pydantic import BaseModel, Field
 
 from .types.api.chat import ChatCompletionResponse as ChatCompletion
 from .types.api.embeddings import EmbeddingsResponse
 from .types.api.models import LLMModelPricing as ModelPricing
+from .types.api.models import PricingTier
 
 if TYPE_CHECKING:
     from ._client import VeniceClient
@@ -65,12 +70,24 @@ class ChatCostEstimate(BaseModel):
 
     Returned by :meth:`client.chat.completions.estimate_cost`. Token counts
     are heuristic word-count approximations (the same approach the
-    :func:`estimate_completion_cost` helper uses); ``total_cost_usd`` is
-    therefore an estimate, not a guarantee.
+    :func:`estimate_completion_cost` helper uses) plus, unless the request
+    opts out, a fixed allowance for the system prompt Venice injects;
+    ``total_cost_usd`` is therefore an estimate, not a guarantee.
     """
 
     model: str = Field(..., description="Model id used for the estimate")
-    prompt_tokens: int = Field(..., description="Estimated input token count")
+    prompt_tokens: int = Field(
+        ...,
+        description="Estimated input token count, including venice_system_prompt_tokens",
+    )
+    venice_system_prompt_tokens: int = Field(
+        default=0,
+        description=(
+            "Allowance for the Venice system prompt the server prepends when "
+            "include_venice_system_prompt is not False (0 when opted out). A "
+            "conservative constant, not an exact count."
+        ),
+    )
     expected_completion_tokens: int = Field(
         ..., description="Caller-provided completion token budget"
     )
@@ -79,6 +96,84 @@ class ChatCostEstimate(BaseModel):
         ..., description="Estimated USD cost for completion tokens"
     )
     total_cost_usd: Decimal = Field(..., description="Sum of prompt + completion USD cost")
+
+
+#: Prompt-token allowance added to pre-flight estimates for the system prompt
+#: Venice prepends when ``venice_parameters.include_venice_system_prompt`` is
+#: not ``False`` (the server default). The injected prompt's size varies by
+#: model and over time (roughly 1100-1750 tokens has been observed), so this
+#: sits at the top of that range: an estimate should err towards overstating
+#: cost. It is an allowance, not an exact count.
+VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE = 1750
+
+_MILLION = Decimal("1000000")
+_ZERO = Decimal("0.00")
+
+
+class _Rates(NamedTuple):
+    """Per-million USD rates in effect for one request."""
+
+    input: Decimal
+    output: Decimal
+    cache_input: Decimal
+    cache_write: Decimal
+
+
+def _usd(tier: PricingTier | None) -> Decimal | None:
+    if tier is None or tier.usd is None:
+        return None
+    return Decimal(str(tier.usd))
+
+
+def _rates_for(model_pricing: ModelPricing, prompt_tokens: int) -> _Rates:
+    """Resolve the rates that bill a request with *prompt_tokens* prompt tokens.
+
+    Standard rates apply unless the model publishes ``extended`` pricing and
+    the total prompt (cached and cache-written tokens included) exceeds
+    ``extended.context_token_threshold``; the extended rates then apply to
+    the whole request. A missing cache rate falls back to the input rate of
+    the same tier, and a missing extended input/output rate falls back to the
+    standard one.
+    """
+    input_usd = _usd(model_pricing.input) or _ZERO
+    output_usd = _usd(model_pricing.output) or _ZERO
+    # Optional rates are read defensively so pricing-shaped objects that only
+    # carry ``input`` / ``output`` still price as a standard-tier model.
+    cache_input_usd = _usd(getattr(model_pricing, "cache_input", None))
+    cache_write_usd = _usd(getattr(model_pricing, "cache_write", None))
+
+    extended = getattr(model_pricing, "extended", None)
+    threshold = extended.context_token_threshold if extended is not None else None
+    if extended is not None and threshold is not None and prompt_tokens > threshold:
+        extended_input = _usd(extended.input)
+        extended_output = _usd(extended.output)
+        input_usd = input_usd if extended_input is None else extended_input
+        output_usd = output_usd if extended_output is None else extended_output
+        cache_input_usd = _usd(extended.cache_input)
+        cache_write_usd = _usd(extended.cache_write)
+
+    return _Rates(
+        input=input_usd,
+        output=output_usd,
+        cache_input=input_usd if cache_input_usd is None else cache_input_usd,
+        cache_write=input_usd if cache_write_usd is None else cache_write_usd,
+    )
+
+
+def _token_count(*candidates: object) -> int:
+    """First candidate that is a real positive ``int``; ``0`` if none is.
+
+    Anything else (``None``, a bool, a float, a mock attribute) counts as
+    absent, so a partially populated usage object never skews the bill.
+    """
+    for value in candidates:
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return 0
+
+
+def _per_million(tokens: int, rate: Decimal) -> Decimal:
+    return (Decimal(tokens) / _MILLION) * rate
 
 
 def calculate_completion_cost(
@@ -96,9 +191,21 @@ def calculate_completion_cost(
     provides accurate post-request cost tracking for billing and analytics.
 
     Token Cost Calculation:
-        * **Input Cost**: prompt_tokens × input_cost_per_million_tokens
-        * **Output Cost**: completion_tokens × output_cost_per_million_tokens
-        * **Total Cost**: Input Cost + Output Cost
+        ``usage.prompt_tokens`` is the whole prompt, including tokens read
+        from and written to the prompt cache. It is split into:
+
+        * **Cache reads** (``prompt_tokens_details.cached_tokens``, or the
+          top-level ``cache_read_input_tokens`` mirror) at ``cache_input``
+        * **Cache writes** (``prompt_tokens_details.cache_creation_input_tokens``,
+          or the top-level ``cache_creation_input_tokens`` mirror) at
+          ``cache_write``
+        * **Uncached remainder** at ``input``
+
+        Completion tokens bill at ``output``. A model without a published
+        ``cache_input`` / ``cache_write`` rate bills those tokens at ``input``.
+        When the model publishes ``extended`` pricing and ``prompt_tokens``
+        exceeds ``extended.context_token_threshold``, the extended rates
+        apply to the entire request.
 
     Args:
         completion: The completed ChatCompletion response containing actual
@@ -141,22 +248,32 @@ def calculate_completion_cost(
     if not model_pricing or not hasattr(completion, "usage") or not completion.usage:
         return {"usd": Decimal("0.00")}
 
-    # Extract token counts
-    prompt_tokens = completion.usage.prompt_tokens
-    completion_tokens = completion.usage.completion_tokens
+    usage = completion.usage
+    prompt_tokens = _token_count(usage.prompt_tokens)
+    completion_tokens = _token_count(usage.completion_tokens)
 
-    # Initialize costs using Decimal for exact precision
-    usd_cost = Decimal("0.00")
+    # The nested breakdown and the top-level fields mirror the same counts;
+    # take one of them, never the sum.
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = _token_count(
+        getattr(details, "cached_tokens", None),
+        getattr(usage, "cache_read_input_tokens", None),
+    )
+    written = _token_count(
+        getattr(details, "cache_creation_input_tokens", None),
+        getattr(usage, "cache_creation_input_tokens", None),
+    )
+    cached = min(cached, prompt_tokens)
+    written = min(written, prompt_tokens - cached)
+    uncached = prompt_tokens - cached - written
 
-    # New pricing structure uses nested PricingTier objects
-    # Convert to Decimal for exact monetary calculations
-    input_usd = Decimal(str(model_pricing.input.usd or 0.0))
-    output_usd = Decimal(str(model_pricing.output.usd or 0.0))
-
-    # Calculate USD cost with exact decimal precision
-    usd_cost += (Decimal(str(prompt_tokens)) / Decimal("1000000")) * input_usd
-    usd_cost += (Decimal(str(completion_tokens)) / Decimal("1000000")) * output_usd
-
+    rates = _rates_for(model_pricing, prompt_tokens)
+    usd_cost = (
+        _per_million(uncached, rates.input)
+        + _per_million(cached, rates.cache_input)
+        + _per_million(written, rates.cache_write)
+        + _per_million(completion_tokens, rates.output)
+    )
     return {"usd": usd_cost}
 
 
@@ -233,6 +350,8 @@ def estimate_completion_cost(
     estimated_completion_tokens: int,
     model_pricing: ModelPricing | None,
     tokens_per_word: float = 1.3,
+    *,
+    include_venice_system_prompt: bool = True,
 ) -> dict[str, Decimal]:
     """
     Estimate the cost of a chat completion before making the API request.
@@ -250,8 +369,15 @@ def estimate_completion_cost(
 
     Estimation Methodology:
         * **Input Tokens**: Estimated from word count using configurable ratio
+        * **Venice System Prompt**: Unless ``include_venice_system_prompt`` is
+          ``False``, :data:`VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE` tokens are
+          added for the system prompt Venice prepends. They are priced at
+          ``cache_input`` (the injected prompt is served from the prompt
+          cache), falling back to ``input``
         * **Output Tokens**: User-provided estimate based on expected response length
-        * **Pricing**: Applied using current model pricing structure
+        * **Pricing**: Applied using current model pricing structure, including
+          ``extended`` rates when the estimated prompt exceeds the model's
+          long-context threshold
         * **Accuracy**: Approximation only - actual costs may vary
 
     Args:
@@ -270,6 +396,10 @@ def estimate_completion_cost(
                         - Japanese/Chinese: ~2.0 tokens/word
                         - Code/technical: ~1.5-2.0 tokens/word
                         - Mixed content: Adjust based on composition
+        include_venice_system_prompt: Whether the request will carry the Venice
+                        system prompt. Pass ``False`` when the request sets
+                        ``venice_parameters.include_venice_system_prompt=False``;
+                        the default matches the server default (``True``).
 
     Returns:
         Dictionary with estimated cost breakdown containing:
@@ -315,23 +445,38 @@ def estimate_completion_cost(
     if not model_pricing:
         return {"usd": Decimal("0.00")}
 
-    # Estimate prompt tokens based on word count
-    word_count = len(prompt.split())
-    estimated_prompt_tokens = int(word_count * tokens_per_word)
+    prompt_tokens = int(len(prompt.split()) * tokens_per_word)
+    system_prompt_tokens = (
+        VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE if include_venice_system_prompt else 0
+    )
+    prompt_cost, completion_cost = _estimate_costs(
+        model_pricing,
+        prompt_tokens=prompt_tokens,
+        system_prompt_tokens=system_prompt_tokens,
+        completion_tokens=estimated_completion_tokens,
+    )
+    return {"usd": prompt_cost + completion_cost}
 
-    # Initialize costs using Decimal for exact precision
-    usd_cost = Decimal("0.00")
 
-    # New pricing structure uses nested PricingTier objects
-    # Convert to Decimal for exact monetary calculations
-    input_usd = Decimal(str(model_pricing.input.usd or 0.0))
-    output_usd = Decimal(str(model_pricing.output.usd or 0.0))
+def _estimate_costs(
+    model_pricing: ModelPricing,
+    *,
+    prompt_tokens: int,
+    system_prompt_tokens: int,
+    completion_tokens: int,
+) -> tuple[Decimal, Decimal]:
+    """Price a pre-flight estimate as ``(prompt_cost, completion_cost)``.
 
-    # Calculate USD cost with exact decimal precision
-    usd_cost += (Decimal(str(estimated_prompt_tokens)) / Decimal("1000000")) * input_usd
-    usd_cost += (Decimal(str(estimated_completion_tokens)) / Decimal("1000000")) * output_usd
-
-    return {"usd": usd_cost}
+    *prompt_tokens* are the caller's own tokens, billed at ``input``;
+    *system_prompt_tokens* is the Venice system-prompt allowance, billed at
+    ``cache_input`` (falling back to ``input``). The rate tier is chosen from
+    their sum, the same way the server chooses it from the billed prompt.
+    """
+    rates = _rates_for(model_pricing, prompt_tokens + system_prompt_tokens)
+    prompt_cost = _per_million(prompt_tokens, rates.input) + _per_million(
+        system_prompt_tokens, rates.cache_input
+    )
+    return prompt_cost, _per_million(completion_tokens, rates.output)
 
 
 # ---------------------------------------------------------------------------

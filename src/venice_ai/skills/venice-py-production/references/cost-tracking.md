@@ -95,7 +95,7 @@ from venice_ai.costs import calculate_completion_cost
 
 Two things agents reliably get wrong:
 
-1. **The first arg is the completion object, NOT a model id string.** Pass the full `ChatCompletionResponse` you got back from `client.chat.completions.create(...)`. The function reads `completion.usage.prompt_tokens` / `completion_tokens` off that object.
+1. **The first arg is the completion object, NOT a model id string.** Pass the full `ChatCompletionResponse` you got back from `client.chat.completions.create(...)`. The function reads `completion.usage` off that object: `prompt_tokens` (split into cache reads, cache writes and the uncached remainder, each at its own rate) and `completion_tokens`.
 2. **The return is a dict with a `"usd"` key**, not a `Decimal` directly. Do `costs["usd"]`, not `costs`.
 
 ```python
@@ -158,7 +158,7 @@ result = await budget.can_afford(estimated_cost_usd)
 - Computes `projected = total_cost_usd + estimated_cost_usd`.
 - Returns `True` iff `projected <= daily_usd` (when set) AND `projected <= monthly_usd` (when set).
 
-So you must **estimate** the next call's cost before invoking it. For chat completions, a reasonable estimate is `(prompt_tokens / 1M) * input_price + max_completion_tokens / 1M * output_price`. For most apps a flat `Decimal("0.05")` ceiling per call is good enough.
+So you must **estimate** the next call's cost before invoking it. For chat completions, use `(await client.chat.completions.estimate_cost(model=..., messages=..., expected_completion_tokens=...)).total_cost_usd`: it adds an allowance for the system prompt Venice injects unless `venice_parameters` opts out. For most apps a flat `Decimal("0.05")` ceiling per call is good enough.
 
 ## `budget.remaining()`
 

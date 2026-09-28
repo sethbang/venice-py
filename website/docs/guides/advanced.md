@@ -125,22 +125,26 @@ For multi-instance deployments, use Redis backend:
 
 ```python
 from venice_ai.core.config import RedisBackendConfig
+from venice_ai.rate_limiting.config import RateLimiterConfig, RateLimiterMode
 
 redis_config = RedisBackendConfig(
     redis_url="redis://localhost:6379",
     max_connections=20,
-    default_ttl=3600,
-    key_prefix="venice:v2:",
-    connection_timeout=5.0
 )
 
 config = VeniceAIConfig(
     backend=BackendConfig(
         backend_type=BackendType.REDIS,
         redis=redis_config
-    )
+    ),
+    # Redis is only used by the ADAPTIVE rate limiter; with any other mode
+    # VeniceClientFactory.create_client() warns that the backend is unused.
+    rate_limiter=RateLimiterConfig(mode=RateLimiterMode.ADAPTIVE),
 )
 ```
+
+The adaptive backend receives `redis_url`, `max_connections` and `cluster_mode`
+(with `cluster_mode=True`, `redis_url` is the seed node for cluster discovery).
 
 ### Retry Strategy
 
@@ -218,8 +222,7 @@ if response.balance_info:
 
 ```python
 http_config = HttpClientConfig(
-    max_connections=200,           # Total connection pool size
-    max_keepalive_connections=50,  # Persistent connections
+    max_connections=200,  # Connection pool size; also the concurrency cap
     timeout=30.0
 )
 ```
@@ -250,6 +253,11 @@ state_config = StateConfig(
 ```
 
 ### Rate Limit Tuning
+
+`SchedulerConfig` is read only by the ADAPTIVE rate limiter
+(`rate_limiter.mode=RateLimiterMode.ADAPTIVE`), which receives every field except
+`mode`. With any other rate-limiter mode, `VeniceClientFactory.create_client()`
+warns that a tuned scheduler has no effect.
 
 ```python
 scheduler_config = SchedulerConfig(

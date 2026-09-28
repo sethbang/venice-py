@@ -182,23 +182,167 @@ def split_text_for_tts(
     return segments or [text]
 
 
-# ID3v2 syncsafe size decoder. Tags 2..N in a concatenated mp3 stream produce
-# a brief player-visible metadata blip on some players (afplay is fine; some
-# JS Audio implementations re-emit the metadata event). Stripping is purely
-# cosmetic; the audio plays correctly either way.
-def _strip_leading_id3(data: bytes) -> bytes:
-    if len(data) < 10 or data[:3] != b"ID3":
-        return data
+# ---------------------------------------------------------------------------
+# MP3 segment stitching
+# ---------------------------------------------------------------------------
+# Every ``create_speech`` MP3 response is a complete file: an ID3v2 tag, then a
+# LAME ``Info`` (CBR) or ``Xing`` (VBR) header frame declaring that file's
+# frame count, then the audio frames. Appending responses verbatim yields a
+# stream whose first header frame claims only segment 0's frame count, so
+# header-trusting consumers (browsers, ``afinfo``, ASR front ends) report the
+# duration of the first segment and may stop there; the later tags and header
+# frames also sit mid-stream as bytes that are not audio. Multi-segment output
+# therefore drops each segment's leading ID3v2 tag(s) and Xing/Info/VBRI frame,
+# including segment 0's, and emits bare MPEG audio frames. Players then derive
+# duration from the frame bitrate, which is exact for Venice's CBR output.
+
+# (is_mpeg1) -> Layer III bitrate table in kb/s, indexed by the header nibble.
+_LAYER3_BITRATES_KBPS: dict[bool, tuple[int, ...]] = {
+    True: (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+    False: (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+}
+# MPEG version bits -> sample rates in Hz, indexed by the header field.
+_SAMPLE_RATES_HZ: dict[int, tuple[int, int, int]] = {
+    3: (44100, 48000, 32000),  # MPEG-1
+    2: (22050, 24000, 16000),  # MPEG-2
+    0: (11025, 12000, 8000),  # MPEG-2.5
+}
+# (is_mpeg1, mono) -> Layer III side-information length in bytes.
+_LAYER3_SIDE_INFO_BYTES: dict[tuple[bool, bool], int] = {
+    (True, True): 17,
+    (True, False): 32,
+    (False, True): 9,
+    (False, False): 17,
+}
+_VBRI_OFFSET = 36
+
+
+def _id3v2_tag_length(data: bytes | bytearray) -> int | None:
+    """Total length of the ID3v2 tag at the start of ``data`` (10+ bytes).
+
+    Returns ``None`` if ``data`` does not start with a valid ID3v2 header.
+    """
+    if data[:3] != b"ID3":
+        return None
+    size_bytes = data[6:10]
+    if any(b & 0x80 for b in size_bytes):
+        return None
     size = (
-        ((data[6] & 0x7F) << 21)
-        | ((data[7] & 0x7F) << 14)
-        | ((data[8] & 0x7F) << 7)
-        | (data[9] & 0x7F)
+        ((size_bytes[0] & 0x7F) << 21)
+        | ((size_bytes[1] & 0x7F) << 14)
+        | ((size_bytes[2] & 0x7F) << 7)
+        | (size_bytes[3] & 0x7F)
     )
-    header_total = 10 + size
-    if header_total > len(data):
-        return b""
-    return data[header_total:]
+    footer = 10 if data[5] & 0x10 else 0
+    return 10 + size + footer
+
+
+def _layer3_frame_layout(data: bytes | bytearray) -> tuple[int, int] | None:
+    """Return ``(frame_length, side_info_length)`` for a Layer III frame header.
+
+    ``data`` must hold at least the 4 header bytes. Returns ``None`` for
+    anything that is not a parseable MPEG Layer III frame header.
+    """
+    b0, b1, b2, b3 = data[0], data[1], data[2], data[3]
+    if b0 != 0xFF or (b1 & 0xE0) != 0xE0:
+        return None
+    version = (b1 >> 3) & 0x03
+    layer_bits = (b1 >> 1) & 0x03
+    if version == 1 or layer_bits != 1:
+        return None
+    bitrate_idx = b2 >> 4
+    sr_idx = (b2 >> 2) & 0x03
+    if bitrate_idx in (0, 15) or sr_idx == 3:
+        return None
+    is_mpeg1 = version == 3
+    bitrate = _LAYER3_BITRATES_KBPS[is_mpeg1][bitrate_idx] * 1000
+    sample_rate = _SAMPLE_RATES_HZ[version][sr_idx]
+    padding = (b2 >> 1) & 0x01
+    length = (144 if is_mpeg1 else 72) * bitrate // sample_rate + padding
+    mono = (b3 >> 6) == 3
+    return length, _LAYER3_SIDE_INFO_BYTES[(is_mpeg1, mono)]
+
+
+def _is_vbr_header_frame(frame: bytes | bytearray, side_info: int) -> bool:
+    """Whether a complete Layer III frame is a Xing/Info/VBRI header frame."""
+    tag_at = 4 + side_info
+    if frame[tag_at : tag_at + 4] in (b"Xing", b"Info"):
+        return True
+    return frame[_VBRI_OFFSET : _VBRI_OFFSET + 4] == b"VBRI"
+
+
+class _Mp3SegmentHeaderStripper:
+    """Drop one MP3 segment's leading ID3v2 tag(s) and Xing/Info/VBRI frame.
+
+    Stateful across network chunks: a tag split over any number of chunks is
+    skipped in full, and at most one audio frame (under 1.5 KB) is buffered
+    while deciding whether the first frame is a header frame. Once the first
+    frame has been handled, every later byte passes through unchanged.
+    """
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+        self._skip = 0
+        self._done = False
+
+    def feed(self, chunk: bytes) -> bytes:
+        """Consume one chunk and return the bytes that are safe to emit."""
+        if self._done:
+            return chunk
+        if self._skip:
+            n = min(self._skip, len(chunk))
+            self._skip -= n
+            chunk = chunk[n:]
+            if self._skip:
+                return b""
+        self._buf += chunk
+        return self._advance(final=False)
+
+    def flush(self) -> bytes:
+        """Return any bytes still held once the segment's stream has ended."""
+        if self._done:
+            return b""
+        return self._advance(final=True)
+
+    def _finish(self) -> bytes:
+        self._done = True
+        out = bytes(self._buf)
+        self._buf.clear()
+        return out
+
+    def _advance(self, *, final: bool) -> bytes:
+        buf = self._buf
+        while True:
+            if len(buf) < 10 and b"ID3".startswith(bytes(buf[:3])):
+                if not final:
+                    return b""
+                if buf[:3] == b"ID3":
+                    # Truncated tag at end of stream: it carries no audio.
+                    buf.clear()
+                return self._finish()
+            tag_len = _id3v2_tag_length(buf)
+            if tag_len is None:
+                break
+            if tag_len <= len(buf):
+                del buf[:tag_len]
+                continue
+            self._skip = tag_len - len(buf)
+            buf.clear()
+            if final:
+                return self._finish()
+            return b""
+
+        if len(buf) < 4:
+            return self._finish() if final else b""
+        layout = _layer3_frame_layout(buf)
+        if layout is None:
+            return self._finish()
+        frame_len, side_info = layout
+        if len(buf) < frame_len:
+            return self._finish() if final else b""
+        if _is_vbr_header_frame(buf[:frame_len], side_info):
+            del buf[:frame_len]
+        return self._finish()
 
 
 # Type alias for the progress callback
@@ -233,7 +377,14 @@ async def stream_long_text(
     malformed output if naively appended.
 
     If ``input`` fits in a single segment, this short-circuits to
-    ``create_speech`` directly — no extra task scheduling overhead.
+    ``create_speech`` directly — no extra task scheduling overhead — and the
+    response bytes are yielded unchanged.
+
+    When the input spans several segments, each segment's leading ID3v2 tag
+    and Xing/Info/VBRI header frame are removed as its bytes stream through,
+    so the output is one continuous MPEG audio stream with no tag metadata.
+    A per-segment header frame would otherwise declare only that segment's
+    frame count, and players that trust it report a truncated duration.
 
     :param client: A connected ``VeniceClient``.
     :param input: Text to synthesize.
@@ -310,14 +461,16 @@ async def stream_long_text(
         try:
             async with semaphore:
                 stream = await client.audio.create_speech(input=segment_text, **common_kwargs)
-                first_chunk = True
+                stripper = _Mp3SegmentHeaderStripper()
                 async for chunk in stream:
-                    if idx > 0 and first_chunk:
-                        chunk = _strip_leading_id3(chunk)
-                        first_chunk = False
-                    if chunk:
-                        total_bytes += len(chunk)
-                        await queues[idx].put(chunk)
+                    out = stripper.feed(chunk)
+                    if out:
+                        total_bytes += len(out)
+                        await queues[idx].put(out)
+                tail = stripper.flush()
+                if tail:
+                    total_bytes += len(tail)
+                    await queues[idx].put(tail)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:  # noqa: BLE001 - re-raised via queue

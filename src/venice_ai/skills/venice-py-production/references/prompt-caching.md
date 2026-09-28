@@ -153,7 +153,7 @@ In production, surface `cache_hit_pct` as a Prometheus metric alongside cost —
 
 ## Cost calculation
 
-Cached tokens are billed at a reduced rate (specifics depend on the model). The exact ratio is in the model's pricing metadata via `client.models.list()` — look for `pricing.input_cached` or similar. With `CostTracker`:
+Cached tokens are billed at a reduced rate (specifics depend on the model). The rates are in the model's pricing metadata via `client.models.list()`: `pricing.cache_input` for cache reads, `pricing.cache_write` for cache writes, and `pricing.extended` for the long-context tier above `extended.context_token_threshold` (a missing cache rate bills at `input`). With `CostTracker`:
 
 ```python
 tracker = await CostTracker.from_client(client)  # fetches live pricing including cache rates

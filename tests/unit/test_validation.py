@@ -12,6 +12,8 @@ Tests cover:
 
 from unittest.mock import patch
 
+import pytest
+
 from venice_ai.core.config import (
     BackendConfig,
     BackendType,
@@ -167,30 +169,20 @@ class TestValidateConnectionPools:
 
         assert any("connection pool" in r.lower() for r in result.recommendations)
 
-    def test_keepalive_exceeds_max(self):
-        """Test error when keepalive exceeds max connections."""
-        config = VeniceAIConfig(
-            http_client=HttpClientConfig(
-                max_connections=10,
-                max_keepalive_connections=20,
-            ),
-        )
-        result = validate_config(config)
+    def test_deprecated_keepalive_is_reported(self):
+        """A non-default max_keepalive_connections has no effect and is reported."""
+        with pytest.warns(FutureWarning, match="max_keepalive_connections"):
+            http_client = HttpClientConfig(max_connections=10, max_keepalive_connections=5)
+        result = validate_config(VeniceAIConfig(http_client=http_client))
 
-        assert not result.is_valid
-        assert any("exceeds max connections" in e for e in result.errors)
+        assert result.is_valid
+        assert any("max_keepalive_connections is deprecated" in w for w in result.warnings)
 
-    def test_low_keepalive_ratio(self):
-        """Test recommendation for low keepalive ratio."""
-        config = VeniceAIConfig(
-            http_client=HttpClientConfig(
-                max_connections=100,
-                max_keepalive_connections=10,  # 10%
-            ),
-        )
-        result = validate_config(config)
+    def test_default_keepalive_is_not_reported(self):
+        """Leaving the deprecated field alone produces no deprecation finding."""
+        result = validate_config(VeniceAIConfig(http_client=HttpClientConfig(max_connections=100)))
 
-        assert any("keepalive ratio is low" in r.lower() for r in result.recommendations)
+        assert not any("keepalive" in issue.message.lower() for issue in result.issues)
 
 
 class TestValidateRateLimiting:
@@ -452,21 +444,21 @@ class TestSecurityRecommendations:
 
         assert any("debug mode" in w.lower() and "production" in w.lower() for w in result.warnings)
 
-    def test_redis_prefix_without_env(self):
-        """Test recommendation for Redis prefix without environment."""
+    def test_deprecated_redis_key_prefix_is_reported(self):
+        """A custom Redis key_prefix is ignored at runtime and reported as deprecated."""
         config = VeniceAIConfig(
             environment="production",
             backend=BackendConfig(
                 backend_type=BackendType.REDIS,
                 redis=RedisBackendConfig(
                     redis_url="redis://localhost:6379",
-                    key_prefix="myapp:",  # Doesn't include 'production'
+                    key_prefix="myapp:",
                 ),
             ),
         )
         result = validate_config(config)
 
-        assert any("key prefix" in r.lower() for r in result.recommendations)
+        assert any("backend.redis.key_prefix is deprecated" in w for w in result.warnings)
 
 
 class TestEnvironmentSpecificValidation:
@@ -564,7 +556,6 @@ class TestConfigurationScore:
             http_client=HttpClientConfig(
                 timeout=30.0,
                 max_connections=200,
-                max_keepalive_connections=50,
             ),
             scheduler=SchedulerConfig(
                 mode=SchedulerMode.INTELLIGENT,
@@ -579,10 +570,10 @@ class TestConfigurationScore:
     def test_low_score_with_errors(self):
         """Test configuration with errors gets low score."""
         config = VeniceAIConfig(
-            http_client=HttpClientConfig(
-                max_connections=10,
-                max_keepalive_connections=20,  # Error: exceeds max
-            ),
+            backend=BackendConfig(
+                backend_type=BackendType.REDIS,
+                redis=RedisBackendConfig(redis_url="redis://localhost:6379"),
+            ),  # Error: Redis is never used without the ADAPTIVE rate limiter
         )
         score = get_configuration_score(config)
 
@@ -598,7 +589,6 @@ class TestConfigurationScore:
             http_client=HttpClientConfig(
                 timeout=2.0,  # Warning
                 max_connections=5,  # Warning
-                max_keepalive_connections=10,  # Error
             ),
             scheduler=SchedulerConfig(
                 enable_rate_limiting=False,  # Warning

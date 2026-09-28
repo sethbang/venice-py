@@ -72,7 +72,6 @@ import inspect
 import logging
 import warnings
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping, Sequence
-from decimal import Decimal
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -85,7 +84,7 @@ from typing import (
 from pydantic import BaseModel, TypeAdapter
 
 from ..._resource import APIResource
-from ...costs import ChatCostEstimate
+from ...costs import VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE, ChatCostEstimate, _estimate_costs
 from ...exceptions import InvalidRequestError, MaxIterationsExceededError
 from ...helpers import tool_from_function
 from ...streaming import ChatStream, Stream
@@ -137,9 +136,10 @@ _E2EE_MODEL_PREFIX = "e2ee-"
 #: prior turns as ciphertext, and tool output is not a user secret).
 _E2EE_ENCRYPT_ROLES = frozenset({"user", "system"})
 
-#: Emitted once per E2EE-engaged ``create`` call. The wire path is real, but the
-#: baseline attestation verifier trusts Venice's server-side ``verified`` claim;
-#: full client-side TDX / NVIDIA quote verification is not performed.
+#: Emitted once per E2EE-engaged ``create`` call that uses the baseline
+#: attestation verifier (no ``TeeOptions(verifier=...)``). The wire path is real,
+#: but that verifier trusts Venice's server-side ``verified`` claim; full
+#: client-side TDX / NVIDIA quote verification is not performed.
 _E2EE_TRUST_WARNING = (
     "Venice E2EE engaged: messages are encrypted client-side to the attested "
     "model key and responses are decrypted locally. SECURITY LIMITATION: the "
@@ -298,7 +298,7 @@ def _venice_params_as_dict(venice_parameters: Any) -> dict[str, Any]:
     """
     if venice_parameters is None:
         return {}
-    if isinstance(venice_parameters, dict):
+    if isinstance(venice_parameters, Mapping):
         return dict(venice_parameters)
     if hasattr(venice_parameters, "model_dump"):
         return cast(dict[str, Any], venice_parameters.model_dump(exclude_none=True))
@@ -720,8 +720,9 @@ class ChatCompletions(APIResource["VeniceClient"]):
                 any network call, and the Venice system prompt is forced off.
                 SECURITY LIMITATION: the baseline attestation verifier trusts
                 Venice's server-side ``verified`` claim and does not perform
-                full client-side TDX / NVIDIA quote verification; a one-time
-                :class:`UserWarning` is emitted on engagement.
+                full client-side TDX / NVIDIA quote verification; a
+                :class:`UserWarning` is emitted on each engaged call unless a
+                verifier is supplied via ``TeeOptions(verifier=...)``.
             kwargs: Additional keyword arguments forwarded to the request
                 body for forward-compatibility.
 
@@ -1060,14 +1061,18 @@ class ChatCompletions(APIResource["VeniceClient"]):
             venice_parameters=venice_parameters,
         )
 
-        # (2) One-time-per-call attestation-trust limitation warning. Emitted
-        # unconditionally (no module-global flag) so each engagement is honest;
-        # Python's default filter handles per-callsite de-duplication for UX.
-        warnings.warn(_E2EE_TRUST_WARNING, UserWarning, stacklevel=3)
+        opts = e2ee if isinstance(e2ee, TeeOptions) else TeeOptions()
+
+        # (2) Attestation-trust limitation warning, emitted on every call that
+        # relies on the baseline verifier (no module-global flag) so each such
+        # engagement is honest; Python's default filter handles per-callsite
+        # de-duplication for UX. A caller-supplied full quote verifier removes
+        # the limitation, so nothing is emitted then.
+        if opts.verifier is None:
+            warnings.warn(_E2EE_TRUST_WARNING, UserWarning, stacklevel=3)
 
         # (3) Open a verified session (attestation GET + SESSION keypair). Nonce /
         # verifier flow through from TeeOptions; bool uses defaults.
-        opts = e2ee if isinstance(e2ee, TeeOptions) else TeeOptions()
         session = await self._client.tee.open_session(
             model=model,
             nonce=opts.nonce,
@@ -1172,6 +1177,7 @@ class ChatCompletions(APIResource["VeniceClient"]):
         messages: Sequence[ChatMessageParam],
         expected_completion_tokens: int = 500,
         tokens_per_word: float = 1.3,
+        venice_parameters: VeniceParameters | Mapping[str, Any] | None = None,
     ) -> ChatCostEstimate:
         """Estimate the USD cost of a chat completion before sending it.
 
@@ -1180,6 +1186,17 @@ class ChatCompletions(APIResource["VeniceClient"]):
         (word-count x ``tokens_per_word``) - the same approximation used
         by :func:`venice_ai.costs.estimate_completion_cost` - so the
         result is an estimate, not a guarantee.
+
+        Unless ``venice_parameters`` sets
+        ``include_venice_system_prompt=False`` (or ``enable_e2ee=True``,
+        which forces it off), Venice prepends its own system prompt to the
+        conversation and bills it as prompt tokens.
+        The estimate adds
+        :data:`~venice_ai.costs.VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE`
+        tokens for it (reported as ``venice_system_prompt_tokens``),
+        priced at the model's ``cache_input`` rate, or ``input`` when no
+        cache rate is published. The injected prompt's real size varies
+        by model, so the allowance deliberately errs high.
 
         SDK-side helper. The pricing lookup wraps
         ``GET /api/v1/models`` via :meth:`client.models.list`; no other
@@ -1192,6 +1209,10 @@ class ChatCompletions(APIResource["VeniceClient"]):
                 response. Defaults to ``500``.
             tokens_per_word: Word -> token conversion ratio. Default
                 ``1.3`` is tuned for English; raise for code/CJK.
+            venice_parameters: The ``venice_parameters`` you intend to
+                send (a :class:`VeniceParameters` or a mapping). Only
+                ``include_venice_system_prompt`` and ``enable_e2ee`` affect
+                the estimate.
 
         Returns:
             :class:`~venice_ai.costs.ChatCostEstimate` with the prompt /
@@ -1217,18 +1238,25 @@ class ChatCompletions(APIResource["VeniceClient"]):
         pricing = await self._fetch_chat_pricing(model)
 
         prompt_text = _concat_message_text(_coerce_messages(messages))
-        prompt_tokens = int(len(prompt_text.split()) * tokens_per_word)
+        message_tokens = int(len(prompt_text.split()) * tokens_per_word)
+        opted_out = (
+            _venice_params_as_dict(venice_parameters).get("include_venice_system_prompt") is False
+        )
+        # E2EE forces the Venice system prompt off (see ``create``).
+        includes_system_prompt = not opted_out and not _e2ee_engaged(False, venice_parameters)
+        system_prompt_tokens = VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE if includes_system_prompt else 0
 
-        input_usd = Decimal(str(pricing.input.usd or 0.0))
-        output_usd = Decimal(str(pricing.output.usd or 0.0))
-        million = Decimal("1000000")
-
-        prompt_cost = (Decimal(prompt_tokens) / million) * input_usd
-        completion_cost = (Decimal(expected_completion_tokens) / million) * output_usd
+        prompt_cost, completion_cost = _estimate_costs(
+            pricing,
+            prompt_tokens=message_tokens,
+            system_prompt_tokens=system_prompt_tokens,
+            completion_tokens=expected_completion_tokens,
+        )
 
         return ChatCostEstimate(
             model=model,
-            prompt_tokens=prompt_tokens,
+            prompt_tokens=message_tokens + system_prompt_tokens,
+            venice_system_prompt_tokens=system_prompt_tokens,
             expected_completion_tokens=expected_completion_tokens,
             prompt_cost_usd=prompt_cost,
             completion_cost_usd=completion_cost,

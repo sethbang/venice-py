@@ -187,7 +187,21 @@ class MusicJob:
         _exc_val: BaseException | None,
         _exc_tb: object,
     ) -> None:
-        """Guarantee server-side cleanup on exit. Mirrors ``VideoJob``."""
+        """Release the job's stored media on exit (best effort). Mirrors ``VideoJob``.
+
+        Calls :meth:`cancel`, which frees server-side storage. It does not stop
+        generation: leaving the block before the job reached a terminal status
+        (for example after a :meth:`wait` timeout) leaves the job running, and
+        billed, on the server. That case is logged at WARNING.
+        """
+        if not isinstance(self._status, (MusicCompletedStatus, MusicFailedStatus)):
+            logger.warning(
+                "MusicJob queue_id=%s left its context before reaching a terminal "
+                "status (last status: %s). Releasing it frees stored media only; "
+                "generation keeps running on the server and is still billed.",
+                self.queue_id,
+                self._status.status if self._status is not None else "never polled",
+            )
         try:
             await self.cancel()
         except Exception as e:
@@ -326,11 +340,18 @@ class MusicJob:
             The resolved :class:`pathlib.Path` the audio was written to.
 
         Raises:
+            MusicGenerationError: If the status carries neither inline data
+                nor a ``url``; nothing is written in that case.
             APIError: If the URL fetch fails (mapped subclasses include
                 ``APIConnectionError``, ``APITimeoutError``).
             OSError: If the file cannot be written (permission denied,
                 disk full, etc.).
         """
+        if not (status.data or status.url):
+            raise MusicGenerationError(
+                f"Music job {self.queue_id} completed without downloadable audio: "
+                "the status has no inline data or url"
+            )
         path = Path(path)
         await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
         if status.data:
@@ -341,13 +362,14 @@ class MusicJob:
         return path
 
     async def cancel(self) -> MusicCompleteResponse:
-        """Release server-side storage / cancel an in-progress job.
+        """Release this job's server-side storage (best effort).
 
-        Wraps ``POST /api/v1/audio/complete``, which deletes the queue
-        entry server-side regardless of whether generation has finished.
-        Named ``cancel`` (rather than the wire-format ``complete``) to
-        distinguish it from the :attr:`is_complete` state check - terminal
-        states are polled via :meth:`wait` / :attr:`status`.
+        Wraps ``POST /api/v1/audio/complete``, which deletes the job's stored
+        media and queue entry. It does not stop a generation that is still
+        running: the job continues on the server and is billed. Named
+        ``cancel`` (rather than the wire-format ``complete``) to distinguish
+        it from the :attr:`is_complete` state check - terminal states are
+        polled via :meth:`wait` / :attr:`status`.
 
         Returns:
             :class:`MusicCompleteResponse` confirming the queue entry was
@@ -619,11 +641,13 @@ class Music(APIResource["VeniceClient"]):
         model: str,
         queue_id: str,
     ) -> MusicCompleteResponse:
-        """Release server-side storage / cancel an in-progress job.
+        """Release a music job's server-side storage (best-effort cleanup).
 
-        Wraps ``POST /api/v1/audio/complete``. Named ``cancel`` (rather
-        than the wire-format ``complete``) to distinguish it from
-        :attr:`MusicJob.is_complete` state checks.
+        Wraps ``POST /api/v1/audio/complete``, which deletes the job's stored
+        media and queue entry. It does not stop a generation that is still
+        running; that job continues on the server and is billed. Named
+        ``cancel`` (rather than the wire-format ``complete``) to distinguish
+        it from :attr:`MusicJob.is_complete` state checks.
 
         Args:
             model: Music model id used at submit time.

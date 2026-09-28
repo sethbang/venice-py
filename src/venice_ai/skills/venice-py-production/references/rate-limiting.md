@@ -91,11 +91,10 @@ from venice_ai.presets import create_production_config
 
 # create_production_config wires BOTH halves required for Redis at runtime:
 #   BackendType.REDIS  +  RateLimiterMode.ADAPTIVE (redis_url=...)
-# Setting the Redis backend WITHOUT adaptive mode silently falls back to the
-# in-memory limiter — the config validator now errors on that misuse.
+# Setting the Redis backend WITHOUT adaptive mode never contacts Redis:
+# VeniceClientFactory.create_client() warns and the config validator errors.
 config = create_production_config(
     redis_url="redis://...",
-    redis_key_prefix="venice:",
     max_concurrent_executions=10,
 )
 

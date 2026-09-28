@@ -8,9 +8,21 @@ Tests cover:
 - Preset configuration validation
 """
 
+import importlib
+import inspect
+import pkgutil
+import warnings
+from collections.abc import Callable
+
+import pytest
+
+import venice_ai.presets
 from venice_ai.core.config import (
     BackendType,
+    RateLimiterMode,
+    SchedulerConfig,
     SchedulerMode,
+    VeniceAIConfig,
 )
 from venice_ai.presets import (
     create_development_config,
@@ -41,7 +53,11 @@ class TestDevelopmentPresets:
         assert config.debug is True
         assert config.backend.backend_type == BackendType.MEMORY
         assert config.scheduler.mode == SchedulerMode.BASIC
-        assert config.scheduler.enable_rate_limiting is False
+        # SIMPLE rate limiting: the scheduler is inert, so it is left at its defaults.
+        assert config.rate_limiter.mode == RateLimiterMode.SIMPLE
+        assert config.scheduler.model_dump(exclude={"mode"}) == (
+            SchedulerConfig().model_dump(exclude={"mode"})
+        )
         assert config.http_client.timeout == 60.0
 
     def test_create_development_config_custom_debug(self):
@@ -62,17 +78,21 @@ class TestDevelopmentPresets:
         config = create_development_config_with_rate_limiting()
 
         assert config.environment == "development"
-        assert config.scheduler.mode == SchedulerMode.INTELLIGENT
-        assert config.scheduler.enable_rate_limiting is True
-        assert config.scheduler.metrics_enabled is True
+        # SIMPLE rate limiting: the scheduler is inert, so it is left at its defaults.
+        assert config.rate_limiter.mode == RateLimiterMode.SIMPLE
+        assert config.scheduler.model_dump(exclude={"mode"}) == (
+            SchedulerConfig().model_dump(exclude={"mode"})
+        )
         assert config.backend.backend_type == BackendType.MEMORY
+        assert config.http_client.max_connections == 30
+        assert config.circuit_breaker.failure_threshold == 15
 
     def test_create_development_config_with_rate_limiting_debug_disabled(self):
         """Test development config with rate limiting and debug off."""
         config = create_development_config_with_rate_limiting(enable_debug=False)
 
         assert config.debug is False
-        assert config.scheduler.enable_rate_limiting is True
+        assert config.environment == "development"
 
 
 class TestProductionPresets:
@@ -89,7 +109,8 @@ class TestProductionPresets:
         assert config.backend.backend_type == BackendType.REDIS
         assert config.backend.redis is not None
         assert config.backend.redis.redis_url == "redis://localhost:6379"
-        assert config.backend.redis.key_prefix == "venice:prod:"
+        # key_prefix is deprecated: the preset leaves it at the field default.
+        assert "key_prefix" not in config.backend.redis.model_dump(exclude_defaults=True)
         assert config.scheduler.mode == SchedulerMode.INTELLIGENT
         assert config.scheduler.enable_rate_limiting is True
         assert config.scheduler.max_concurrent_executions == 100
@@ -194,16 +215,22 @@ class TestTestingPresets:
         assert config.debug is False
         assert config.backend.backend_type == BackendType.MEMORY
         assert config.scheduler.mode == SchedulerMode.BASIC
-        assert config.scheduler.enable_rate_limiting is True
-        assert config.scheduler.test_rate_multiplier == 10.0
-        assert config.scheduler.metrics_enabled is False
+        assert config.rate_limiter.mode == RateLimiterMode.SIMPLE
+        assert config.scheduler.model_dump(exclude={"mode"}) == (
+            SchedulerConfig().model_dump(exclude={"mode"})
+        )
+        assert config.http_client.max_retries == 1
         assert config.circuit_breaker.failure_threshold == 999  # Effectively disabled
 
     def test_create_testing_config_custom_multiplier(self):
-        """Test testing config with custom rate multiplier."""
+        """An explicit rate multiplier is kept so the factory can report it as unused."""
         config = create_testing_config(test_rate_multiplier=5.0)
 
         assert config.scheduler.test_rate_multiplier == 5.0
+        with pytest.warns(UserWarning, match="test_rate_multiplier"):
+            from venice_ai.factory import _warn_on_inert_config
+
+            _warn_on_inert_config(config)
 
     def test_create_testing_config_circuit_breaker_enabled(self):
         """Test testing config with circuit breaker enabled."""
@@ -223,10 +250,12 @@ class TestTestingPresets:
         config = create_testing_config_with_intelligent_scheduler()
 
         assert config.environment == "test"
-        assert config.scheduler.mode == SchedulerMode.INTELLIGENT
-        assert config.scheduler.enable_rate_limiting is True
-        assert config.scheduler.metrics_enabled is True
-        assert config.scheduler.test_rate_multiplier == 10.0
+        # Despite the name, SIMPLE rate limiting: no scheduler runs.
+        assert config.rate_limiter.mode == RateLimiterMode.SIMPLE
+        assert config.scheduler.model_dump(exclude={"mode"}) == (
+            SchedulerConfig().model_dump(exclude={"mode"})
+        )
+        assert config.http_client.timeout == 15.0
         assert config.circuit_breaker.failure_threshold == 999
 
     def test_create_testing_config_with_intelligent_scheduler_custom_multiplier(self):
@@ -234,7 +263,6 @@ class TestTestingPresets:
         config = create_testing_config_with_intelligent_scheduler(test_rate_multiplier=20.0)
 
         assert config.scheduler.test_rate_multiplier == 20.0
-        assert config.scheduler.mode == SchedulerMode.INTELLIGENT
 
     def test_create_testing_config_for_circuit_breaker(self):
         """Test circuit breaker testing config."""
@@ -244,7 +272,10 @@ class TestTestingPresets:
         assert config.debug is True
         assert config.circuit_breaker.failure_threshold == 5
         assert config.circuit_breaker.reset_timeout == 5.0
-        assert config.scheduler.enable_rate_limiting is False
+        assert config.rate_limiter.mode == RateLimiterMode.SIMPLE
+        assert config.scheduler.model_dump(exclude={"mode"}) == (
+            SchedulerConfig().model_dump(exclude={"mode"})
+        )
         assert config.http_client.max_retries == 0
 
     def test_create_testing_config_for_circuit_breaker_custom_params(self):
@@ -373,3 +404,42 @@ class TestPresetValidation:
         for config in configs:
             result = validate_config(config)
             assert result.is_valid
+
+
+def _preset_factories() -> list[tuple[str, Callable[..., VeniceAIConfig]]]:
+    """Every public ``create_*`` function defined in a ``venice_ai.presets`` module."""
+    found: list[tuple[str, Callable[..., VeniceAIConfig]]] = []
+    for info in pkgutil.iter_modules(venice_ai.presets.__path__):
+        module = importlib.import_module(f"venice_ai.presets.{info.name}")
+        for name, fn in inspect.getmembers(module, inspect.isfunction):
+            if name.startswith("create_") and fn.__module__ == module.__name__:
+                found.append((f"{info.name}.{name}", fn))
+    return sorted(found, key=lambda item: item[0])
+
+
+PRESET_FACTORIES = _preset_factories()
+
+
+def test_preset_enumeration_is_not_empty():
+    assert len(PRESET_FACTORIES) > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "preset", [fn for _, fn in PRESET_FACTORIES], ids=[name for name, _ in PRESET_FACTORIES]
+)
+async def test_preset_through_factory_emits_no_warnings(preset):
+    """No shipped preset trips the SDK's own inert-config or deprecation warnings."""
+    from venice_ai.factory import VeniceClientFactory
+
+    kwargs = {}
+    if "redis_url" in inspect.signature(preset).parameters:
+        kwargs["redis_url"] = "redis://redis.example.internal:6379/0"
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = preset(**kwargs)
+        client = VeniceClientFactory.create_client(config, api_key="test-key", account_id="acct")
+        await client.close()
+
+    assert [f"{w.category.__name__}: {w.message}" for w in caught] == []

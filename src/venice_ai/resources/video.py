@@ -53,6 +53,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _is_unknown_request_id(exc: InvalidRequestError) -> bool:
+    """Whether a 400 says the queue id itself is unknown or already released.
+
+    That rejection concerns the lookup, not the job: it must not be reported
+    as a generation failure.
+    """
+    marker = "request id is invalid"
+    return marker in str(exc).lower() or marker in str(exc.body).lower()
+
+
 def _format_video_duration(duration_seconds: int | str) -> str:
     """Render the public ``duration_seconds`` value as the wire form ``"{n}s"``.
 
@@ -128,7 +138,7 @@ class VideoJob:
 
     Use as an async context manager to guarantee server-side cleanup::
 
-        async with await client.video.run(model=model, prompt="...", duration="5s") as job:
+        async with await client.video.run(model=model, prompt="...", duration_seconds=5) as job:
             status = await job.wait()
             await job.download("output.mp4", status)
     """
@@ -142,6 +152,9 @@ class VideoJob:
         # /video/retrieve only returns JSON status (no url/data). Keep it so
         # download() can fall back to it.
         self._download_url: str | None = getattr(queue_response, "download_url", None)
+        # Set when /video/retrieve rejects the job outright (server-side
+        # validation failure): the job is over even though no status was seen.
+        self._rejected = False
 
     async def __aenter__(self) -> VideoJob:
         return self
@@ -152,12 +165,25 @@ class VideoJob:
         _exc_val: BaseException | None,
         _exc_tb: object,
     ) -> None:
-        """Guarantee server-side cleanup on exit.
+        """Release the job's stored media on exit (best effort).
+
+        Calls :meth:`cancel`, which frees server-side storage. It does not stop
+        generation: leaving the block before the job reached a terminal status
+        (for example after a :meth:`wait` timeout) leaves the job running, and
+        billed, on the server. That case is logged at WARNING.
 
         Propagates any in-flight exception from the user's block. If both the
         user code and cleanup raise, the user's exception wins; the cleanup
         failure is logged.
         """
+        if not self._is_terminal:
+            logger.warning(
+                "VideoJob queue_id=%s left its context before reaching a terminal "
+                "status (last status: %s). Releasing it frees stored media only; "
+                "generation keeps running on the server and is still billed.",
+                self.queue_id,
+                self._status.status if self._status is not None else "never polled",
+            )
         try:
             await self.cancel()
         except Exception as e:
@@ -165,7 +191,8 @@ class VideoJob:
             # gone — the job reached a terminal state and the server released it,
             # or it was never completable. That's benign on a normal exit (e.g.
             # queue → poll-to-completion → exit), so log it at DEBUG rather than
-            # spamming a WARNING. Genuine cleanup failures (5xx, network) stay
+            # spamming a WARNING; an exit before a terminal status has already
+            # been reported above. Genuine cleanup failures (5xx, network) stay
             # at WARNING. Cleanup is best-effort either way and never raised.
             level = logging.DEBUG if isinstance(e, InvalidRequestError) else logging.WARNING
             if exc_type is None:
@@ -189,6 +216,11 @@ class VideoJob:
     @property
     def is_complete(self) -> bool:
         return isinstance(self._status, VideoCompletedStatus)
+
+    @property
+    def _is_terminal(self) -> bool:
+        """Whether the job finished (completed, failed, or rejected by the server)."""
+        return self._rejected or isinstance(self._status, (VideoCompletedStatus, VideoFailedStatus))
 
     @property
     def is_failed(self) -> bool:
@@ -218,11 +250,28 @@ class VideoJob:
         :param poll_interval: Seconds between polls.
         :param max_polls: Maximum number of polls before raising ``TimeoutError``.
         :param on_progress: Optional callback invoked on each processing status update.
-        :raises VideoGenerationError: If the server reports generation failure.
+        :raises VideoGenerationError: If the server reports generation failure,
+            including a queued job that ``/video/retrieve`` rejects with a 400
+            because it failed server-side validation (the original
+            :class:`~venice_ai.exceptions.InvalidRequestError` is chained as
+            ``__cause__``). A 400 saying the request ID is invalid (an unknown
+            or already released ``queue_id``) is not a generation failure and
+            propagates as :class:`~venice_ai.exceptions.InvalidRequestError`.
         :raises TimeoutError: If ``max_polls`` is exhausted.
         """
         for _ in range(max_polls):
-            status = await self.poll()
+            try:
+                status = await self.poll()
+            except InvalidRequestError as e:
+                if _is_unknown_request_id(e):
+                    raise
+                self._rejected = True
+                raise VideoGenerationError(
+                    f"Video generation failed: {e}",
+                    error_code=e.code,
+                    request=e.request,
+                    response=e.response,
+                ) from e
             if isinstance(status, VideoCompletedStatus):
                 return status
             if isinstance(status, VideoFailedStatus):
@@ -245,7 +294,16 @@ class VideoJob:
         :param path: Destination file path.
         :param status: A completed status (from :meth:`wait` or :meth:`poll`).
         :return: The resolved :class:`Path` of the saved file.
+        :raises VideoGenerationError: If the status carries no inline data and
+            no ``url``, and the job has no queue-time ``download_url``; nothing
+            is written in that case.
         """
+        if not (status.data or status.url or self._download_url):
+            raise VideoGenerationError(
+                f"Video job {self.queue_id} completed without a downloadable video: "
+                "the status has no inline data or url and the queue response had "
+                "no download_url"
+            )
         path = Path(path)
         await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
         if status.data:
@@ -261,13 +319,15 @@ class VideoJob:
         return path
 
     async def cancel(self) -> VideoCompleteResponse:
-        """Release server-side storage / cancel an in-progress job.
+        """Release this job's server-side storage (best effort).
 
-        Wraps the ``/video/complete`` endpoint, which deletes the queue
-        entry server-side regardless of whether the job has finished. Named
-        ``cancel`` (rather than the wire-format ``complete``) to distinguish
-        it from the :attr:`is_complete` state check — terminal states are
-        polled via :meth:`wait` / :attr:`status`.
+        Wraps the ``/video/complete`` endpoint, which deletes the job's stored
+        media and queue entry. It does not stop a generation that is still
+        running: the job continues on the server and is billed. Call it once
+        the video has been downloaded. Named ``cancel`` (rather than the
+        wire-format ``complete``) to distinguish it from the
+        :attr:`is_complete` state check — terminal states are polled via
+        :meth:`wait` / :attr:`status`.
         """
         return await self._client.video.cancel(model=self.model, queue_id=self.queue_id)
 
@@ -315,7 +375,7 @@ class Video(APIResource["VeniceClient"]):
                 # resolution; /video/quote does not accept a prompt).
                 quote = await client.video.quote(
                     model=model,
-                    duration="5s",
+                    duration_seconds=5,
                 )
                 print(f"Estimated cost: ${quote.quote}")
 
@@ -323,7 +383,7 @@ class Video(APIResource["VeniceClient"]):
                 result = await client.video.submit(
                     model=model,
                     prompt="A sunset over the ocean with gentle waves",
-                    duration="5s",
+                    duration_seconds=5,
                     aspect_ratio="16:9",
                 )
                 print(f"Queue ID: {result.queue_id}")
@@ -345,7 +405,7 @@ class Video(APIResource["VeniceClient"]):
         self,
         *,
         model: str,
-        prompt: str,
+        prompt: str | None = None,
         duration_seconds: int | str,
         negative_prompt: str | None = None,
         resolution: str | None = None,
@@ -396,8 +456,11 @@ class Video(APIResource["VeniceClient"]):
         :param model: Video model ID (e.g., ``"wan-2.6-text-to-video"``).
         :type model: str
         :param prompt: Text prompt for video generation (max length varies by
-            model; default 2500 chars, up to 20000 for some models).
-        :type prompt: str
+            model; default 2500 chars, up to 20000 for some models). Required
+            by generation models; upscale and enhancement models that work
+            from ``video_url`` take none, and it is then left out of the
+            request.
+        :type prompt: Optional[str]
         :param duration_seconds: Duration of generated video as an integer
             number of seconds (e.g. ``5``, ``10``). Liberal string parsing
             also accepts ``"5"`` / ``"5s"`` / ``"5 seconds"``. The wire
@@ -447,9 +510,11 @@ class Video(APIResource["VeniceClient"]):
             camera movement, and overall style.
         :type reference_video_urls: Optional[list[str]]
         :param elements: Up to 4 structured character/object elements for
-            advanced element-aware models (Kling O3 R2V). Each dict should
-            include ``frontal_image_url`` and optional ``reference_image_urls``.
-            Reference in the prompt as ``@Element1``, ``@Element2``, etc.
+            advanced element-aware models (Kling O3 R2V). Each element is
+            described either by images (``frontal_image_url`` and/or up to 3
+            ``reference_image_urls``) or by a single reference ``video_url``,
+            never both. Reference in the prompt as ``@Element1``,
+            ``@Element2``, etc.
         :type elements: Optional[list[VideoElement | dict]]
         :param scene_image_urls: Up to 4 scene reference images for
             element-aware models. Reference as ``@Image1``, ``@Image2``, etc.
@@ -490,10 +555,10 @@ class Video(APIResource["VeniceClient"]):
         # Build request params, only including non-None values
         request_params: dict = {
             "model": model,
-            "prompt": prompt,
             "duration": _format_video_duration(duration_seconds),
         }
         for key, val in {
+            "prompt": prompt,
             "negative_prompt": negative_prompt,
             "resolution": resolution,
             "audio": audio,
@@ -780,13 +845,14 @@ class Video(APIResource["VeniceClient"]):
         queue_id: str,
     ) -> VideoCompleteResponse:
         """
-        Release server-side storage for a video job (cancel / cleanup).
+        Release server-side storage for a video job (best-effort cleanup).
 
-        Wraps the ``/video/complete`` endpoint, which deletes the queue
-        entry server-side regardless of whether generation has finished.
-        Call this after successfully downloading the video, or to abort an
-        in-progress job. Not needed if ``delete_media_on_completion`` was
-        set to ``True`` in the :meth:`retrieve` request.
+        Wraps the ``/video/complete`` endpoint, which deletes the job's
+        stored media and queue entry. Call this after successfully
+        downloading the video. It does not stop a generation that is still
+        running; that job continues on the server and is billed. Not needed
+        if ``delete_media_on_completion`` was set to ``True`` in the
+        :meth:`retrieve` request.
 
         :param model: Model ID used for generation.
         :type model: str
@@ -825,7 +891,7 @@ class Video(APIResource["VeniceClient"]):
         self,
         *,
         model: str,
-        prompt: str,
+        prompt: str | None = None,
         duration_seconds: int | str,
         negative_prompt: str | None = None,
         resolution: str | None = None,

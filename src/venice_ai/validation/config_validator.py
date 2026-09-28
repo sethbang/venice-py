@@ -10,6 +10,8 @@ This module analyzes VeniceAIConfig objects and provides:
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from pydantic import BaseModel
+
 from ..core.config import (
     BackendType,
     SchedulerMode,
@@ -110,6 +112,9 @@ def validate_config(config: VeniceAIConfig) -> ConfigValidation:
     # Validate connection pool settings
     _validate_connection_pools(config, result)
 
+    # Report deprecated settings that have no effect
+    _validate_deprecated_fields(config, result)
+
     # Validate rate limiting configuration
     _validate_rate_limiting(config, result)
 
@@ -175,7 +180,6 @@ def _validate_timeouts(config: VeniceAIConfig, result: ConfigValidation) -> None
 def _validate_connection_pools(config: VeniceAIConfig, result: ConfigValidation) -> None:
     """Validate connection pool configuration."""
     max_conn = config.http_client.max_connections
-    keepalive = config.http_client.max_keepalive_connections
 
     # Check pool size
     if max_conn < 10:
@@ -191,20 +195,31 @@ def _validate_connection_pools(config: VeniceAIConfig, result: ConfigValidation)
             category="performance",
         )
 
-    # Check keepalive
-    if keepalive > max_conn:
-        result.add_error(
-            f"Keepalive connections ({keepalive}) exceeds max connections ({max_conn})",
-            category="configuration",
-            fix=f"Set max_keepalive_connections <= {max_conn}",
-        )
 
-    if keepalive < max_conn * 0.2:
-        result.add_recommendation(
-            f"Keepalive ratio is low ({keepalive}/{max_conn} = {keepalive / max_conn:.0%}). "
-            "Consider increasing to 20-30% of max_connections for better performance.",
-            category="performance",
-        )
+def _validate_deprecated_fields(config: VeniceAIConfig, result: ConfigValidation) -> None:
+    """Report deprecated settings that were changed from their defaults.
+
+    Values are read from each section's ``__dict__`` so pydantic's access-time
+    deprecation warning is not raised by the validator itself.
+    """
+    sections: list[tuple[str, BaseModel | None]] = [
+        ("http_client", config.http_client),
+        ("scheduler", config.scheduler),
+        ("backend.redis", config.backend.redis),
+    ]
+    for prefix, section in sections:
+        if section is None:
+            continue
+        for name, info in type(section).model_fields.items():
+            if not info.deprecated:
+                continue
+            if section.__dict__.get(name) == info.get_default(call_default_factory=True):
+                continue
+            result.add_warning(
+                f"{prefix}.{name} is deprecated and has no effect.",
+                category="deprecated",
+                fix=f"Remove {name} from the configuration",
+            )
 
 
 def _validate_rate_limiting(config: VeniceAIConfig, result: ConfigValidation) -> None:
@@ -403,18 +418,6 @@ def _add_performance_recommendations(config: VeniceAIConfig, result: ConfigValid
 
 def _add_security_recommendations(config: VeniceAIConfig, result: ConfigValidation) -> None:
     """Add security-related recommendations."""
-    # Check if using separate key prefixes
-    if config.backend.backend_type == BackendType.REDIS and config.backend.redis:
-        prefix = config.backend.redis.key_prefix
-        env = config.environment
-
-        if env not in prefix.lower():
-            result.add_recommendation(
-                f"Redis key prefix ('{prefix}') doesn't include environment ('{env}'). "
-                "Consider using environment-specific prefixes like 'venice:{env}:'",
-                category="security",
-            )
-
     # Check debug mode in production
     if config.debug and config.environment == "production":
         result.add_warning(

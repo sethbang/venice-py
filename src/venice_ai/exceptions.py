@@ -41,6 +41,7 @@ Example::
         print(f"API error: {e.status_code} - {e}")
 """
 
+import json
 import logging
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -262,20 +263,11 @@ class APIStatusError(APIError):
         body: Any,
         request: Any | None = None,
     ) -> None:
-        message = f"API request failed with status {response.status}"
-        if body:
-            if isinstance(body, dict):
-                error_data = body.get("error")
-                if isinstance(error_data, dict):
-                    detail = error_data.get("message") or error_data.get("detail")
-                    if detail:
-                        message = f"{message}: {detail}"
-                elif isinstance(error_data, str):
-                    message = f"{message}: {error_data}"
-            elif isinstance(body, str):
-                message = f"{message}: {body}"
+        base_message = f"API request failed with status {response.status}"
+        detail, code, _custom_message = _parse_error_body(body)
+        message = f"{base_message}: {detail}" if detail else base_message
 
-        super().__init__(message, request=request, response=response, body=body)
+        super().__init__(message, request=request, response=response, body=body, code=code)
 
 
 class AuthenticationError(APIError):
@@ -727,6 +719,124 @@ def _is_error_budget_response(
     return False
 
 
+#: Upper bound on the per-field reasons rendered into an exception message.
+_MAX_RENDERED_REASONS = 10
+
+
+def _join_path(path: Any) -> str:
+    """Render a Zod issue path (``["messages", 0, "content"]``) as ``messages.0.content``."""
+    if isinstance(path, (list, tuple)):
+        return ".".join(str(part) for part in path)
+    if path is None:
+        return ""
+    return str(path)
+
+
+def _render_issue(issue: Any) -> list[str]:
+    """Render one Zod issue as ``"path: message"`` lines.
+
+    ``invalid_union`` issues carry only a generic ``"Invalid input"`` message;
+    the useful reasons live in each ``unionErrors[].issues`` branch, so those
+    are rendered in its place.
+    """
+    if not isinstance(issue, dict):
+        return []
+    union_errors = issue.get("unionErrors")
+    if isinstance(union_errors, list):
+        nested: list[str] = []
+        for branch in union_errors:
+            if isinstance(branch, dict) and isinstance(branch.get("issues"), list):
+                for inner in branch["issues"]:
+                    nested.extend(_render_issue(inner))
+        if nested:
+            return nested
+    message = issue.get("message")
+    if not isinstance(message, str) or not message:
+        return []
+    path = _join_path(issue.get("path"))
+    return [f"{path}: {message}" if path else message]
+
+
+def _render_details(details: Any, prefix: str = "") -> list[str]:
+    """Render a Zod ``format()`` tree (``{"_errors": [...], "<field>": {...}}``)."""
+    if not isinstance(details, dict):
+        return []
+    lines: list[str] = []
+    errors = details.get("_errors")
+    if isinstance(errors, list):
+        for message in errors:
+            if isinstance(message, str) and message:
+                lines.append(f"{prefix}: {message}" if prefix else message)
+    for key, child in details.items():
+        if key == "_errors":
+            continue
+        lines.extend(_render_details(child, f"{prefix}.{key}" if prefix else str(key)))
+    return lines
+
+
+def _validation_reasons(body: dict[str, Any]) -> list[str]:
+    """Collect the per-field reasons from a validation-error body, de-duplicated."""
+    lines: list[str] = []
+    issues = body.get("issues")
+    if isinstance(issues, list):
+        for issue in issues:
+            lines.extend(_render_issue(issue))
+    if not lines:
+        lines = _render_details(body.get("details"))
+    return list(dict.fromkeys(lines))
+
+
+def _parse_error_body(body: Any) -> tuple[str | None, str | None, str | None]:
+    """Extract ``(detail, code, custom_message)`` from an error response body.
+
+    The body may arrive parsed (the JSON transport) or as raw response text
+    (the multipart transport); JSON text is decoded so both render the same
+    message and expose the same ``code``. ``body`` itself is never modified.
+
+    ``detail`` is the server's message followed by any per-field validation
+    reasons, rendered as ``path: message``. Non-JSON text is used verbatim.
+    """
+    parsed: Any = body
+    if isinstance(body, str):
+        text = body.strip()
+        if not text:
+            return None, None, None
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return body, None, None
+        if not isinstance(parsed, dict):
+            return body, None, None
+
+    if not isinstance(parsed, dict):
+        return None, None, None
+
+    detail: str | None = None
+    code: str | None = None
+    custom_message: str | None = None
+    error_data = parsed.get("error")
+    if isinstance(error_data, dict):
+        detail = error_data.get("message") or error_data.get("detail") or None
+        code = error_data.get("code")
+        custom_message = error_data.get("customMessage")
+    elif isinstance(error_data, str) and error_data:
+        detail = error_data
+    if code is None:
+        code = parsed.get("code")
+    if custom_message is None:
+        custom_message = parsed.get("customMessage")
+
+    reasons = _validation_reasons(parsed)
+    if reasons:
+        shown = reasons[:_MAX_RENDERED_REASONS]
+        rendered = "; ".join(shown)
+        if len(reasons) > len(shown):
+            rendered += f"; and {len(reasons) - len(shown)} more"
+        detail = f"{detail} ({rendered})" if detail else rendered
+
+    return detail, code, custom_message
+
+
 def _make_status_error(
     message: str | None,
     *,
@@ -752,25 +862,9 @@ def _make_status_error(
     base_message = message if message else f"HTTP Status {status_code}"
     err_msg = base_message
 
-    # Parse error details from response body
-    error_code: str | None = None
-    custom_message: str | None = None
-    if isinstance(body, dict):
-        error_data = body.get("error")
-        if isinstance(error_data, dict):
-            detail = error_data.get("message") or error_data.get("detail")
-            if detail:
-                err_msg = f"{base_message}: {detail}"
-            error_code = error_data.get("code")
-            custom_message = error_data.get("customMessage")
-        elif isinstance(error_data, str):
-            err_msg = f"{base_message}: {error_data}"
-        if error_code is None:
-            error_code = body.get("code")
-        if custom_message is None:
-            custom_message = body.get("customMessage")
-    elif isinstance(body, str) and body.strip():
-        err_msg = f"{base_message}: {body}"
+    detail, error_code, custom_message = _parse_error_body(body)
+    if detail:
+        err_msg = f"{base_message}: {detail}"
 
     def _build(exc_cls: type[APIError]) -> APIError:
         exc = exc_cls(err_msg, request=request, response=response, body=body)

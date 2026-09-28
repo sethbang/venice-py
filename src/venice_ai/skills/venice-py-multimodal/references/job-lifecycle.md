@@ -53,13 +53,13 @@ async def make_clip(prompt: str, out_path: Path) -> Path:
 The `async with` block guarantees server-side cleanup if your code exits early — exception, timeout, KeyboardInterrupt. Without it, the job continues running on Venice's side until it completes naturally; you keep paying.
 
 ```python
-# WRONG — server-side resources leak on exception
+# WRONG — the stored media is never released if wait() raises
 job = await client.video.run(...)
-status = await job.wait()                  # raises → job still running on server
+status = await job.wait()
 await job.download(path, status)
 
 # RIGHT
-async with await client.video.run(...) as job:   # __aexit__ cancels on early exit
+async with await client.video.run(...) as job:   # __aexit__ releases stored media
     status = await job.wait()
     await job.download(path, status)
 ```
@@ -87,7 +87,7 @@ def on_progress(s) -> None:
 
 ## Timeouts
 
-`wait(max_polls=N)` raises `TimeoutError` once `N` polls (each `poll_interval` seconds apart) elapse without completion. The `async with` block then catches the exception path and cancels the job server-side:
+`wait(max_polls=N)` raises `TimeoutError` once `N` polls (each `poll_interval` seconds apart) elapse without completion. The `async with` block still calls `cancel()` on the way out, but that only releases storage: **a job that has not finished keeps generating on the server and is still billed**. The SDK logs a WARNING when the block exits before a terminal status.
 
 ```python
 try:
@@ -96,10 +96,11 @@ try:
         await job.download(path, status)
 except asyncio.TimeoutError:
     log.warning("video timed out after 5 minutes")
-    # job was canceled by __aexit__; nothing to clean up
+    # the job is still running (and billed) server-side; persist
+    # job.queue_id if you want to pick up the result later
 ```
 
-By default `wait()` polls up to `max_polls=120` times (~10 min at `poll_interval=5.0`) then raises `TimeoutError`. **Tune `max_polls`/`poll_interval`** for your expected render time.
+By default `wait()` polls up to `max_polls=120` times (~10 min at `poll_interval=5.0`) then raises `TimeoutError`. **Tune `max_polls`/`poll_interval`** for your expected render time; timing out does not save money.
 
 ## Errors during the job
 
@@ -148,20 +149,20 @@ async with await client.video.run(...) as job:
 
 `poll()` is cheap (one GET per call). `wait()` is just a `while not done: await asyncio.sleep(poll_interval); await poll()` loop with progress hooks.
 
-## Manual cancel
+## Releasing storage with `cancel()`
 
-`await job.cancel()` cancels server-side. The `async with` block does this automatically on exception, but you can call it explicitly for graceful cancellation:
+Despite its name, `await job.cancel()` does **not** stop a generation that is still running: it wraps the `/complete` endpoint, which deletes the job's stored media and queue entry (best effort). The job keeps running and is billed. Call it once you have downloaded the result; the `async with` block does this for you on exit:
 
 ```python
-async with await client.video.run(...) as job:
-    try:
-        status = await job.wait(max_polls=12)
-    except asyncio.TimeoutError:
-        await job.cancel()
-        log.info("user canceled video generation")
-        return
+job = await client.video.run(...)
+try:
+    status = await job.wait()
     await job.download(path, status)
+finally:
+    await job.cancel()           # release stored media
 ```
+
+The SDK has no call that aborts a queued job, so check the price with `client.video.quote(...)` before submitting.
 
 ## Low-level: `submit()` + `retrieve()`
 
