@@ -54,7 +54,11 @@ class ChatCapabilities(BaseModel):
     # crashes get_capabilities() — mirrors ModelCapabilities.quantization on the
     # wire model.
     quantization: str
-    privacy: Literal["private", "anonymized"] | None = None
+    # Plain str for the same reason: this value is forwarded straight from
+    # ModelSpec.privacy, so a closed Literal here would crash
+    # get_capabilities() on any mode the wire model accepts. Narrow against
+    # KNOWN_PRIVACY_MODES.
+    privacy: str | None = None
 
 
 class ImageCapabilities(BaseModel):
@@ -114,7 +118,8 @@ class GenericCapabilities(BaseModel):
     """
 
     type: str
-    privacy: Literal["private", "anonymized"] | None = None
+    # Open for the same reason ``type`` is — see ChatCapabilities.privacy.
+    privacy: str | None = None
 
 
 _DEDICATED_CAPABILITY_TYPES = frozenset({"chat", "image", "video", "inpaint"})

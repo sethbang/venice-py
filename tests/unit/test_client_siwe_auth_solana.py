@@ -32,8 +32,9 @@ def solana_auth() -> SolanaX402Auth:
 
 
 def test_solana_auth_exposes_ttl_seconds(solana_auth: SolanaX402Auth) -> None:
-    """SolanaX402Auth exposes ttl_seconds (its SIWX message TTL) so the client
-    can size its default-header cache, mirroring X402Auth."""
+    """SolanaX402Auth exposes ttl_seconds (its SIWX message TTL), mirroring
+    X402Auth. It bounds how long a signed envelope stays *valid*, not how long
+    one may be reused — the nonce is single-use."""
     assert solana_auth.ttl_seconds == 600
 
 
@@ -49,12 +50,30 @@ def test_default_siwe_supports_solana_auth(solana_auth: SolanaX402Auth) -> None:
     assert len(header) > 200
 
 
-def test_default_siwe_caches_solana_within_ttl(solana_auth: SolanaX402Auth) -> None:
-    """Two consecutive calls within the TTL return the SAME cached token,
-    exercising the ttl_seconds arithmetic in the cache path."""
+def test_consecutive_solana_envelopes_carry_different_nonces(
+    solana_auth: SolanaX402Auth,
+) -> None:
+    """The envelopes must differ in the nonce specifically.
+
+    Ed25519 signing is deterministic, so two differing envelopes only prove the
+    signed *message* changed. A static nonce paired with a ticking ``Issued At``
+    would satisfy that while every request after the first still came back
+    ``401 This nonce has already been used``.
+    """
+    import base64
+    import json
+    import re
+
     with patch.dict(os.environ, {}, clear=True):
         client = VeniceClient(auth=solana_auth)
-    h1 = client._default_siwe_header()
-    h2 = client._default_siwe_header()
-    assert h1 == h2
-    assert client._siwe_cache is not None
+
+    def nonce_of(header: str | None) -> str:
+        assert header is not None
+        message = json.loads(base64.b64decode(header))["message"]
+        found = re.search(r"^Nonce: (\S+)$", message, re.M)
+        assert found is not None, f"no nonce in SIWX message: {message!r}"
+        return found.group(1)
+
+    nonces = {nonce_of(client._default_siwe_header()) for _ in range(5)}
+
+    assert len(nonces) == 5

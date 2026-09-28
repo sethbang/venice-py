@@ -52,6 +52,7 @@ all API interactions are properly validated and documented.
 from . import api, enums, identifiers
 from .api import (
     KNOWN_MODEL_TYPES,
+    KNOWN_PRIVACY_MODES,
     ApiKey,
     ApiKeyDetailsResponse,
     ApiKeysListResponse,
@@ -400,6 +401,7 @@ __all__ = [
     "UpscaleModelSpec",
     "DecisionModelSpec",
     "KNOWN_MODEL_TYPES",
+    "KNOWN_PRIVACY_MODES",
     "ChoiceAnswer",
     "DecisionAnswer",
     "DecisionResponse",

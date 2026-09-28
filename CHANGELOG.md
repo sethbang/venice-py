@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1] - 2026-09-27
+
+### Fixed
+
+- **A wallet-authenticated client could make exactly one request.** `VeniceClient(auth=X402Auth(...))` cached the signed SIWE envelope for the lifetime of its TTL and reattached it to every subsequent request. Venice treats a SIWE nonce as single-use, so the second call — and every call after it — came back `401 This nonce has already been used`. The first request succeeded, which is what made this look like an intermittent auth problem rather than a guaranteed one. The envelope is now signed per request, for both `X402Auth` (EVM) and `SolanaX402Auth` (Solana); signing is one local elliptic-curve operation, negligible beside the request it authenticates.
+
+  Retries replayed spent nonces too, through two independent paths. The retry middleware re-sends the *same* request object on a retryable 5xx (`500`, `502`, `503`, `504`), headers included, so a retried attempt carried the envelope the first attempt had already spent. And the rate limiter retries a `429` by re-invoking the request callable, which resent the envelope `client.x402.balance(auth=...)` and `transactions(auth=...)` had signed once at the call site. Every attempt, retries included, now signs its own envelope — with the wallet that signed the first attempt, so a per-call `auth=` wallet is never swapped for the client's own.
+
+  Only the SDK's own `X-Sign-In-With-X` envelope is re-signed. Bearer requests never gain one, and an envelope you build yourself and pass in `headers=` is left as you sent it. `X-402-Payment` is not re-signed either: it is a USDC transfer authorization you signed, and minting a second one on retry would authorize a second transfer. Its nonce is single-use as well, so a retried top-up is rejected rather than settled twice.
+
+  The bundled `venice-py-x402` skill taught the same caching mistake and is corrected alongside, since it ships inside the wheel: its SIWE reference carried a `CachedSIWE` helper and advised callers to “cache freely”, both raw-HTTP examples reused one envelope across two requests, and a scored eval asked the model to implement exactly that. The reference now documents the single-use nonce and the `401`s a replay produces, the examples sign per request, and the eval checks that an `X402Auth` *instance* is reused per wallet while each request signs its own envelope.
+
+- **A privacy mode the SDK does not know about no longer fails the entire `/models` parse.** `ModelSpec.privacy` was a closed `Literal["private", "anonymized"]`, the same failure mode 2.4.1 fixed for `ModelResponse.type`: a single catalog row carrying a third mode would raise `APIResponseValidationError` on the whole listing, taking `models.get()`, `get_capabilities()` and every `resolve_*()` helper down with it, since they all read that listing.
+
+  The field was closed in three places, and widening only the wire model would have moved the crash one layer down rather than removing it — `get_capabilities()` reads `spec.privacy` and forwards it into `ChatCapabilities` and `GenericCapabilities`, both of which declared the same `Literal`. All three are now plain `str`.
+
+  The known values ship as `KNOWN_PRIVACY_MODES`, importable from `venice_ai.types` and `venice_ai.types.api`. Narrowing must **fail closed**: test `privacy == "private"` rather than excluding the modes you know about, so a mode added later is never mistaken for zero-retention. `select_model(require_private=True)` already compared against `"private"` exactly and is unaffected.
+
+  As in 2.4.1, this widens a public `Literal` to `str`, so a caller relying on exhaustiveness checking over `privacy` will see their type checker stop proving the match is exhaustive.
+
 ## [2.5.0] - 2026-09-21
 
 ### Added
@@ -935,7 +955,8 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.5.0...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.5.1...HEAD
+[2.5.1]: https://github.com/sethbang/venice-py/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/sethbang/venice-py/compare/v2.4.1...v2.5.0
 [2.4.1]: https://github.com/sethbang/venice-py/compare/v2.4.0...v2.4.1
 [2.4.0]: https://github.com/sethbang/venice-py/compare/v2.3.0...v2.4.0

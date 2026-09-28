@@ -42,11 +42,6 @@ logger = logging.getLogger(__name__)
 __all__ = ["X402"]
 
 
-def _siwe_headers(auth: X402Auth | SolanaX402Auth) -> dict[str, str]:
-    """Build the per-request ``X-Sign-In-With-X`` header from an EVM or Solana auth."""
-    return {"X-Sign-In-With-X": auth.build_header()}
-
-
 class X402(APIResource["VeniceClient"]):
     """Provides access to Venice's x402 wallet-based billing endpoints."""
 
@@ -91,7 +86,7 @@ class X402(APIResource["VeniceClient"]):
         return await self._client.get(
             f"x402/balance/{wallet}",
             cast_to=X402BalanceResponse,
-            headers=_siwe_headers(auth),
+            siwe_auth=auth,
         )
 
     async def transactions(
@@ -135,7 +130,7 @@ class X402(APIResource["VeniceClient"]):
         return await self._client.get(
             f"x402/transactions/{wallet}",
             cast_to=X402TransactionsResponse,
-            headers=_siwe_headers(auth),
+            siwe_auth=auth,
             params=params or None,
         )
 

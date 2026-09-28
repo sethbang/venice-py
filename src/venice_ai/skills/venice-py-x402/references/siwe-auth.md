@@ -44,33 +44,21 @@ If you have the private key, you have the address — that's why passing both is
 
 The SIWE message conforms to EIP-4361. The signature is over the EIP-191 personal_sign hash of the message. Server-side, Venice (a) validates the signature recovers to `address`, (b) checks the message hasn't expired (per `expiration_time`), (c) checks `domain` matches `outerface.venice.ai`.
 
-### Token TTL and caching
+### Token TTL and the single-use nonce
 
-The SIWE token is good for `ttl_seconds` (default 600). **Cache and reuse it within that window** — re-signing on every call wastes ECDSA work and adds latency.
+Every call to `build_header()` mints a fresh nonce and signs a new envelope. The signed message stays *valid* for `ttl_seconds` (default 600), but that is an expiry bound, not a reuse window: **Venice accepts a given nonce exactly once.** Replaying an envelope — even seconds after signing it, well inside the TTL — returns `401`: `This nonce has already been used` on inference endpoints, or `Invalid Sign-in-with-x signature` on the `/x402/*` reads.
+
+So sign one envelope per request:
 
 ```python
-import time
-
-class CachedSIWE:
-    """Cache a SIWE header within its expiry window."""
-    def __init__(self, auth: X402Auth):
-        self.auth = auth
-        self._header: str | None = None
-        self._expires_at: float = 0.0
-
-    def header(self) -> str:
-        if self._header is None or time.time() >= self._expires_at - 30:    # 30s safety margin
-            self._header = self.auth.build_header()
-            # build_header generates a fresh nonce + issuedAt; use ttl_seconds for expiry estimate
-            self._expires_at = time.time() + self.auth._ttl_seconds          # private but stable
-        return self._header
+headers = {"X-Sign-In-With-X": auth.build_header()}    # per request, not per session
 ```
 
-Or, if your usage patterns are bursty, just construct a new `X402Auth` per session and let it sign fresh tokens lazily — the overhead is real but small (~10ms per call on commodity hardware).
+Reuse the `X402Auth` *instance* freely — it holds the key and derives the address, and building one is the part worth keeping. It is the *envelope* that must never be shared between requests. Signing is a single local elliptic-curve operation, negligible beside the network round trip it authenticates, so there is nothing here worth optimising away.
 
-### When NOT to cache
+`VeniceClient(auth=...)` signs one envelope per request for you, retries included. The retry middleware replays the same request object on a retryable 5xx (`500`, `502`, `503`, `504` by default), so the SDK re-signs the `X-Sign-In-With-X` header in place before each retried attempt. A wallet-authenticated call that hits a transient 5xx retries normally.
 
-If your wallet is multi-signing (rotating signers, hardware module rotation), don't cache — sign per call so each signature is from the current key. For single-key bots, cache freely.
+That applies to a per-call wallet, and to rate-limit retries as well as 5xx ones. `client.x402.balance(auth=other_wallet)` signs a fresh envelope for every attempt with `other_wallet`, never the wallet the client was constructed with. If you build the `X-Sign-In-With-X` header yourself and pass it in `headers=`, the SDK leaves it untouched — it is yours to refresh, so drive those retries yourself.
 
 ## Calling Venice via SIWE (mode 2 in practice)
 
@@ -84,13 +72,13 @@ from venice_ai.auth.x402 import X402Auth
 
 async def chat_via_siwe(question: str) -> str:
     auth = X402Auth(private_key=os.environ["WALLET_PRIVATE_KEY"])
-    sign_in_header = auth.build_header()
 
     async with aiohttp.ClientSession() as http:
-        # Models catalog accepts SIWE auth (free read)
+        # Models catalog accepts SIWE auth (free read). Each request signs
+        # its own envelope — the nonce is single-use.
         async with http.get(
             "https://api.venice.ai/api/v1/models",
-            headers={"X-Sign-In-With-X": sign_in_header},
+            headers={"X-Sign-In-With-X": auth.build_header()},
             params={"type": "text"},
         ) as r:
             r.raise_for_status()
@@ -101,7 +89,7 @@ async def chat_via_siwe(question: str) -> str:
         async with http.post(
             "https://api.venice.ai/api/v1/chat/completions",
             headers={
-                "X-Sign-In-With-X": sign_in_header,           # auth
+                "X-Sign-In-With-X": auth.build_header(),      # a new envelope, not the one above
                 "Content-Type": "application/json",
                 # NO Authorization: Bearer header
             },
@@ -123,7 +111,7 @@ async with VeniceClient(auth=X402Auth(private_key=...)) as client:
     response = await client.chat.completions.create(...)
 ```
 
-The SDK skips the `Authorization: Bearer` header (since no `api_key` is provided) and attaches a cached `X-Sign-In-With-X` header on every request. The token is cached for `auth.ttl_seconds - 30s` (safety margin) so repeated calls don't waste signing roundtrips.
+The SDK skips the `Authorization: Bearer` header (since no `api_key` is provided) and signs a fresh `X-Sign-In-With-X` envelope for every request, retries included, so no nonce is ever replayed.
 
 When both `api_key=` and `auth=` are passed, the API key wins for default request auth; the auth instance is retained so callers can still pass it explicitly to per-call `auth=` kwargs (e.g., `client.x402.balance(auth=auth)`).
 
@@ -133,13 +121,13 @@ If you can't upgrade past SDK 2.0.0, the constructor used to require `api_key` a
 
 ```python
 auth = X402Auth(private_key=os.environ["WALLET_PRIVATE_KEY"])
-sign_in_header = auth.build_header()    # base64 SIWE token, valid for ttl_seconds (default 600)
 
 async with aiohttp.ClientSession() as http:
-    # 1. Discover a chat model (the public catalog accepts SIWE auth)
+    # 1. Discover a chat model (the public catalog accepts SIWE auth).
+    #    build_header() is called per request: the nonce is single-use.
     async with http.get(
         "https://api.venice.ai/api/v1/models",
-        headers={"X-Sign-In-With-X": sign_in_header},
+        headers={"X-Sign-In-With-X": auth.build_header()},
         params={"type": "text"},
     ) as r:
         r.raise_for_status()
@@ -149,7 +137,7 @@ async with aiohttp.ClientSession() as http:
     # 2. Chat completion via SIWE — no Authorization: Bearer header
     async with http.post(
         "https://api.venice.ai/api/v1/chat/completions",
-        headers={"X-Sign-In-With-X": sign_in_header, "Content-Type": "application/json"},
+        headers={"X-Sign-In-With-X": auth.build_header(), "Content-Type": "application/json"},
         json={"model": model_id, "messages": [{"role": "user", "content": question}]},
     ) as r:
         r.raise_for_status()
@@ -157,7 +145,7 @@ async with aiohttp.ClientSession() as http:
         return data["choices"][0]["message"]["content"]
 ```
 
-You'd cache the header yourself within its TTL window and refresh on expiry. On modern SDKs this is unnecessary — the `auth=` constructor param handles all of it.
+You'd sign an envelope per request yourself and keep each nonce single-use. On modern SDKs this is unnecessary — the `auth=` constructor param handles it.
 
 ## What goes wrong if SIWE fails
 
@@ -169,12 +157,14 @@ Common error responses from `outerface.venice.ai`:
 | 401 with `code: "EXPIRED_SIGNATURE"` | The SIWE message's `expirationTime` is in the past. Refresh the header. |
 | 401 with `code: "INVALID_CHAIN_ID"` | `chainId` in the header doesn't match Venice's expected chain. Default 8453 (Base). |
 | 401 with `code: "INVALID_DOMAIN"` | The SIWE message's `domain` field is not `outerface.venice.ai`. Don't override the domain. |
+| 401 `This nonce has already been used` (`code: "X402_SIGN_IN_NONCE_REUSED"`) | An envelope was replayed on an inference endpoint. Sign a fresh one per request — the nonce is single-use, independent of TTL. |
+| 401 `Invalid Sign-in-with-x signature`, no `code`, on `/x402/*` reads | Often the same replay: the x402 read endpoints report a reused envelope this way rather than naming the nonce. If the key is correct and the first request with that envelope succeeded, sign a fresh one per request. |
 | 402 with structured `topUpInstructions` | Auth succeeded; prepaid balance is exhausted. Top up — see `balance-and-topup.md`. |
 
 ## Common bugs
 
 - **Passing `wallet_address=` to `X402Auth`** — there's no such kwarg. The address is derived.
-- **Caching a `X402Auth` instance for >`ttl_seconds` and reusing the same `build_header()` output** — the underlying SIWE message expires; you'll see 401s. Wrap in a `CachedSIWE`-style helper that refreshes.
+- **Reusing one `build_header()` envelope across requests** — the nonce is single-use, so the second request returns a `401` (see the table above for how each endpoint words it). Keep the `X402Auth` instance; sign a new envelope each time. (Holding an envelope past `ttl_seconds` also 401s, on expiry — but reuse fails long before that.)
 - **Sending `Authorization: Bearer <api_key>` AND `X-Sign-In-With-X`** — confuses the server's auth pipeline. Pick one. (For `client.x402.balance`, the SDK sends the API key for the HTTP request and SIWE in `X-Sign-In-With-X` to identify the wallet — that's correct because the read endpoint requires API-key access to the route, plus SIWE to scope to a wallet. Don't try to reason about it from first principles; trust the SDK there.)
 - **Signing the EIP-191 message manually** when you have `X402Auth` already — that class does the right thing.
 - **Treating `auth.build_header()` output as plaintext JSON** — it's base64-encoded. Decode with `base64.b64decode(...)` then `json.loads(...)` if you want to inspect.

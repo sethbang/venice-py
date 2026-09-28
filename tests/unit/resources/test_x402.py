@@ -331,11 +331,11 @@ async def test_balance_uses_wallet_address_in_path(x402_resource: X402, auth: X4
     call = x402_resource._client.get.call_args  # type: ignore[attr-defined]
     assert call.args[0] == f"x402/balance/{auth.wallet_address}"
     assert call.kwargs["cast_to"] is X402BalanceResponse
-    # X-Sign-In-With-X header present and base64-ish (no whitespace, only
-    # base64 alphabet + padding).
-    hdr = call.kwargs["headers"]["X-Sign-In-With-X"]
-    assert isinstance(hdr, str)
-    base64.b64decode(hdr)  # will raise if not valid base64
+    # The wallet is named rather than pre-signed into headers, so the client can
+    # sign a fresh envelope for every attempt. The header on the wire is covered
+    # in tests/unit/test_client_siwe_retry_resign.py.
+    assert call.kwargs["siwe_auth"] is auth
+    assert "headers" not in call.kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ async def test_transactions_uses_wallet_address_in_path(
 
     call = x402_resource._client.get.call_args  # type: ignore[attr-defined]
     assert call.args[0] == f"x402/transactions/{auth.wallet_address}"
-    assert "X-Sign-In-With-X" in call.kwargs["headers"]
+    assert call.kwargs["siwe_auth"] is auth
     # No pagination params by default — server default (limit=50, offset=0) applies.
     assert call.kwargs.get("params") is None
 

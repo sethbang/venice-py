@@ -6,6 +6,8 @@ Sourced from `src/venice_ai/types/api/`. This page exists because agents repeate
 
 `ModelResponse` carries a `type: str` and a `model_spec` whose subclass is dispatched by that type. `type` is an open string, not a `Literal`: Venice adds model types to the live catalog between SDK releases (`decision` was the first), and a closed enum failed the whole `/models` parse the first time one appeared. Narrow against `KNOWN_MODEL_TYPES` (`text`, `image`, `video`, `inpaint`, `music`, `tts`, `asr`, `embedding`, `upscale`, `decision`) and treat anything outside it as a newer type rather than an invalid one. There is **no shared base** beyond `ModelSpec`; treat the per-type fields below as canonical and use `getattr(spec, name, None)` in generic helpers.
 
+`model_spec.privacy` is open for the same reason — narrow against `KNOWN_PRIVACY_MODES` (`private`, `anonymized`). `private` means zero data retention; `anonymized` means a third-party provider processes the prompt, with identifying information stripped so it sees Venice as the customer. A privacy check must fail closed: test `privacy == "private"` rather than excluding the modes you know about, so a mode added later is never mistaken for private.
+
 | `model.type` | Spec class | Distinguishing fields |
 |---|---|---|
 | `text` | `TextModelSpec` | `availableContextTokens`, `maxCompletionTokens`, `capabilities.{supportsVision, supportsFunctionCalling, supportsResponseSchema, supportsReasoning, supportsWebSearch, ...}`, `pricing.{input, output}.usd` (`LLMModelPricing`) |

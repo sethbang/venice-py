@@ -176,6 +176,54 @@ _active_retry_options: contextvars.ContextVar["RetryOptions | None"] = contextva
 )
 
 
+# The Venice SIWE/SIWX header. Named here because the retry loop has to
+# recognise the one header it is allowed to rewrite between attempts.
+_SIWE_HEADER = "X-Sign-In-With-X"
+
+# Per-request signer for that header, published by
+# :meth:`VeniceClient._prepare_and_send_request` for the duration of a single
+# ``session.request()`` call and reset immediately afterwards. It is scoped
+# per request rather than per session because the wallet doing the signing can
+# differ between requests on one client — ``client.x402.balance(auth=...)``
+# takes a per-call wallet that is not the client's own.
+_active_siwe_resigner: contextvars.ContextVar["Callable[[], str] | None"] = contextvars.ContextVar(
+    "venice_active_siwe_resigner", default=None
+)
+
+
+def _resign_siwe_header(request: Any) -> None:
+    """Give a retried request a freshly signed SIWE envelope.
+
+    Venice accepts a SIWE nonce exactly once, so a retry that replays the
+    envelope the previous attempt already sent is rejected with a 401 instead
+    of being served. aiohttp hands
+    the middleware the same mutable :class:`~aiohttp.ClientRequest` on every
+    attempt, so the header is rewritten in place.
+
+    Two conditions both have to hold before anything is rewritten: a signer
+    must be published for this request, and the request must already carry the
+    header. Requests authenticated with a Bearer key — and the ``X-402-Payment``
+    header, which is a signed payment payload rather than a SIWE envelope — are
+    therefore never touched.
+    """
+    resign = _active_siwe_resigner.get()
+    if resign is None or _SIWE_HEADER not in request.headers:
+        return
+
+    try:
+        request.headers[_SIWE_HEADER] = resign()
+    # A signing failure must not replace the retryable failure with a new one;
+    # the stale envelope goes out and the server's rejection is what surfaces.
+    except Exception:
+        logger.warning(
+            "Could not re-sign the %s header before a retry; the previous "
+            "envelope will be replayed and is likely to be rejected as a "
+            "reused nonce.",
+            _SIWE_HEADER,
+            exc_info=True,
+        )
+
+
 def calculate_backoff_delay(
     attempt: int,
     base_delay: float,
@@ -369,6 +417,13 @@ def create_retry_middleware(options: RetryOptions | None = None) -> Middleware:
         last_exception = None
 
         for attempt in range(options.max_attempts + 1):  # +1 for the initial attempt
+            # aiohttp replays the same request object, so a wallet-authenticated
+            # retry would resend a nonce the server has already seen. Re-signing
+            # here — after the backoff sleep — keeps the envelope fresh at the
+            # moment it is actually sent. No-op for every other request.
+            if attempt:
+                _resign_siwe_header(request)
+
             try:
                 # Make the request
                 response = await handler(request)
@@ -467,4 +522,6 @@ __all__ = [
     "create_retry_middleware",
     "calculate_backoff_delay",
     "_active_retry_options",
+    "_active_siwe_resigner",
+    "_SIWE_HEADER",
 ]

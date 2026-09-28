@@ -2,8 +2,8 @@
 
 Covers the new ``auth=X402Auth(...)`` constructor parameter, the validation
 that requires either ``api_key`` or ``auth`` to be set, and the per-request
-SIWE-header injection / caching behaviour exposed via the private
-``_default_siwe_header()`` helper.
+SIWE-header injection exposed via the private ``_default_siwe_header()``
+helper, including the single-use nonce requirement.
 
 Tests skip if the ``[x402]`` extra (``eth_account`` / ``siwe``) is not
 installed, since :class:`X402Auth` requires it.
@@ -43,7 +43,6 @@ def test_init_with_only_auth_succeeds(auth: X402Auth) -> None:
         client = VeniceClient(auth=auth)
     assert client._api_key == ""
     assert client._auth is auth
-    assert client._siwe_cache is None
 
 
 def test_init_with_both_api_key_and_auth_succeeds(auth: X402Auth) -> None:
@@ -74,7 +73,7 @@ def test_init_error_message_mentions_auth_alternative() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _default_siwe_header — caching + Bearer-precedence semantics
+# _default_siwe_header — per-request signing + Bearer-precedence semantics
 # ---------------------------------------------------------------------------
 
 
@@ -101,45 +100,35 @@ def test_default_siwe_returns_token_when_only_auth(auth: X402Auth) -> None:
     assert len(header) > 200
 
 
-def test_default_siwe_caches_within_ttl(auth: X402Auth) -> None:
-    """Two consecutive calls within the TTL return the SAME cached token."""
-    with patch.dict(os.environ, {}, clear=True):
-        client = VeniceClient(auth=auth)
-    h1 = client._default_siwe_header()
-    h2 = client._default_siwe_header()
-    assert h1 == h2
-    assert client._siwe_cache is not None
+def test_consecutive_siwe_envelopes_carry_different_nonces(auth: X402Auth) -> None:
+    """Consecutive calls must not reuse a nonce.
 
+    Venice treats a SIWE nonce as single-use and answers a repeat with
+    ``401 This nonce has already been used``, so reusing an envelope — even
+    well inside its TTL — makes every request after the first fail.
 
-def test_default_siwe_refreshes_when_cache_expired(auth: X402Auth) -> None:
-    """When the cached token's expiry is in the past, a new one is signed."""
-    with patch.dict(os.environ, {}, clear=True):
-        client = VeniceClient(auth=auth)
-    h1 = client._default_siwe_header()
-    # Force expiry: rewind expires_at to before now.
-    assert client._siwe_cache is not None
-    cached_header, _expires_at = client._siwe_cache
-    client._siwe_cache = (cached_header, 0.0)  # expired in 1970
-
-    h2 = client._default_siwe_header()
-    assert h2 != h1  # new nonce + issued_at → different signature
-
-
-def test_default_siwe_safety_margin_is_30s(auth: X402Auth) -> None:
-    """Cached expires_at uses ttl_seconds - 30s for clock-skew tolerance."""
-    import time
+    This asserts on the decoded nonce rather than on the envelopes differing.
+    ECDSA signing here is deterministic (RFC 6979), so envelope inequality
+    only proves the signed *message* changed, and a static nonce paired with
+    a ticking ``Issued At`` would satisfy it despite reusing the nonce.
+    """
+    import base64
+    import json
+    import re
 
     with patch.dict(os.environ, {}, clear=True):
         client = VeniceClient(auth=auth)
-    before = time.time()
-    client._default_siwe_header()
-    after = time.time()
-    assert client._siwe_cache is not None
-    _hdr, expires_at = client._siwe_cache
-    # ttl=600, margin=30 → expires within (~570, 570 + tiny epsilon) of now
-    expected_lifetime = auth.ttl_seconds - 30
-    elapsed_lifetime = expires_at - before
-    assert expected_lifetime - 1 <= elapsed_lifetime <= (after - before) + expected_lifetime + 1
+
+    def nonce_of(header: str | None) -> str:
+        assert header is not None
+        message = json.loads(base64.b64decode(header))["message"]
+        found = re.search(r"^Nonce: (\S+)$", message, re.M)
+        assert found is not None, f"no nonce in SIWE message: {message!r}"
+        return found.group(1)
+
+    nonces = {nonce_of(client._default_siwe_header()) for _ in range(5)}
+
+    assert len(nonces) == 5
 
 
 def test_default_siwe_returns_none_after_clearing_auth() -> None:

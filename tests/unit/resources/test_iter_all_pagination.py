@@ -286,9 +286,9 @@ class TestX402IterTransactions:
 
     @pytest.fixture
     def fake_auth(self) -> MagicMock:
-        # X402Auth has external dep (eth-account / siwe). Mock just enough
-        # for the resource methods (wallet_address attribute, _siwe_headers
-        # is mocked too via patching).
+        # X402Auth has external deps (eth-account / siwe). The resource only
+        # reads wallet_address and hands the auth to the client, which does the
+        # signing, so a bare mock is enough here.
         auth = MagicMock()
         auth.wallet_address = "0xabc"
         return auth
@@ -325,11 +325,7 @@ class TestX402IterTransactions:
         resource: X402,
         mock_client: MagicMock,
         fake_auth: MagicMock,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # _siwe_headers needs to be neutralized — it tries to sign messages.
-        monkeypatch.setattr("venice_ai.resources.x402._siwe_headers", lambda _auth: {})
-
         mock_client.get.side_effect = [
             self._page(["t1", "t2"], has_more=True),
             self._page(["t3", "t4"], has_more=True),

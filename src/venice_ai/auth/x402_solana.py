@@ -184,9 +184,12 @@ class SolanaX402Auth:
     @property
     def ttl_seconds(self) -> int:
         """SIWX token TTL in seconds — the validity window baked into the
-        message :meth:`build_header` signs (default 600). Exposed so the
-        client can size its default-header cache exactly as it does for
-        :class:`~venice_ai.auth.x402.X402Auth`.
+        message :meth:`build_header` signs (default 600), mirroring
+        :attr:`~venice_ai.auth.x402.X402Auth.ttl_seconds`.
+
+        This bounds how long a signed envelope stays *valid*; it is not a
+        reuse window. Venice treats the nonce as single-use, so every request
+        carries its own freshly signed envelope.
         """
         return _SIWX_TTL_SECONDS
 

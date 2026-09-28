@@ -7,6 +7,7 @@ probe with the funded test key.
 
 import base64
 import json
+import re
 
 import pytest
 
@@ -40,11 +41,30 @@ def test_build_header_signature_verifies():
     assert sig.verify(kp.pubkey(), obj["message"].encode("utf-8"))
 
 
-def test_x402_siwe_headers_accept_solana_auth():
-    # The SDK's header builder (used by client.x402.balance/transactions) must
-    # accept a SolanaX402Auth and emit the X-Sign-In-With-X header.
-    from venice_ai.resources.x402 import _siwe_headers
+def test_client_signs_x402_reads_with_a_solana_auth():
+    # client.x402.balance/transactions name the wallet and let the client sign
+    # it, so that signer resolution must accept a SolanaX402Auth and not only
+    # the EVM X402Auth. It returns the callable rather than a header because
+    # each retried attempt calls it again for a fresh nonce.
+    import os
+    from unittest.mock import patch
+
+    from venice_ai import VeniceClient
 
     auth, _ = _auth()
-    headers = _siwe_headers(auth)
-    assert headers.get("X-Sign-In-With-X")
+    with patch.dict(os.environ, {}, clear=True):
+        client = VeniceClient(auth=auth)
+
+    resign = client._resolve_siwe_resigner(None, auth)
+    assert resign is not None
+
+    # Assert on the nonce, not on the envelopes differing: Ed25519 signing is
+    # deterministic, so inequality alone would also be satisfied by a static
+    # nonce paired with a ticking ``Issued At``.
+    def nonce_of(header: str) -> str:
+        message = json.loads(base64.b64decode(header))["message"]
+        found = re.search(r"^Nonce: (\S+)$", message, re.M)
+        assert found is not None, f"no nonce in SIWX message: {message!r}"
+        return found.group(1)
+
+    assert len({nonce_of(resign()) for _ in range(5)}) == 5
