@@ -747,12 +747,11 @@ def pytest_collection_modifyitems(config, items):
 @pytest.fixture(autouse=True)
 async def auto_cleanup_connections():
     """
-    Auto-cleanup connections after each test to prevent leaks.
+    Close Redis connection pools and let pending callbacks run after each test.
 
-    This fixture runs after every test to ensure proper cleanup of:
-    - Redis connections
-    - Event loop tasks
-    - Background processes
+    Deliberately does not call ``gc.collect()``: a full collection after every
+    test cost several times the suite's own runtime. Leaks still surface as
+    ResourceWarnings and in the session-level ``monitor_resources`` report.
     """
     yield
 
@@ -767,64 +766,11 @@ async def auto_cleanup_connections():
     except Exception as e:
         logger.debug(f"Error during Redis cleanup: {e}")
 
-    # Force garbage collection to cleanup orphaned objects
-    import gc
-
-    gc.collect()
-
     # Give event loop time to process any pending cleanup
     import contextlib
 
     with contextlib.suppress(RuntimeError):
         await asyncio.sleep(0)
-
-
-@pytest.fixture(autouse=True)
-def sync_cleanup_connections():
-    """
-    Sync version of connection cleanup for synchronous tests.
-
-    This ensures cleanup happens even for sync tests that can't
-    use the async cleanup fixture. This helps prevent connection leaks
-    when sync tests are run in the same worker as async tests.
-    """
-    yield
-
-    # Force garbage collection to cleanup orphaned objects
-    import gc
-
-    gc.collect()
-
-    # Aggressive cleanup for aiohttp sessions that might be lingering
-    for obj in gc.get_objects():
-        try:
-            # Close any aiohttp ClientSession objects
-            if (
-                hasattr(obj, "__class__")
-                and obj.__class__.__name__ == "ClientSession"
-                and hasattr(obj, "close")
-                and not getattr(obj, "closed", True)
-            ):
-                import asyncio
-
-                try:
-                    loop = asyncio.get_event_loop()
-                    if not loop.is_closed() and not loop.is_running():
-                        loop.run_until_complete(obj.close())
-                except Exception:
-                    pass
-        except Exception:
-            pass  # Ignore any errors during cleanup
-
-    # Try to cleanup Redis pools synchronously if possible
-    try:
-        import asyncio
-
-        # Skip sync cleanup entirely to avoid event loop conflicts with pytest-asyncio
-        # The async cleanup fixture handles Redis cleanup properly
-        return
-    except Exception as e:
-        logger.debug(f"Error during sync Redis cleanup: {e}")
 
 
 @pytest.fixture(autouse=True)
