@@ -340,24 +340,36 @@ def test_lint_runs_without_pyyaml(tmp_path: Path, monkeypatch) -> None:
     it must work on a bare ``pip install venice-py`` install (no ``[cli]`` extra,
     no PyYAML).
 
-    Simulate the bare install by hiding ``yaml`` from ``sys.modules`` and from
-    importlib's finders, then invoke the CLI. ``load_config`` falls through
+    Simulate the bare install by hiding ``yaml`` from ``sys.modules`` and
+    blocking its import, then invoke the CLI. ``load_config`` falls through
     cleanly to ``DEFAULT_CONFIG.copy()`` when yaml isn't reachable.
+
+    Only ``yaml`` is blocked: the CLI lazily imports other modules while it
+    runs (rich loads its unicode tables at render time), and those must resolve.
     """
+    import importlib.abc
     import sys
+
+    class _BlockYaml(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname == "yaml" or fullname.startswith("yaml."):
+                raise ModuleNotFoundError(f"No module named {fullname!r}")
+            return None
 
     src = tmp_path / "clean.py"
     src.write_text("import asyncio\nasync def main(): pass\n")
 
-    # Stash yaml and forbid future imports.
-    saved = sys.modules.pop("yaml", None)
-    monkeypatch.setattr(sys, "meta_path", [])
+    saved = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name == "yaml" or name.startswith("yaml.")
+    }
+    monkeypatch.setattr(sys, "meta_path", [_BlockYaml(), *sys.meta_path])
     try:
         runner = CliRunner()
         result = runner.invoke(cli, ["lint", str(src)])
     finally:
-        if saved is not None:
-            sys.modules["yaml"] = saved
+        sys.modules.update(saved)
 
     # Clean fixture, no findings expected; but the key assertion is "did not
     # blow up importing yaml". Exit code 0 on a clean fixture.
