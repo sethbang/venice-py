@@ -16,7 +16,7 @@ import pytest
 from venice_ai.audio_helpers import (
     DEFAULT_WORD_BUDGET,
     MODEL_WORD_BUDGETS,
-    _strip_leading_id3,
+    _Mp3SegmentHeaderStripper,
     split_text_for_tts,
     stream_long_text,
 )
@@ -121,43 +121,81 @@ class TestSplitTextForTts:
 
 
 # ---------------------------------------------------------------------------
-# _strip_leading_id3
+# _Mp3SegmentHeaderStripper
 # ---------------------------------------------------------------------------
 
 
-class TestStripLeadingId3:
-    def test_passthrough_when_no_id3(self):
-        data = b"\xff\xfb\x90\x00audio frame bytes"
-        assert _strip_leading_id3(data) == data
+def _id3_tag(body_size: int) -> bytes:
+    size_bytes = bytes(
+        [
+            (body_size >> 21) & 0x7F,
+            (body_size >> 14) & 0x7F,
+            (body_size >> 7) & 0x7F,
+            body_size & 0x7F,
+        ]
+    )
+    return b"ID3\x04\x00\x00" + size_bytes + b"x" * body_size
 
-    def test_strips_id3v2_header(self):
-        # Build a synthetic ID3v2.4 header with size 100 bytes
-        size = 100
-        size_bytes = bytes(
-            [
-                (size >> 21) & 0x7F,
-                (size >> 14) & 0x7F,
-                (size >> 7) & 0x7F,
-                size & 0x7F,
-            ]
-        )
-        header = b"ID3\x04\x00\x00" + size_bytes
-        payload = b"x" * size
-        audio = b"\xff\xfb\x90\x00mp3frame"
-        data = header + payload + audio
-        stripped = _strip_leading_id3(data)
-        assert stripped == audio
 
-    def test_short_buffer_passthrough(self):
-        # Less than 10 bytes, must not crash or misinterpret
-        assert _strip_leading_id3(b"ID3") == b"ID3"
-        assert _strip_leading_id3(b"") == b""
+# MPEG-2 Layer III, 64 kb/s, 24 kHz, mono: 72 * 64000 // 24000 = 192 bytes.
+_FRAME_HEADER = b"\xff\xf3\x84\xc4"
+_FRAME_LEN = 192
+_SIDE_INFO = 9
 
-    def test_truncated_header_returns_empty(self):
-        # Header says size=1000 but data is shorter than that — drop the chunk
-        size_bytes = bytes([0, 0, 7, 104])  # 1000 in syncsafe
-        data = b"ID3\x04\x00\x00" + size_bytes + b"only a few bytes"
-        assert _strip_leading_id3(data) == b""
+
+def _audio_frame(fill: bytes = b"\x00") -> bytes:
+    return _FRAME_HEADER + fill * (_FRAME_LEN - 4)
+
+
+def _info_frame() -> bytes:
+    body = b"\x00" * _SIDE_INFO + b"Info" + b"\x00" * (_FRAME_LEN - 4 - _SIDE_INFO - 4)
+    return _FRAME_HEADER + body
+
+
+def _run(stripper: _Mp3SegmentHeaderStripper, chunks: list[bytes]) -> bytes:
+    return b"".join(stripper.feed(c) for c in chunks) + stripper.flush()
+
+
+class TestMp3SegmentHeaderStripper:
+    def test_passthrough_when_no_id3_or_frame_header(self):
+        data = b"not an mp3 at all, just bytes"
+        assert _run(_Mp3SegmentHeaderStripper(), [data]) == data
+
+    def test_strips_id3_and_info_frame(self):
+        audio = _audio_frame(b"\x01") + _audio_frame(b"\x02")
+        data = _id3_tag(100) + _info_frame() + audio
+        assert _run(_Mp3SegmentHeaderStripper(), [data]) == audio
+
+    def test_keeps_first_frame_when_it_is_audio(self):
+        audio = _audio_frame(b"\x01") + _audio_frame(b"\x02")
+        assert _run(_Mp3SegmentHeaderStripper(), [_id3_tag(50) + audio]) == audio
+
+    def test_tag_split_across_many_chunks_is_skipped_in_full(self):
+        audio = _audio_frame(b"\x01")
+        data = _id3_tag(1000) + _info_frame() + audio
+        chunks = [data[i : i + 3] for i in range(0, len(data), 3)]
+        assert _run(_Mp3SegmentHeaderStripper(), chunks) == audio
+
+    def test_partial_magic_is_held_until_decidable(self):
+        stripper = _Mp3SegmentHeaderStripper()
+        assert stripper.feed(b"ID") == b""
+        audio = _audio_frame()
+        rest = _id3_tag(20)[2:] + audio
+        assert stripper.feed(rest) + stripper.flush() == audio
+
+    def test_truncated_tag_at_end_of_stream_is_dropped(self):
+        stripper = _Mp3SegmentHeaderStripper()
+        assert _run(stripper, [_id3_tag(1000)[:40]]) == b""
+
+    def test_short_non_tag_stream_is_flushed(self):
+        assert _run(_Mp3SegmentHeaderStripper(), [b"\xff\xf3"]) == b"\xff\xf3"
+        assert _run(_Mp3SegmentHeaderStripper(), []) == b""
+
+    def test_bytes_after_first_frame_pass_through_unbuffered(self):
+        stripper = _Mp3SegmentHeaderStripper()
+        stripper.feed(_id3_tag(10) + _info_frame())
+        later = _audio_frame(b"\x07")
+        assert stripper.feed(later) == later
 
 
 # ---------------------------------------------------------------------------

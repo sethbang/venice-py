@@ -15,7 +15,7 @@ NOT hardcoded validators. Each model supports different subsets.
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def _validate_media_url(v: str) -> str:
@@ -29,10 +29,15 @@ class VideoElement(BaseModel):
     """Structured element for advanced element-aware video models
     (e.g. Kling O3 R2V). Each element defines a character or object that can
     be referenced in the prompt as ``@Element1``, ``@Element2``, etc.
+
+    An element is described by exactly one kind of media source: either
+    images (``frontal_image_url`` and/or ``reference_image_urls``) or a single
+    reference ``video_url``. The API rejects an element that carries both, and
+    an element with neither describes nothing.
     """
 
-    frontal_image_url: str = Field(
-        ..., description="Frontal reference image for this element (HTTP URL or data: URI)."
+    frontal_image_url: str | None = Field(
+        None, description="Frontal reference image for this element (HTTP URL or data: URI)."
     )
     reference_image_urls: list[str] | None = Field(
         None,
@@ -42,14 +47,17 @@ class VideoElement(BaseModel):
     video_url: str | None = Field(
         None,
         description=(
-            "Optional reference video for this element (HTTP URL or data: URI). "
-            "Used by element-aware models that accept per-element motion donors."
+            "Reference video for this element (HTTP URL or data: URI), used by "
+            "element-aware models that accept per-element motion donors. "
+            "Mutually exclusive with the image fields."
         ),
     )
 
-    @field_validator("frontal_image_url")
+    @field_validator("frontal_image_url", "video_url")
     @classmethod
-    def _validate_frontal(cls, v: str) -> str:
+    def _validate_optional_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
         return _validate_media_url(v)
 
     @field_validator("reference_image_urls")
@@ -59,6 +67,22 @@ class VideoElement(BaseModel):
             for url in v:
                 _validate_media_url(url)
         return v
+
+    @model_validator(mode="after")
+    def _check_single_media_source(self) -> "VideoElement":
+        has_images = self.frontal_image_url is not None or bool(self.reference_image_urls)
+        has_video = self.video_url is not None
+        if has_images and has_video:
+            raise ValueError(
+                "An element takes either image URLs (frontal_image_url / "
+                "reference_image_urls) or a video_url, not both"
+            )
+        if not has_images and not has_video:
+            raise ValueError(
+                "An element needs a media source: frontal_image_url, "
+                "reference_image_urls, or video_url"
+            )
+        return self
 
 
 class VideoKeyframe(BaseModel):
@@ -194,11 +218,15 @@ class VideoRequestBase(BaseModel):
         ...,
         description="Video model ID (e.g., 'wan-2.6-text-to-video', 'wan-3-0-prime-image-to-video')",
     )
-    prompt: str = Field(
-        ...,
+    prompt: str | None = Field(
+        None,
         min_length=1,
         max_length=20000,
-        description="Text prompt for video generation (max 20000 chars on newer models)",
+        description=(
+            "Text prompt for video generation (max 20000 chars on newer models). "
+            "Generation models need one; upscale and enhancement models that work "
+            "from a source video do not."
+        ),
     )
     duration: str = Field(
         ...,

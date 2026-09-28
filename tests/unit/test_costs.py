@@ -305,6 +305,7 @@ class TestEstimateCompletionCost:
             prompt=prompt,
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
+            include_venice_system_prompt=False,
         )
 
         # Expected calculation:
@@ -344,6 +345,7 @@ class TestEstimateCompletionCost:
             prompt=prompt,
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
+            include_venice_system_prompt=False,
         )
 
         # Only completion tokens should contribute to cost
@@ -365,6 +367,7 @@ class TestEstimateCompletionCost:
             prompt=prompt,
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
+            include_venice_system_prompt=False,
         )
 
         # 1 word * 1.3 = 1.3 -> 1 token (int conversion)
@@ -388,6 +391,7 @@ class TestEstimateCompletionCost:
             prompt=prompt,
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
+            include_venice_system_prompt=False,
         )
 
         # Only prompt tokens should contribute
@@ -413,6 +417,7 @@ class TestEstimateCompletionCost:
             prompt=prompt,
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
+            include_venice_system_prompt=False,
         )
 
         assert result["usd"] == Decimal("0.00")
@@ -433,6 +438,7 @@ class TestEstimateCompletionCost:
             prompt=prompt,
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
+            include_venice_system_prompt=False,
         )
 
         # Only input cost should be calculated
@@ -440,6 +446,26 @@ class TestEstimateCompletionCost:
         estimated_prompt_tokens = int(word_count * 1.3)
         expected_usd = (Decimal(str(estimated_prompt_tokens)) / Decimal("1000000")) * Decimal("5.0")
 
+        assert result["usd"] == expected_usd
+
+    def test_estimate_includes_venice_system_prompt_allowance_by_default(self):
+        """The default estimate prices the injected system prompt at cache_input."""
+        from venice_ai.costs import VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE
+
+        pricing = ModelPricing(
+            input=PricingTier(usd=5.0, diem=0.0),
+            output=PricingTier(usd=15.0, diem=0.0),
+            cache_input=PricingTier(usd=0.5, diem=0.0),
+        )  # type: ignore
+
+        result = estimate_completion_cost(
+            prompt="Test prompt", estimated_completion_tokens=0, model_pricing=pricing
+        )
+
+        million = Decimal("1000000")
+        expected_usd = (Decimal(2) / million) * Decimal("5.0") + (
+            Decimal(VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE) / million
+        ) * Decimal("0.5")
         assert result["usd"] == expected_usd
 
 
@@ -491,6 +517,7 @@ class TestCostCalculationConsistency:
             prompt=prompt,
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
+            include_venice_system_prompt=False,
         )
 
         # Expected: input (1/1M * $1) + output (1M/1M * $3) = $0.000001 + $3 = ~$3

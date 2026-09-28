@@ -481,11 +481,15 @@ class TestNestedConstraintCapabilityExtraAllow:
                 "supportsWebSearch": True,
                 "supportsLogProbs": False,
                 "maxImages": 8,
+                "supportsSomethingNew": True,
             }
         )
-        assert caps.model_extra is not None
-        assert caps.model_extra.get("maxImages") == 8
+        assert caps.maxImages == 8
         assert caps.model_dump()["maxImages"] == 8
+        # A key the SDK does not model still survives on model_extra.
+        assert caps.model_extra is not None
+        assert caps.model_extra.get("supportsSomethingNew") is True
+        assert caps.model_dump()["supportsSomethingNew"] is True
 
     def test_capabilities_tolerate_novel_quantization(self):
         # quantization is a plain str, so a future server-side value must not

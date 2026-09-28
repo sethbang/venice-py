@@ -242,7 +242,6 @@ class VeniceAIConfig(BaseSettings):
                 backend_type=BackendType.REDIS if enable_redis else BackendType.MEMORY,
                 redis=RedisBackendConfig(
                     redis_url="redis://localhost:6379/15",  # db 15 is the throwaway test database
-                    key_prefix="venice:test:",
                     default_ttl=300,  # Shorter TTL for tests
                 )
                 if enable_redis
@@ -267,6 +266,8 @@ class VeniceAIConfig(BaseSettings):
         Only an API key is required.  All enterprise features (scheduler, state
         management, account tracking, Redis backend) are disabled by default so
         users are not surprised by unexpected dependencies or background tasks.
+        The scheduler section keeps its defaults: it only has an effect once
+        ``rate_limiter.mode`` is ``RateLimiterMode.ADAPTIVE``.
 
         Args:
             api_key: Venice AI API key (can also be provided via VENICE_API_KEY env-var).
@@ -282,14 +283,7 @@ class VeniceAIConfig(BaseSettings):
         """
         return cls(
             api_key=api_key,
-            scheduler=SchedulerConfig(
-                mode=SchedulerMode.BASIC,
-                max_concurrent_executions=10,
-                enable_rate_limiting=False,
-                enable_state_persistence=False,
-                metrics_enabled=False,
-                enable_model_discovery=False,
-            ),
+            scheduler=SchedulerConfig(mode=SchedulerMode.BASIC),
             backend=BackendConfig(backend_type=BackendType.MEMORY),
             state=StateConfig(
                 cache_policy=CachePolicy.WRITE_THROUGH,

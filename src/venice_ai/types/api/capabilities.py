@@ -54,6 +54,35 @@ class ChatCapabilities(BaseModel):
     # crashes get_capabilities() — mirrors ModelCapabilities.quantization on the
     # wire model.
     quantization: str
+    max_images: int | None = Field(
+        None,
+        description=(
+            "Max images per request on multi-image vision models (``None`` if unspecified)."
+        ),
+    )
+    max_videos: int | None = Field(
+        None,
+        description=(
+            "Max video attachments per chat request on video-input models "
+            "(``None`` if unspecified)."
+        ),
+    )
+    # Open str values (not Literals) so a new server-side effort tier never
+    # crashes get_capabilities().
+    reasoning_effort_options: list[str] | None = Field(
+        None,
+        description=(
+            "Accepted ``reasoning_effort`` values (``None`` unless the model "
+            "supports reasoning effort)."
+        ),
+    )
+    default_reasoning_effort: str | None = Field(
+        None,
+        description=(
+            "``reasoning_effort`` applied when a request omits it (``None`` "
+            "unless the model supports reasoning effort)."
+        ),
+    )
     # Plain str for the same reason: this value is forwarded straight from
     # ModelSpec.privacy, so a closed Literal here would crash
     # get_capabilities() on any mode the wire model accepts. Narrow against

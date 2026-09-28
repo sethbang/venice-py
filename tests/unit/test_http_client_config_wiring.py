@@ -383,3 +383,38 @@ async def test_fingerprint_is_deterministic() -> None:
     would read noise as an effect and pass every field."""
     baseline_fields: dict[str, Any] = {"max_retries": 2}
     assert await _fingerprint(baseline_fields) == await _fingerprint(baseline_fields)
+
+
+# ---------------------------------------------------------------------------
+# Deprecated keepalive setting
+# ---------------------------------------------------------------------------
+
+
+def test_deprecated_keepalive_warning_is_shown_by_default_and_points_at_user_code() -> None:
+    """Run in a fresh interpreter with Python's default warning filters (pytest
+    installs its own): the warning must be displayed and attributed to the
+    caller's line, not to pydantic or SDK internals."""
+    import subprocess
+    import sys
+
+    script = (
+        "from venice_ai.core.config import HttpClientConfig\n"
+        "HttpClientConfig(max_keepalive_connections=5)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env={k: v for k, v in os.environ.items() if k != "PYTHONWARNINGS"},
+        check=True,
+    )
+    assert "<string>:2: FutureWarning: HttpClientConfig.max_keepalive_connections" in proc.stderr
+
+
+def test_default_keepalive_value_does_not_warn() -> None:
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        HttpClientConfig()
+        HttpClientConfig(max_keepalive_connections=20)

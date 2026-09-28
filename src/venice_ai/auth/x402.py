@@ -21,13 +21,20 @@ from __future__ import annotations
 import base64
 import json
 import secrets
+import warnings
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 try:
     from eth_account import Account
     from eth_account.messages import encode_typed_data
-    from siwe import SiweMessage
+
+    # siwe compiles its ABNF grammar at import time, and the ``abnf`` package
+    # reports the RFC core rules it re-declares as ``GrammarWarning``s. The
+    # filter is scoped to this import so user warning settings stay untouched.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r"rule '.*' redefines", module=r"abnf\.")
+        from siwe import SiweMessage
 except ImportError as exc:  # pragma: no cover - import-time only
     raise ImportError(
         "The x402 auth helpers require the ``x402`` extra. "

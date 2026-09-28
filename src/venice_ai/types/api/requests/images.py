@@ -229,9 +229,10 @@ class ImageUpscaleRequest(BaseModel):
         ge=2,
         le=4,
         description=(
-            "Scale factor for upscaling. Must be 2 or 4 — 1 is rejected. A scale "
-            "of 4 on a large image is dynamically reduced to keep the result "
-            "within the maximum size limit."
+            "Scale factor for upscaling, any value from 2 to 4 inclusive "
+            "(so 3 is valid; 1 is rejected). "
+            "A large scale on a large image is dynamically reduced to keep the "
+            "result within the maximum size limit."
         ),
     )
     creativity: float | None = Field(

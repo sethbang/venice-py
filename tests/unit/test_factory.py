@@ -7,7 +7,13 @@ that serves as the composition root for dependency injection in Venice AI v2.0.0
 
 from unittest.mock import Mock, patch
 
-from venice_ai.core.config import BackendType, SchedulerMode, VeniceAIConfig
+from venice_ai.core.config import (
+    BackendType,
+    RateLimiterMode,
+    SchedulerConfig,
+    SchedulerMode,
+    VeniceAIConfig,
+)
 from venice_ai.factory import (
     VeniceClientFactory,
     create_developer_client,
@@ -118,10 +124,13 @@ class TestVeniceClientFactoryBasicCreation:
             config_arg = call_args[0][0]  # First positional argument
 
             # Verify minimal configuration
+            # The scheduler is inert outside ADAPTIVE mode, so the minimal config
+            # keeps its defaults (anything else would warn when the client is built).
             assert config_arg.scheduler.mode == SchedulerMode.BASIC
-            assert config_arg.scheduler.max_concurrent_executions == 10
-            assert config_arg.scheduler.enable_rate_limiting is False
-            assert config_arg.scheduler.metrics_enabled is False
+            assert config_arg.scheduler.model_dump(exclude={"mode"}) == (
+                SchedulerConfig().model_dump(exclude={"mode"})
+            )
+            assert config_arg.rate_limiter.mode == RateLimiterMode.SIMPLE
             assert config_arg.backend.backend_type == BackendType.MEMORY
 
             # Verify parameters

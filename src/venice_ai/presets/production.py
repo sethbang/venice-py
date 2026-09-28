@@ -27,9 +27,16 @@ from ..core.config import (
 from ..rate_limiting.config import RateLimiterConfig, RateLimiterMode
 
 
+def _key_prefix(redis_key_prefix: str | None) -> str:
+    if redis_key_prefix is None:
+        default: str = RedisBackendConfig.model_fields["key_prefix"].default
+        return default
+    return redis_key_prefix
+
+
 def create_production_config(
     redis_url: str | None = None,
-    redis_key_prefix: str = "venice:prod:",
+    redis_key_prefix: str | None = None,
     max_concurrent_executions: int = 100,
     max_queue_size: int = 5000,
     enable_metrics: bool = True,
@@ -51,7 +58,9 @@ def create_production_config(
             Example: redis://user:pass@prod-redis:6379/0
             **CRITICAL:** Using localhost in production will cause failures in
             distributed/multi-instance environments.
-        redis_key_prefix: Prefix for all Redis keys to avoid collisions (default: venice:prod:)
+        redis_key_prefix: Deprecated and ignored: the adaptive rate limiter does not
+            prefix its Redis keys. Passing a value emits a ``FutureWarning`` when the
+            client is built. Isolate environments with separate Redis databases.
         max_concurrent_executions: Maximum concurrent requests (default: 100)
         max_queue_size: Maximum queue size before rejecting requests (default: 5000)
         enable_metrics: Enable metrics collection (default: True)
@@ -79,7 +88,7 @@ def create_production_config(
         - Monitor Redis connection pool metrics
         - Adjust max_concurrent_executions based on your rate limits
         - Enable metrics for production observability
-        - Use separate Redis key prefixes for different environments
+        - Use separate Redis databases (or instances) for different environments
     """
     # Validate Redis URL is provided
     if redis_url is None:
@@ -110,7 +119,7 @@ def create_production_config(
                 redis_url=redis_url,
                 max_connections=50,  # Connection pool size
                 default_ttl=3600,  # 1 hour default cache TTL
-                key_prefix=redis_key_prefix,
+                key_prefix=_key_prefix(redis_key_prefix),
                 connection_timeout=5.0,
                 max_retries=3,
                 retry_delay=1.0,
@@ -127,7 +136,6 @@ def create_production_config(
         http_client=HttpClientConfig(
             timeout=30.0,  # Conservative timeout for reliability
             max_connections=200,  # Total pool size
-            max_keepalive_connections=50,  # Persistent connections
             max_retries=3,  # Retry failed requests
         ),
         # Intelligent scheduler with rate limiting
@@ -159,7 +167,7 @@ def create_production_config(
 
 def create_production_config_high_throughput(
     redis_url: str | None = None,
-    redis_key_prefix: str = "venice:prod:",
+    redis_key_prefix: str | None = None,
     _allow_localhost_for_testing: bool = False,
 ) -> VeniceAIConfig:
     """
@@ -173,7 +181,7 @@ def create_production_config_high_throughput(
             Set via VENICE_REDIS_URL environment variable or pass explicitly.
             **CRITICAL:** Using localhost in production will cause failures in
             distributed/multi-instance environments.
-        redis_key_prefix: Prefix for Redis keys
+        redis_key_prefix: Deprecated and ignored; see :func:`create_production_config`.
 
     Returns:
         VeniceAIConfig optimized for high throughput
@@ -213,7 +221,7 @@ def create_production_config_high_throughput(
                 redis_url=redis_url,
                 max_connections=100,  # Larger pool for high throughput
                 default_ttl=1800,  # 30 min TTL
-                key_prefix=redis_key_prefix,
+                key_prefix=_key_prefix(redis_key_prefix),
                 connection_timeout=3.0,
                 max_retries=2,
             ),
@@ -228,7 +236,6 @@ def create_production_config_high_throughput(
         http_client=HttpClientConfig(
             timeout=45.0,  # Longer timeout for batch operations
             max_connections=500,  # Much larger pool
-            max_keepalive_connections=100,
             max_retries=2,
         ),
         scheduler=SchedulerConfig(
@@ -255,7 +262,7 @@ def create_production_config_high_throughput(
 
 def create_production_config_conservative(
     redis_url: str | None = None,
-    redis_key_prefix: str = "venice:prod:",
+    redis_key_prefix: str | None = None,
     _allow_localhost_for_testing: bool = False,
 ) -> VeniceAIConfig:
     """
@@ -269,7 +276,7 @@ def create_production_config_conservative(
             Set via VENICE_REDIS_URL environment variable or pass explicitly.
             **CRITICAL:** Using localhost in production will cause failures in
             distributed/multi-instance environments.
-        redis_key_prefix: Prefix for Redis keys
+        redis_key_prefix: Deprecated and ignored; see :func:`create_production_config`.
 
     Returns:
         VeniceAIConfig optimized for reliability
@@ -305,7 +312,7 @@ def create_production_config_conservative(
                 redis_url=redis_url,
                 max_connections=30,  # Smaller pool
                 default_ttl=7200,  # 2 hour TTL for stability
-                key_prefix=redis_key_prefix,
+                key_prefix=_key_prefix(redis_key_prefix),
                 connection_timeout=10.0,  # More lenient timeout
                 max_retries=5,  # More retries
                 retry_delay=2.0,
@@ -321,7 +328,6 @@ def create_production_config_conservative(
         http_client=HttpClientConfig(
             timeout=60.0,  # Generous timeout
             max_connections=100,
-            max_keepalive_connections=30,
             max_retries=5,  # More retries
         ),
         scheduler=SchedulerConfig(

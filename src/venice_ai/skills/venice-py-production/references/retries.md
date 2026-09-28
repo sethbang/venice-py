@@ -139,7 +139,7 @@ For most production workloads, **full jitter is enough**. Don't optimize for dec
 Retrying a `client.chat.completions.create(...)` call when the original may have succeeded server-side BUT the client never saw the response: harmless (you pay twice but the conversation is the same). Retrying:
 
 - **Tool-calling** (`run_with_tools`): mostly fine — the loop is stateful but the tool functions are usually idempotent.
-- **`client.video.run / submit`**: NOT idempotent — each retry submits a new job. **Always retry inside the `async with`** so the failed job is canceled before re-submission.
+- **`client.video.run / submit`**: NOT idempotent — each retry submits a new, separately billed job, and a job that already started keeps running server-side (`cancel()` / the `async with` exit only release its stored media). Persist the `queue_id` and resume polling with `retrieve()` rather than re-submitting.
 - **`client.x402.top_up(payment_header=...)`**: NOT idempotent in general — same payment header may be rejected on retry as already-spent. The 402 → sign → submit flow has its own state.
 
 For non-idempotent ops, use a **request-id-based deduplication key** if the endpoint supports one, or accept that retries may double-charge and limit retry counts to 1.

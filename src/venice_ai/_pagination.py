@@ -11,7 +11,7 @@ a ``Paginator``, so callers never need to think about page math::
 
     async for api_key in client.api_keys.iter_all():
         ...
-    async for character in client.characters.iter_all(category="..."):
+    async for character in client.characters.iter_all(categories=["..."]):
         ...
 """
 

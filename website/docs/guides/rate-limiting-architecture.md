@@ -61,6 +61,9 @@ on `backend.redis.redis_url`).
 > `VeniceClassifierAdapter` that are also constructed during ADAPTIVE
 > initialisation. Setting `SchedulerConfig(mode=SchedulerMode.BASIC)` or
 > `SchedulerMode.ACCOUNT` has no effect when `RateLimiterMode.ADAPTIVE` is active.
+> Every other `SchedulerConfig` field is passed to the adaptive scheduler's
+> configuration, and `backend.redis` supplies the Redis backend's `max_connections`
+> and `cluster_mode` (with `redis_url` as the cluster seed node).
 
 ## Configuration
 

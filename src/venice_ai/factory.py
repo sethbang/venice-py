@@ -41,11 +41,13 @@ Example:
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
-from .core.config import VeniceAIConfig
+from .core.config import BackendType, RedisBackendConfig, SchedulerConfig, VeniceAIConfig
+from .core.config._deprecation import warn_user
 from .rate_limiting import NoOpRateLimiter, RateLimiterProtocol, SimpleRateLimiter
 from .rate_limiting.config import RateLimiterConfig, RateLimiterMode
 
@@ -129,6 +131,98 @@ class AdaptiveSchedulerAdapter:
         return getattr(self._scheduler, "circuit_breaker", None)
 
 
+# Cleared by ``create_test_client``, whose config is inert by design.
+_check_inert_config: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "venice_check_inert_config", default=True
+)
+
+
+def _tuned_scheduler_fields(config: VeniceAIConfig) -> list[str]:
+    """SchedulerConfig fields changed from their defaults.
+
+    ``mode`` is left out (no rate limiter reads it) and so are deprecated
+    fields, which already warn when they are set.
+    """
+    scheduler = config.scheduler
+    defaults = SchedulerConfig()
+    tuned = []
+    for name, info in SchedulerConfig.model_fields.items():
+        if name == "mode" or info.deprecated:
+            continue
+        if scheduler.__dict__.get(name) != defaults.__dict__.get(name):
+            tuned.append(name)
+    return tuned
+
+
+def _warn_on_inert_config(config: VeniceAIConfig) -> None:
+    """Warn about configuration sections that the selected rate limiter never reads."""
+    mode = (config.rate_limiter or RateLimiterConfig()).mode
+    if mode == RateLimiterMode.ADAPTIVE:
+        return
+    if config.backend.backend_type == BackendType.REDIS:
+        warn_user(
+            f"backend_type=BackendType.REDIS has no effect with rate_limiter.mode="
+            f"{mode.value!r}: only the ADAPTIVE rate limiter contacts Redis, so the "
+            "configured Redis backend is never used. Set rate_limiter.mode="
+            "RateLimiterMode.ADAPTIVE, or use BackendType.MEMORY."
+        )
+    tuned = _tuned_scheduler_fields(config)
+    if tuned:
+        warn_user(
+            f"SchedulerConfig settings {tuned} have no effect with rate_limiter.mode="
+            f"{mode.value!r}: the scheduler only runs under RateLimiterMode.ADAPTIVE."
+        )
+
+
+def _redis_backend_kwargs(config: VeniceAIConfig, redis_url: str) -> dict[str, Any]:
+    """Keyword arguments for the adaptive Redis backend from ``backend.redis``.
+
+    In cluster mode ``redis_url`` is passed as the cluster seed as well, so it
+    is not overridden by a ``REDIS_CLUSTER_URL`` environment variable.
+    """
+    redis_cfg = config.backend.redis
+    if redis_cfg is None:
+        return {}
+    kwargs: dict[str, Any] = {
+        "max_connections": redis_cfg.max_connections,
+        "cluster_mode": redis_cfg.cluster_mode,
+    }
+    if redis_cfg.cluster_mode:
+        kwargs["cluster_url"] = redis_url
+    return kwargs
+
+
+def _warn_on_ignored_key_prefix(config: VeniceAIConfig) -> None:
+    """Warn when ``backend.redis.key_prefix`` was changed: the adaptive backend ignores it."""
+    redis_cfg = config.backend.redis
+    if redis_cfg is None:
+        return
+    default_prefix = RedisBackendConfig.model_fields["key_prefix"].default
+    key_prefix = redis_cfg.__dict__.get("key_prefix", default_prefix)
+    if key_prefix != default_prefix:
+        warn_user(
+            f"RedisBackendConfig.key_prefix={key_prefix!r} is deprecated and ignored: "
+            "the adaptive rate limiter's Redis backend does not prefix its keys. "
+            "Isolate deployments with separate Redis databases or account IDs; "
+            "key_prefix will be removed in the next major release.",
+            FutureWarning,
+        )
+
+
+def _adaptive_scheduler_kwargs(config: VeniceAIConfig) -> dict[str, Any]:
+    """SchedulerConfig values for the upstream adaptive scheduler config.
+
+    Every current field except ``mode`` shares its name and meaning with the
+    upstream ``RateLimiterConfig``; deprecated fields have no upstream
+    counterpart.
+    """
+    return {
+        name: config.scheduler.__dict__[name]
+        for name, info in SchedulerConfig.model_fields.items()
+        if name != "mode" and not info.deprecated
+    }
+
+
 class VeniceClientFactory:
     """
     Factory for creating fully configured Venice AI clients with dependency injection.
@@ -196,6 +290,13 @@ class VeniceClientFactory:
         Raises:
             ConfigurationError: If required configuration is missing or invalid
 
+        Warns:
+            UserWarning: When part of ``config`` can have no effect: a Redis
+                backend (``backend.backend_type=REDIS``) or a ``SchedulerConfig``
+                changed from its defaults while ``rate_limiter.mode`` is not
+                ``ADAPTIVE``. Only the ADAPTIVE rate limiter contacts Redis or
+                runs the scheduler.
+
         Example:
             >>> from venice_ai.factory import VeniceClientFactory
             >>> from venice_ai.core.config import VeniceAIConfig
@@ -215,6 +316,9 @@ class VeniceClientFactory:
             the client is instantiated, then injected back into the client.
             This breaks the circular dependency between client and rate limiter.
         """
+        if _check_inert_config.get():
+            _warn_on_inert_config(config)
+
         logger.info(f"Creating Venice client with config environment: {config.environment}")
 
         # 1. Create VeniceClient
@@ -285,7 +389,13 @@ class VeniceClientFactory:
         }
         defaults.update(kwargs)
 
-        return cls.create_client(config, **defaults)
+        # The test config pairs a Redis backend and a tuned scheduler with the
+        # SIMPLE rate limiter on purpose, so the inert-config checks are skipped.
+        token = _check_inert_config.set(False)
+        try:
+            return cls.create_client(config, **defaults)
+        finally:
+            _check_inert_config.reset(token)
 
     @classmethod
     def create_developer_client(
@@ -384,6 +494,7 @@ class VeniceClientFactory:
             return NoOpRateLimiter()
 
         if rate_config.mode == RateLimiterMode.ADAPTIVE:
+            _warn_on_ignored_key_prefix(config)
             try:
                 from adaptive_rate_limiter.backends import (
                     RedisBackend as AdaptiveRedisBackend,
@@ -440,6 +551,7 @@ class VeniceClientFactory:
                 backend = AdaptiveRedisBackend(
                     redis_url=redis_url,
                     account_id=effective_account_id,
+                    **_redis_backend_kwargs(config, redis_url),
                 )
 
                 # Create Venice-specific provider and classifier for INTELLIGENT mode
@@ -470,9 +582,11 @@ class VeniceClientFactory:
                 # falls back to cold-start probes for every request.
                 state_manager = AdaptiveStateManager(backend=backend, provider=provider)
 
-                # Create adaptive config with INTELLIGENT mode
+                # The adaptive scheduler always runs in INTELLIGENT mode; every
+                # other shared SchedulerConfig field is forwarded.
                 adaptive_config = AdaptiveConfig(
                     mode=AdaptiveSchedulerMode.INTELLIGENT,
+                    **_adaptive_scheduler_kwargs(config),
                 )
 
                 # Create and return adaptive scheduler with ALL required dependencies

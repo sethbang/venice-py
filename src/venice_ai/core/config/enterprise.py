@@ -5,8 +5,11 @@ These models are optional and only needed for advanced deployments:
 circuit breaker, state management, scheduler, and metrics.
 """
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Self
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from ._deprecation import warn_on_deprecated_fields
 from .enums import CachePolicy, SchedulerMode
 
 # =============================================================================
@@ -187,7 +190,14 @@ class SchedulerConfig(BaseModel):
     Requires: ``pip install 'venice-py[adaptive]'`` and a Redis backend.
 
     For basic SDK usage the default ``RateLimiterMode.SIMPLE`` mode does not use
-    this scheduler at all — only ``HttpClientConfig`` is needed.
+    this scheduler at all — only ``HttpClientConfig`` is needed. Building a
+    client through :class:`~venice_ai.factory.VeniceClientFactory` with a
+    non-default ``SchedulerConfig`` outside ADAPTIVE mode emits a ``UserWarning``.
+
+    In ADAPTIVE mode every field that shares a name with the upstream
+    ``adaptive_rate_limiter`` scheduler configuration is forwarded to it, with
+    one exception: ``mode`` is ignored, because the adaptive scheduler always
+    runs in its INTELLIGENT mode.
     """
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
@@ -195,11 +205,15 @@ class SchedulerConfig(BaseModel):
     # === Core Scheduling Configuration ===
 
     mode: SchedulerMode = Field(
-        default=SchedulerMode.INTELLIGENT, description="Scheduler operation mode"
+        default=SchedulerMode.INTELLIGENT,
+        description="Scheduler operation mode. Ignored in ADAPTIVE mode, where the "
+        "adaptive scheduler always runs in INTELLIGENT mode.",
     )
 
     strategy: str = Field(
-        default="weighted_round_robin", description="Scheduling strategy algorithm"
+        default="weighted_round_robin",
+        deprecated="no scheduler reads it",
+        description="Deprecated and ignored.",
     )
 
     max_concurrent_executions: int = Field(
@@ -238,7 +252,9 @@ class SchedulerConfig(BaseModel):
     )
 
     enable_request_batching: bool = Field(
-        default=False, description="Enable request batching for efficiency"
+        default=False,
+        deprecated="no scheduler reads it",
+        description="Deprecated and ignored.",
     )
 
     # === Rate Limiting Integration ===
@@ -280,11 +296,14 @@ class SchedulerConfig(BaseModel):
 
     model_fallbacks: dict[str, str] = Field(
         default_factory=dict,
-        description="Dictionary mapping failing models to fallback models",
+        deprecated="no scheduler reads it",
+        description="Deprecated and ignored.",
     )
 
     enable_model_discovery: bool = Field(
-        default=True, description="Enable automatic model discovery and configuration"
+        default=True,
+        deprecated="no scheduler reads it",
+        description="Deprecated and ignored.",
     )
 
     # === Metrics and Monitoring ===
@@ -332,6 +351,14 @@ class SchedulerConfig(BaseModel):
         if v not in valid_policies:
             raise ValueError(f"Invalid overflow_policy: {v}. Must be one of {valid_policies}")
         return v
+
+    @model_validator(mode="after")
+    def _warn_deprecated(self) -> Self:
+        warn_on_deprecated_fields(
+            self,
+            ("strategy", "enable_request_batching", "model_fallbacks", "enable_model_discovery"),
+        )
+        return self
 
 
 # =============================================================================

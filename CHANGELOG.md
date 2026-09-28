@@ -5,6 +5,94 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`ResponsesResponse.incomplete_details`.** A new `ResponsesIncompleteDetails` model carries the `reason` an `"incomplete"` response was cut short: `"max_output_tokens"` or `"content_filter"`. It defaults to `None` and accepts an explicit `null`.
+
+- **Known-value tuples for the response fields that are now open.** `KNOWN_RESPONSE_STATUSES`, `KNOWN_RESPONSE_MESSAGE_STATUSES`, `KNOWN_RESPONSE_FUNCTION_CALL_STATUSES`, `KNOWN_RESPONSE_WEB_SEARCH_CALL_STATUSES`, `KNOWN_RESPONSE_INCOMPLETE_REASONS` and `KNOWN_FINISH_REASONS`, importable from `venice_ai.types` and `venice_ai.types.api`. Treat a value outside them as one this release predates, not as invalid.
+
+- **More model capabilities are typed.** `ModelCapabilities` declares `maxImages` and `maxVideos`, which previously landed only on `model_extra`. `ChatCapabilities`, returned by `client.models.get_capabilities()`, exposes `max_images`, `max_videos`, `reasoning_effort_options` and `default_reasoning_effort`. All four default to `None`.
+
+- **`chat.completions.estimate_cost(venice_parameters=...)`** accepts a dict or `VeniceParameters`, so an estimate can reflect whether Venice's own system prompt will be injected. See *Changed* for what this does to the default estimate.
+
+### Changed
+
+- **Status and outcome fields on responses are now open `str` instead of closed `Literal`s.** A new value from the server is kept rather than failing the whole response. This covers `ResponsesResponse.status`, `ResponsesMessageOutput.status`, `ResponsesFunctionCallOutput.status`, `ResponsesWebSearchCallOutput.status`, `ChatChoice.finish_reason` and `ChatCompletionChunkChoice.finish_reason`. `ChatChoice.finish_reason` is still required but is now `str | None`, and it accepts the spec's `"content_filter"`.
+
+  Runtime behaviour is strictly more permissive, but this widens public `Literal`s. A caller relying on exhaustiveness checking over these fields will see their type checker stop proving the match is exhaustive; narrow against the matching `KNOWN_*` tuple and handle the fallback. Because `ChatChoice.finish_reason` is now nullable, an unguarded call such as `choice.finish_reason.startswith(...)` no longer type-checks.
+
+- **Default cost estimates include the system prompt Venice injects.** Unless `venice_parameters` sets `include_venice_system_prompt=False` or `enable_e2ee=True` (end-to-end encryption turns the injected prompt off), `chat.completions.estimate_cost()` adds `venice_ai.costs.VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE` (1750 tokens), priced at the model's `cache_input` rate, or at `input` when it publishes none. The injected prompt's size varies (roughly 1100 to 1750 tokens have been observed), so this is a conservative allowance, not an exact count. `ChatCostEstimate` gains `venice_system_prompt_tokens`, and `prompt_tokens` now includes it. `costs.estimate_completion_cost()` gains a keyword-only `include_venice_system_prompt=True` that behaves the same way.
+
+  Default estimates are therefore about 1750 prompt tokens higher than before. Pass the opt-out to get the old count of the caller's own words.
+
+- **Validation error messages now carry the server's per-field reasons.** Venice sends the same `"Invalid request parameters"` for every request-validation failure, and that string was all `str(exc)` showed. Each reason is now appended as `field: message`, for example `Invalid request parameters (input: Input text exceeds the maximum token limit of 8192 tokens)`. Reasons come from the Zod `issues` array; for union failures they are taken from the nested `unionErrors` branches, and when `issues` is empty the `details` tree is used instead. At most ten are shown. `exc.body` is left unchanged.
+
+  Code that compares `str(exc)` for exact equality will stop matching. Substring checks against the server's `error` text keep working, since the reasons are only appended.
+
+- **Presets now use the retry count they document.** `HttpClientConfig.max_retries` and `retry_backoff_factor` used to be ignored (see *Fixed*), so every client made 4 attempts. Clients built from presets now honour their settings: the testing preset retries once, the circuit-breaker testing preset never, the development presets twice, and `create_developer_client()` once. Precedence is `retry_options=` > `VeniceClient(max_retries=)` > `config.http_client` > `RetryOptions` defaults.
+
+- **The per-host connection limit is unlimited by default.** It was derived from `max_keepalive_connections`, which silently capped concurrency to one host at 20 by default, 50 in the production presets and 100 in the high-throughput preset despite its 500-connection pool. It is now unlimited unless `connector_limit_per_host` is given.
+
+- **Presets that use the SIMPLE rate limiter keep a default `SchedulerConfig`** apart from `mode=BASIC`: `create_minimal_config()`, `create_development_config()`, `create_development_config_with_rate_limiting()`, `create_testing_config()`, `create_testing_config_with_intelligent_scheduler()` and `create_testing_config_for_circuit_breaker()`. The scheduler has no effect under the SIMPLE rate limiter, and the tuned values they used to set would trigger the inert-configuration warning described under *Fixed*. Every shipped preset now passes through `VeniceClientFactory.create_client()` without a warning. `create_testing_config_with_intelligent_scheduler()` no longer sets `SchedulerMode.INTELLIGENT`, which never ran.
+
+- **`test_rate_multiplier` on the testing presets defaults to `None`** and is stored only when passed. Only the ADAPTIVE scheduler reads it, so an explicit value is reported by the inert-configuration warning.
+
+- **`validate_config()`** drops the keepalive-ratio and keepalive-exceeds-max rules and the Redis key-prefix recommendation, and reports the deprecated fields below as warnings instead.
+
+### Deprecated
+
+- **Configuration fields nothing reads.** `HttpClientConfig.max_keepalive_connections` (aiohttp has no keepalive-pool-size setting), `RedisBackendConfig.key_prefix` (the adaptive Redis backend names its keys itself and applies no prefix) and `SchedulerConfig.strategy`, `enable_request_batching`, `model_fallbacks` and `enable_model_discovery`. They are still accepted and will be removed in the next major release.
+
+  Setting one to a non-default value emits a `FutureWarning` attributed to your own line of code: at construction for the HTTP and scheduler fields, and when the ADAPTIVE rate limiter is built for `key_prefix`. Reading one emits pydantic's access-time `DeprecationWarning`. `validate_config()` reports non-default values as warnings. Presets, `create_minimal_config()` and `create_test_config()` no longer set any of them, so code that does not set them sees nothing.
+
+- **The production presets' `redis_key_prefix` parameter** now defaults to `None` and is deprecated along with the field it sets.
+
+- **`create_testing_config_with_intelligent_scheduler()`** will be removed in the next major release. It uses the SIMPLE rate limiter, so no scheduler runs, and it matches `create_testing_config()` apart from its timeout, pool size and retry count. To test the scheduler, set `rate_limiter=RateLimiterConfig(mode=RateLimiterMode.ADAPTIVE)`, which needs the `adaptive` extra.
+
+### Fixed
+
+- **A Responses API generation cut short no longer fails the parse.** When `max_output_tokens` or a content filter stops a generation, Venice returns `status: "incomplete"`, which the closed `Literal` rejected, so the partial output was lost to an `APIResponseValidationError`. The response now parses with its partial `output` and `usage`, and message and function-call blocks marked `"incomplete"` stay typed as `ResponsesMessageOutput` / `ResponsesFunctionCallOutput` instead of falling through to `ResponsesUnknownOutput`.
+
+- **Cost calculation bills the way Venice charges.** `calculate_completion_cost()`, and with it `CostTracker.track()` and `ChatCompletionResponse.summary(pricing=...)`, billed every prompt token at `input` and ignored the cache and extended rates. Cached prompt tokens are now billed at `cache_input`, read from `prompt_tokens_details.cached_tokens` or the top-level `cache_read_input_tokens` (one of the two mirrors, never their sum), and cache-write tokens at `cache_write`, read from `prompt_tokens_details.cache_creation_input_tokens` or the top-level `cache_creation_input_tokens`. The uncached remainder is billed at `input`, and a model with no cache rate falls back to `input`. When the total prompt is strictly greater than `extended.context_token_threshold`, the `extended` rates apply to the whole request; a missing extended cache rate falls back to `extended.input`, and a missing extended input or output rate to the standard one.
+
+- **Retry settings in `HttpClientConfig` take effect.** `max_retries` and `retry_backoff_factor` were never read: every client made 4 attempts with backoff base 2.0 whatever the configuration said. See *Changed* for how this affects presets.
+
+- **`VeniceClient(proxy=...)` sends requests through the proxy.** The value was stored and never used.
+
+- **An explicit `connector_limit` / `connector_limit_per_host` wins when `config=` is also passed.**
+
+- **ADAPTIVE mode forwards the scheduler and Redis settings it was ignoring.** Every `SchedulerConfig` field except `mode` now reaches the adaptive scheduler (`max_concurrent_executions`, `max_queue_size`, `overflow_policy`, `request_timeout`, `rate_limit_buffer_ratio` and the rest), so the production presets' queue and concurrency values take effect. `mode` is ignored there: the adaptive scheduler always runs INTELLIGENT. `backend.redis.max_connections` (default 20, previously the upstream default of 10) and `cluster_mode` reach the Redis backend; with `cluster_mode=True`, `redis_url` is the cluster seed node.
+
+- **Configuration that can have no effect is no longer silent.** `VeniceClientFactory.create_client()` emits a `UserWarning` when a Redis backend, or a `SchedulerConfig` changed from its defaults (ignoring `mode`), is paired with a rate-limiter mode other than ADAPTIVE. Neither is used outside ADAPTIVE. `create_test_client()` stays silent.
+
+- **Multipart endpoints raise the same error message and `exc.code` as JSON endpoints.** Image upscale and edit and audio transcription pass the error body along as raw text, so the message was a raw JSON dump and `exc.code` was `None`. The text is now decoded as JSON first; `exc.body` still holds the original text, and a body that is not JSON is shown unchanged. `APIStatusError` builds its message the same way as the status-specific exceptions and sets `exc.code` from the body.
+
+- **`stream_long_text` produces one well-formed MP3 stream for multi-segment input.** Only later segments' leading ID3 tags were removed, and only from their first network chunk, so a tag split across chunks leaked its tail into the audio; every segment's Xing/Info header frame stayed in the stream. The first Info frame declared only segment 0's frame count, so browsers, `afinfo` and speech-recognition front ends reported a truncated duration. Each segment's leading ID3v2 tag and Xing/Info/VBRI header frame, segment 0's included, is now removed as bytes stream through, buffering at most one audio frame per segment. Multi-segment output carries no ID3 tag and no LAME gapless metadata; players derive the duration from the constant bitrate. Single-segment output is unchanged. The byte count passed to `on_segment_complete` is counted after stripping.
+
+- **Raw MPEG audio is no longer uploaded as AAC.** The filename sniffer used for `bytes` input to transcription and voice-changer treated any `0xFF 0xF?` frame sync as AAC ADTS, so an MP3 starting on a bare MPEG-2 Layer III frame header, such as multi-segment `stream_long_text` output, was sent as `audio.aac`. ADTS is now recognised only with its `00` layer bits.
+
+- **Audio uploaded from a `BytesIO` or a file object without a `name` gets a real content type.** Only raw `bytes` input had its format detected from magic bytes; the others were sent as `audio` with `application/octet-stream`. Transcription and voice-changer uploads without a name are now detected the same way as `bytes`. Named files and paths still go by their extension.
+
+- **Chat message models validate on assignment.** `UserMessage`, `AssistantMessage`, `ToolMessage`, `SystemMessage` and `DeveloperMessage` now raise `ValidationError` for `msg.role = "assistant"` on a `UserMessage` or for non-text `content`, instead of sending it.
+
+- **Video elements can be video-only.** `VideoElement.frontal_image_url` is optional. An element takes exactly one media source: images (`frontal_image_url` and/or `reference_image_urls`) or a single `video_url`. One with both or neither is rejected client-side, matching the API's `"Cannot provide both image URLs and video URL"` rejection. An element's `video_url` is scheme-validated.
+
+- **The video prompt is optional.** `prompt` is optional in `client.video.submit()` / `run()` and on the video request models (`min_length=1` when given), so upscale and enhancement models that work from `video_url` no longer need a placeholder prompt; an omitted prompt is left out of the request body. The parameter stays keyword-only in the same place.
+
+- **`VideoJob.wait()` reports a job rejected after queueing as a generation failure.** When `/video/retrieve` returns a 400 because the queued job failed server-side validation, `wait()` raises `VideoGenerationError` with the original `InvalidRequestError` as `__cause__`. A 400 saying the request ID is invalid, meaning an unknown or already released `queue_id`, still raises `InvalidRequestError`. `retrieve()` is unchanged.
+
+- **`VideoJob.download()` / `MusicJob.download()` no longer return a path to a file that was never written.** When a completed status has no inline data and no URL (and, for video, no queue-time `download_url`), they raise `VideoGenerationError` / `MusicGenerationError` without writing or creating anything.
+
+- **Leaving a job context early is no longer silent.** Leaving `async with VideoJob` / `MusicJob` before the job reached a terminal status (never polled, still processing, or after a `wait()` timeout) logs a WARNING. The release endpoint only frees stored media: it does not stop generation, and the job is still billed. The `cancel()` / `__aexit__` docstrings on `VideoJob`, `Video`, `MusicJob` and `Music` describe this best-effort storage release.
+
+- **`chat.completions.create(e2ee=TeeOptions(verifier=...))` no longer warns that no client-side quote verification is done.** The attestation-trust `UserWarning` is still emitted on every call that uses the baseline verifier.
+
+- **Importing `venice_ai.auth.x402` no longer prints four `abnf` `GrammarWarning`s.** The filter is scoped to the `siwe` import and leaves process-wide warning settings alone.
+
+- **Documentation matches the real signatures.** `ImageUpscaleRequest.scale` and `image.upscale()` say any value from 2 to 4 inclusive is valid, not only 2 or 4. Docstring examples that called non-existent APIs now call real ones: `resolve_video_upscale` used `client.video.quote_upscale`, the `Paginator` module used `characters.iter_all(category=...)` instead of `categories=[...]`, and the `Video` / `VideoJob` examples used `duration=` instead of `duration_seconds=`.
+
 ## [2.5.1] - 2026-09-27
 
 ### Fixed

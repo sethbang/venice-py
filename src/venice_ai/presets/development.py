@@ -3,7 +3,7 @@ Development configuration preset for Venice AI SDK.
 
 This preset is optimized for local development with:
 - Memory backend for simplicity (no Redis required)
-- Basic scheduler for predictable behavior
+- SIMPLE reactive rate limiter for predictable behavior
 - Relaxed timeouts for debugging
 - Comprehensive logging enabled
 """
@@ -30,10 +30,10 @@ def create_development_config(
 
     This configuration is designed for local development and provides:
     - Memory backend (no Redis installation required)
-    - Basic scheduler for predictable, sequential execution
+    - The SIMPLE reactive rate limiter (no scheduler, no Redis)
     - Generous timeouts for debugging
     - Debug mode enabled by default
-    - Lower concurrency for easier debugging
+    - Lower concurrency for easier debugging (a 20-connection pool)
     - State management matching production behavior for consistency
 
     Args:
@@ -74,18 +74,11 @@ def create_development_config(
         http_client=HttpClientConfig(
             timeout=timeout,  # Generous timeout for debugging
             max_connections=20,  # Lower concurrency
-            max_keepalive_connections=5,
             max_retries=2,
         ),
-        # Basic scheduler for predictable behavior
-        scheduler=SchedulerConfig(
-            mode=SchedulerMode.BASIC,
-            max_concurrent_executions=10,  # Low for easier debugging
-            max_queue_size=100,
-            enable_rate_limiting=False,  # Simplified rate limiting
-            metrics_enabled=False,  # Less overhead
-            enable_performance_tracking=False,
-        ),
+        # The scheduler only runs under RateLimiterMode.ADAPTIVE; the SIMPLE
+        # rate limiter used here does not read it.
+        scheduler=SchedulerConfig(mode=SchedulerMode.BASIC),
         # Lenient circuit breaker for development
         circuit_breaker=CircuitBreakerConfig(
             failure_threshold=20,  # More lenient
@@ -99,15 +92,24 @@ def create_development_config_with_rate_limiting(
     enable_debug: bool = True,
 ) -> VeniceAIConfig:
     """
-    Create development config with rate limiting enabled.
+    Create a development config with a larger connection pool and a stricter circuit breaker.
 
-    Use this when you want to test rate limiting behavior locally.
+    Rate limiting here is the SIMPLE reactive rate limiter, the same one
+    :func:`create_development_config` uses: it backs off when Venice returns
+    429 and reads its limits from the response headers. The proactive
+    scheduler only runs under ``RateLimiterMode.ADAPTIVE`` (the optional
+    ``adaptive-rate-limiter`` package); set ``rate_limiter`` on the returned
+    config to test it locally.
+
+    Compared with :func:`create_development_config`, this preset uses a 60 s
+    timeout, a 30-connection pool and a circuit breaker that opens after 15
+    failures and needs 2 successes to close.
 
     Args:
         enable_debug: Enable debug logging (default: True)
 
     Returns:
-        VeniceAIConfig with rate limiting enabled
+        VeniceAIConfig using the SIMPLE rate limiter
     """
     return VeniceAIConfig(
         environment="development",
@@ -125,20 +127,11 @@ def create_development_config_with_rate_limiting(
         http_client=HttpClientConfig(
             timeout=60.0,
             max_connections=30,
-            max_keepalive_connections=10,
             max_retries=2,
         ),
-        # Use intelligent scheduler to test rate limiting
-        scheduler=SchedulerConfig(
-            mode=SchedulerMode.INTELLIGENT,
-            max_concurrent_executions=20,
-            max_queue_size=200,
-            enable_rate_limiting=True,
-            rate_limit_buffer_ratio=0.8,  # Conservative for testing
-            overflow_policy="reject",
-            metrics_enabled=True,
-            enable_performance_tracking=True,
-        ),
+        # The scheduler only runs under RateLimiterMode.ADAPTIVE; the SIMPLE
+        # rate limiter used here does not read it.
+        scheduler=SchedulerConfig(mode=SchedulerMode.BASIC),
         # Stricter circuit breaker than basic dev config since rate limiting
         # adds complexity - fail faster to surface integration issues early
         circuit_breaker=CircuitBreakerConfig(

@@ -268,14 +268,17 @@ class ChatCompletionChunkChoice(BaseModel):
     to build the complete message.
     """
 
-    finish_reason: Literal["stop", "length", "tool_calls"] | None = None
+    finish_reason: str | None = None
     """The reason the model stopped generating (only in final chunk).
 
     * ``"stop"``: Model hit a natural stopping point
     * ``"length"``: Maximum token limit reached
     * ``"tool_calls"``: Model called a tool
+    * ``"content_filter"``: Output was withheld by a content filter
 
-    ``None`` for all chunks except the final one.
+    ``None`` for all chunks except the final one. Other values may appear as
+    the server adds reasons; the known ones are in
+    :data:`~venice_ai.types.api.chat.KNOWN_FINISH_REASONS`.
     """
 
     logprobs: ChatCompletionChoiceLogprobs | None = Field(default=None)

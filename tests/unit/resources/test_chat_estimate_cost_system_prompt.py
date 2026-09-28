@@ -108,6 +108,7 @@ class TestOptOut:
         "venice_parameters",
         [
             pytest.param({"include_venice_system_prompt": False}, id="dict"),
+            pytest.param({"enable_e2ee": True}, id="e2ee-forces-it-off"),
         ],
     )
     async def test_include_venice_system_prompt_false_drops_allowance(self, venice_parameters):

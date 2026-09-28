@@ -97,6 +97,7 @@ class VeniceHTTPClient:
         skip_auto_headers: list | None = None,
         http_transport_options: dict[str, Any] | None = None,
         retry_options: RetryOptions | None = None,
+        proxy: str | None = None,
     ):
         """
         Initialize the central HTTP client.
@@ -114,6 +115,7 @@ class VeniceHTTPClient:
             skip_auto_headers: Headers to skip from auto-generation
             http_transport_options: Additional transport options
             retry_options: Retry configuration
+            proxy: URL of an HTTP proxy every request of the session is sent through
         """
         self._config = config
         self._api_key = api_key
@@ -127,6 +129,7 @@ class VeniceHTTPClient:
         self._skip_auto_headers = skip_auto_headers
         self._http_transport_options = http_transport_options or {}
         self._retry_options = retry_options
+        self._proxy = proxy
 
         # Session management
         self._session: aiohttp.ClientSession | None = None
@@ -179,7 +182,8 @@ class VeniceHTTPClient:
         # Create the connector with appropriate settings
         connector_kwargs: dict[str, Any] = {}
 
-        # Set high global limit and limit_per_host=0 to cede concurrency control to our scheduler
+        # High global limit and no per-host limit unless configured: every SDK
+        # request targets one host, so a per-host limit would be the real cap.
         if self._connector_limit is not None:
             connector_kwargs["limit"] = self._connector_limit
         else:
@@ -206,6 +210,9 @@ class VeniceHTTPClient:
             "connector": connector,
             "timeout": self._default_timeout,
         }
+
+        if self._proxy is not None:
+            session_kwargs["proxy"] = self._proxy
 
         # trust_env belongs to ClientSession, not TCPConnector
         if self._trust_env is not None:

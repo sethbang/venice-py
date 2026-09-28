@@ -17,17 +17,17 @@ class ModelCapabilities(BaseModel):
     """Text model capabilities.
 
     All capability fields are validated against live API responses.
-    API returns these fields: optimizedForCode, quantization, supportsAudioInput,
+    API returns these fields: defaultReasoningEffort, maxImages, maxVideos,
+    optimizedForCode, quantization, reasoningEffortOptions, supportsAudioInput,
     supportsE2EE, supportsFunctionCalling, supportsLogProbs, supportsMultipleImages,
     supportsReasoning, supportsReasoningEffort, supportsResponseSchema,
     supportsTeeAttestation, supportsVideoInput, supportsVision, supportsWebSearch,
     supportsXSearch.
 
     ``extra='allow'`` so live capability keys the SDK doesn't yet model (e.g.
-    ``maxImages`` on multi-image vision models, or any future ``supports*``
-    bool) land on ``model_extra`` and survive ``model_dump()`` instead of being
-    silently dropped — the outer ``ModelSpec`` allow-policy does not recurse
-    into this nested object.
+    any future ``supports*`` bool) land on ``model_extra`` and survive
+    ``model_dump()`` instead of being silently dropped — the outer
+    ``ModelSpec`` allow-policy does not recurse into this nested object.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -86,6 +86,20 @@ class ModelCapabilities(BaseModel):
         description=(
             "Default reasoning_effort value used when the request omits one. Only "
             "present when supportsReasoningEffort is true."
+        ),
+    )
+    maxImages: int | None = Field(
+        default=None,
+        description=(
+            "Maximum number of images supported per request. Only present when "
+            "supportsMultipleImages is true."
+        ),
+    )
+    maxVideos: int | None = Field(
+        default=None,
+        description=(
+            "Maximum number of video attachments supported per chat request. Only "
+            "present when supportsVideoInput is true."
         ),
     )
     supportsTeeAttestation: bool = Field(

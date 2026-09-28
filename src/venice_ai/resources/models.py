@@ -406,6 +406,10 @@ class Models(APIResource["VeniceClient"]):
                 supports_x_search=caps.supportsXSearch,
                 optimized_for_code=caps.optimizedForCode,
                 quantization=caps.quantization,
+                max_images=caps.maxImages,
+                max_videos=caps.maxVideos,
+                reasoning_effort_options=caps.reasoningEffortOptions,
+                default_reasoning_effort=caps.defaultReasoningEffort,
                 privacy=privacy,
             )
 
@@ -708,8 +712,11 @@ class Models(APIResource["VeniceClient"]):
 
             async with VeniceClient() as client:
                 model = await client.models.resolve_video_upscale()
-                quote = await client.video.quote_upscale(
-                    model=model, source_url=url, scale="2x"
+                quote = await client.video.quote(
+                    model=model,
+                    duration_seconds="Auto",
+                    video_url=url,
+                    upscale_factor=2,
                 )
         """
         videos = await self.list(type="video")

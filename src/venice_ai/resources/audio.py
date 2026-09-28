@@ -709,8 +709,10 @@ class Audio(APIResource["VeniceClient"]):
         # AAC ADTS sync – must be checked BEFORE the MP3 frame-sync test
         # because the ADTS pattern (0xFFF0) is a subset of the MP3 frame-sync
         # pattern (0xFFE0); any byte matching 0xF0 also matches 0xE0, so if the
-        # MP3 check came first the AAC branch would be unreachable.
-        if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xF0) == 0xF0:
+        # MP3 check came first the AAC branch would be unreachable. ADTS always
+        # carries layer bits ``00``, which is what separates it from an MPEG
+        # audio frame header (Layer III is ``01``: 0xFB, 0xF3, ...).
+        if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xF6) == 0xF0:
             return "audio.aac"
         # MP3 frame sync (various bitrate/layer combos)
         if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
@@ -736,8 +738,9 @@ class Audio(APIResource["VeniceClient"]):
         """Resolve an audio ``file`` input to ``(content, filename, content_type)``.
 
         Accepts a path (str/Path), raw bytes, ``io.BytesIO``, or any binary
-        file-like object. Content type is inferred from the filename extension,
-        defaulting to ``application/octet-stream``.
+        file-like object. Content type is inferred from the filename extension;
+        inputs without a name are named from their magic bytes first. Anything
+        unrecognised is sent as ``application/octet-stream``.
         """
         file_content: bytes
         filename: str = "audio"
@@ -750,9 +753,6 @@ class Audio(APIResource["VeniceClient"]):
             filename = file_path.name
         elif isinstance(file, bytes):
             file_content = file
-            # Detect format from magic bytes so the API receives a
-            # recognisable content-type even when no file path is given.
-            filename = self._detect_audio_filename(file_content)
         elif isinstance(file, io.BytesIO):
             file_content = file.read()
         elif hasattr(file, "read") and callable(file.read):
@@ -769,7 +769,13 @@ class Audio(APIResource["VeniceClient"]):
         else:
             raise TypeError(f"Unsupported file type: {type(file)}")
 
-        # Detect content type from file extension or magic bytes
+        if filename == "audio":
+            # No name to go by (raw bytes, BytesIO, a nameless file-like):
+            # detect the format from magic bytes so the API receives a
+            # recognisable content type.
+            filename = self._detect_audio_filename(file_content)
+
+        # Detect content type from the file extension
         content_type = "application/octet-stream"
         ext = Path(filename).suffix.lower()
         content_type_map = {

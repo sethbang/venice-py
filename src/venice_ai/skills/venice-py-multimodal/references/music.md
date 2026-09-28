@@ -33,7 +33,7 @@ async def make_track(prompt: str, out_path: Path, duration: int = 30) -> Path:
 | `client.music.run(...)` | `MusicJob` (lifecycle manager) | Default — 90% of cases |
 | `client.music.submit(...)` | `MusicQueueResponse` (`.model` / `.queue_id` / `.status`) | Producer/consumer split — submit now, retrieve later |
 | `client.music.retrieve(*, model=, queue_id=)` | `MusicRetrieveResponse` (status object) | Poll a queued job from its `model` + `queue_id` |
-| `client.music.cancel(*, model=, queue_id=)` | `MusicCompleteResponse` | Cancel by `model` + `queue_id` without entering a context manager |
+| `client.music.cancel(*, model=, queue_id=)` | `MusicCompleteResponse` | Release a job's stored media by `model` + `queue_id` without entering a context manager (does not stop generation) |
 | `client.music.quote(...)` | `MusicQuoteResponse` (`.quote`) | Pre-flight cost estimation |
 
 ## Parameters
@@ -95,24 +95,21 @@ async with VeniceClient() as client:
 
 `retrieve()` is keyword-only (`model=` + `queue_id=`) and returns a `MusicRetrieveResponse` status object — it does **not** rebuild a `MusicJob`. The file/URL state is server-side; poll `retrieve()` until the job reports complete.
 
-## Cancellation
+## Releasing storage (`cancel`)
 
-Two paths:
+`cancel()` wraps `POST /audio/complete`: it deletes the job's stored audio and queue entry (best effort). It does **not** stop a generation that is still running — that job keeps going on the server and is billed. Call it after downloading. Two paths:
 
 ```python
-# A. Inside the async with block — cancel before completion
+# A. The async with block calls cancel() on exit
 async with await client.music.run(...) as job:
-    try:
-        status = await job.wait(max_polls=12)
-    except asyncio.TimeoutError:
-        await job.cancel()
-        return
+    status = await job.wait()
+    await job.download(path, status)
 
 # B. By model + queue_id, no context manager (keyword-only)
 await client.music.cancel(model=stored_model, queue_id=stored_queue_id)
 ```
 
-The `async with` block also cancels automatically on exception / early exit.
+Leaving the `async with` block before the job reached a terminal status (e.g. a `wait()` timeout) logs a WARNING: the storage release happens, the generation does not stop.
 
 ## Common bugs
 

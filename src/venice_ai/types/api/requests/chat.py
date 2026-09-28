@@ -43,6 +43,8 @@ from .common import (
 class UserMessage(BaseModel):
     """User message for chat completions"""
 
+    model_config = ConfigDict(validate_assignment=True)
+
     role: Literal["user"] = "user"
     content: str | list[MessageContentPartParam] = Field(
         ..., description="Message content (text or mixed content)"
@@ -135,6 +137,8 @@ class UserMessageBuilder:
 class AssistantMessage(BaseModel):
     """Assistant message for chat completions"""
 
+    model_config = ConfigDict(validate_assignment=True)
+
     role: Literal["assistant"] = "assistant"
     content: str | list[TextContent] | None = None
     name: str | None = None
@@ -161,6 +165,8 @@ class AssistantMessage(BaseModel):
 class ToolMessage(BaseModel):
     """Tool message for chat completions"""
 
+    model_config = ConfigDict(validate_assignment=True)
+
     role: Literal["tool"] = "tool"
     content: str = Field(..., description="Tool response content")
     tool_call_id: str = Field(..., description="ID of the tool call")
@@ -171,6 +177,8 @@ class ToolMessage(BaseModel):
 
 class SystemMessage(BaseModel):
     """System message for chat completions"""
+
+    model_config = ConfigDict(validate_assignment=True)
 
     role: Literal["system"] = "system"
     content: str | list[TextContent] = Field(..., description="System message content")
@@ -184,6 +192,8 @@ class DeveloperMessage(BaseModel):
     system-level priming (notably OpenAI-compatible reasoning models). Accepted
     by Venice for models advertising developer-role support.
     """
+
+    model_config = ConfigDict(validate_assignment=True)
 
     role: Literal["developer"] = "developer"
     content: str | list[TextContent] = Field(..., description="Developer message content")

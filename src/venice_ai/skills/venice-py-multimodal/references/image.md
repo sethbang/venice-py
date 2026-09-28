@@ -151,7 +151,7 @@ Useful for compositing several reference images under one editing prompt.
 ```python
 image_bytes = await client.image.upscale(
     image=open("input.png", "rb"),           # no `model` param — upscale has its own backend
-    scale=2,                                  # 2 or 4 — 1 is rejected
+    scale=2,                                  # any value from 2 to 4; 1 is rejected
     creativity=0.01,                          # detail/texture added; server clamps to 0–0.02
     timeout=None,                             # float seconds | aiohttp.ClientTimeout — raise for large images
 )

@@ -15,6 +15,11 @@ class RedisBackendConfig(BaseModel):
 
     Enterprise feature: Required when ``BackendConfig.backend_type`` is ``REDIS``.
     ``redis_url`` has no default to prevent accidental localhost connections in production.
+
+    Redis is only contacted by the ADAPTIVE rate limiter, which receives
+    ``redis_url``, ``max_connections`` and ``cluster_mode``. A non-default
+    ``key_prefix`` is reported with a ``FutureWarning`` when that rate limiter
+    is built.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -30,13 +35,22 @@ class RedisBackendConfig(BaseModel):
     )
 
     # Key management
-    key_prefix: str = Field(default="venice:v2:", description="Prefix for all Redis keys")
+    key_prefix: str = Field(
+        default="venice:v2:",
+        deprecated=(
+            "the adaptive rate limiter's Redis backend names its keys itself and "
+            "does not apply a prefix; isolate deployments with separate Redis "
+            "databases or account IDs instead"
+        ),
+        description="Deprecated and ignored: Redis key names are not prefixed.",
+    )
     default_ttl: int = Field(default=3600, ge=0, description="Default TTL for keys in seconds")
 
     # Cluster mode
     cluster_mode: bool = Field(
         default=False,
-        description="Whether to use Redis Cluster client for cluster deployments",
+        description="Whether to use the Redis Cluster client. ``redis_url`` is then the "
+        "seed node used to discover the rest of the cluster.",
     )
 
     # Performance tuning

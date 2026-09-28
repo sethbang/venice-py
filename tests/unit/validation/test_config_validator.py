@@ -1,5 +1,7 @@
 """Tests for venice_ai.validation.config_validator module."""
 
+import pytest
+
 from venice_ai.core.config import (
     BackendConfig,
     BackendType,
@@ -115,24 +117,26 @@ class TestValidateConfig:
         result = validate_config(config)
         assert any("very long" in w.lower() for w in result.warnings)
 
-    def test_keepalive_exceeds_max_connections_errors(self):
+    def test_deprecated_keepalive_is_a_warning_not_an_error(self):
+        with pytest.warns(FutureWarning, match="max_keepalive_connections"):
+            http_client = HttpClientConfig(max_connections=10, max_keepalive_connections=5)
         config = _make_config(
             environment="production",
             debug=False,
-            http_client=HttpClientConfig(max_connections=10, max_keepalive_connections=20),
+            http_client=http_client,
             scheduler=SchedulerConfig(),
             backend=BackendConfig(),
             circuit_breaker=CircuitBreakerConfig(),
         )
         result = validate_config(config)
-        assert not result.is_valid
-        assert any("keepalive" in e.lower() for e in result.errors)
+        assert not any("keepalive" in e.lower() for e in result.errors)
+        assert any("max_keepalive_connections is deprecated" in w for w in result.warnings)
 
     def test_small_connection_pool_warns(self):
         config = _make_config(
             environment="production",
             debug=False,
-            http_client=HttpClientConfig(max_connections=5, max_keepalive_connections=2),
+            http_client=HttpClientConfig(max_connections=5),
             scheduler=SchedulerConfig(),
             backend=BackendConfig(),
             circuit_breaker=CircuitBreakerConfig(),
@@ -240,7 +244,7 @@ class TestValidateConfig:
         config = _make_config(
             environment="production",
             debug=False,
-            http_client=HttpClientConfig(max_connections=10, max_keepalive_connections=5),
+            http_client=HttpClientConfig(max_connections=10),
             scheduler=SchedulerConfig(max_concurrent_executions=20),
             backend=BackendConfig(),
             circuit_breaker=CircuitBreakerConfig(),
@@ -404,9 +408,7 @@ class TestConfigurationScore:
         config = _make_config(
             environment="production",
             debug=True,
-            http_client=HttpClientConfig(
-                timeout=2.0, max_connections=5, max_keepalive_connections=20
-            ),
+            http_client=HttpClientConfig(timeout=2.0, max_connections=5),
             scheduler=SchedulerConfig(enable_rate_limiting=False),
             backend=BackendConfig(),
             circuit_breaker=CircuitBreakerConfig(failure_threshold=1),
@@ -419,9 +421,7 @@ class TestConfigurationScore:
         config = _make_config(
             environment="production",
             debug=True,
-            http_client=HttpClientConfig(
-                timeout=1.0, max_connections=2, max_keepalive_connections=50
-            ),
+            http_client=HttpClientConfig(timeout=1.0, max_connections=2),
             scheduler=SchedulerConfig(
                 enable_rate_limiting=False,
                 max_concurrent_executions=1000,
@@ -431,6 +431,14 @@ class TestConfigurationScore:
         )
         score = get_configuration_score(config)
         assert score >= 0
+
+    def test_score_is_clamped_at_zero(self, monkeypatch):
+        from venice_ai.validation import config_validator
+
+        result = ConfigValidation(is_valid=False)
+        result.errors.extend(f"error {i}" for i in range(10))
+        monkeypatch.setattr(config_validator, "validate_config", lambda _config: result)
+        assert get_configuration_score(_make_config()) == 0
 
 
 class TestPrintValidationReport:

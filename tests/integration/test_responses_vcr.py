@@ -16,7 +16,11 @@ import pytest_asyncio
 from venice_ai import VeniceClient, create_test_venice_client
 from venice_ai.core.config import SchedulerMode
 from venice_ai.exceptions import APIError
-from venice_ai.types.api import ResponsesResponse, ResponsesStreamEvent
+from venice_ai.types.api import (
+    KNOWN_RESPONSE_STATUSES,
+    ResponsesResponse,
+    ResponsesStreamEvent,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.vcr]
 
@@ -88,7 +92,9 @@ async def test_responses_create_basic(venice_client, vcr_cassette):
         assert isinstance(result, ResponsesResponse)
         assert result.id
         assert result.object == "response"
-        assert result.status in ("completed", "in_progress", "failed", "cancelled")
+        assert result.status in KNOWN_RESPONSE_STATUSES
+        if result.status == "incomplete":
+            assert result.incomplete_details is not None
         assert isinstance(result.output, list)
 
 

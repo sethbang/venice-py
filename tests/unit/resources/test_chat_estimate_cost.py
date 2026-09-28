@@ -134,8 +134,10 @@ class TestEstimateCost:
             model=_FAKE_CHAT_MODEL,
             messages=[UserMessage(content="one two three four five")],
             expected_completion_tokens=200,
+            venice_parameters={"include_venice_system_prompt": False},
         )
         assert result.prompt_tokens == 6
+        assert result.venice_system_prompt_tokens == 0
         assert result.expected_completion_tokens == 200
 
     @pytest.mark.asyncio
@@ -152,6 +154,7 @@ class TestEstimateCost:
             model=_FAKE_CHAT_MODEL,
             messages=[UserMessage(content=prompt)],
             expected_completion_tokens=500,
+            venice_parameters={"include_venice_system_prompt": False},
         )
         # 1001 / 1_000_000 * 3.0 = 0.003003
         assert result.prompt_cost_usd == Decimal("0.003003")
@@ -169,6 +172,7 @@ class TestEstimateCost:
             model=_FAKE_CHAT_MODEL,
             messages=[UserMessage(content="a b c d e")],  # 5 words
             tokens_per_word=2.0,
+            venice_parameters={"include_venice_system_prompt": False},
         )
         assert result.prompt_tokens == 10  # 5 * 2.0
 

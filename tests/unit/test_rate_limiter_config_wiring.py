@@ -309,3 +309,76 @@ def test_every_scheduler_config_field_has_a_runtime_consumer() -> None:
     assert orphans == [], (
         f"SchedulerConfig fields with no consumer and no deprecation marker: {orphans}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Warning hygiene and deprecations
+# ---------------------------------------------------------------------------
+
+
+def test_test_client_emits_no_inert_config_warning() -> None:
+    """``create_test_client()`` pairs a Redis backend and a tuned scheduler with
+    the SIMPLE limiter by design; building it stays silent."""
+    with _record_warnings() as caught, patch.dict(os.environ, {}, clear=True):
+        VeniceClientFactory.create_test_client()
+    assert _redis_warnings(caught) == []
+    assert _scheduler_warnings(caught) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("strategy", "priority"),
+        ("enable_request_batching", True),
+        ("model_fallbacks", {"a": "b"}),
+        ("enable_model_discovery", False),
+    ],
+)
+def test_orphaned_scheduler_fields_warn_when_set(name: str, value: Any) -> None:
+    with pytest.warns(FutureWarning, match=f"SchedulerConfig.{name} is deprecated"):
+        SchedulerConfig(**{name: value})
+
+
+def test_default_scheduler_config_does_not_warn() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        SchedulerConfig()
+
+
+def test_default_key_prefix_is_not_reported() -> None:
+    config = _adaptive_config(
+        backend=BackendConfig(
+            backend_type=BackendType.REDIS, redis=RedisBackendConfig(redis_url=_DEAD_REDIS_URL)
+        )
+    )
+    with _record_warnings() as caught, _adaptive_capture(real_backend=False):
+        VeniceClientFactory._create_rate_limiter(config, MagicMock(), account_id="acct")
+    assert [str(w.message) for w in caught if "key_prefix" in str(w.message)] == []
+
+
+def test_cluster_mode_uses_redis_url_as_the_cluster_seed() -> None:
+    redis_cfg = RedisBackendConfig(redis_url=_DEAD_REDIS_URL, cluster_mode=True)
+    config = _adaptive_config(
+        backend=BackendConfig(backend_type=BackendType.REDIS, redis=redis_cfg)
+    )
+    config.rate_limiter.redis_url = None
+
+    with (
+        patch.dict(os.environ, {"REDIS_CLUSTER_URL": "redis://elsewhere.invalid:7000"}),
+        _adaptive_capture(real_backend=True) as captured,
+    ):
+        VeniceClientFactory._create_rate_limiter(config, MagicMock(), account_id="acct")
+
+    assert captured["backend"].cluster_mode is True
+    assert captured["backend"].cluster_url == _DEAD_REDIS_URL
+
+
+def test_adaptive_scheduler_ignores_scheduler_mode() -> None:
+    from adaptive_rate_limiter.scheduler import SchedulerMode as UpstreamSchedulerMode
+
+    from venice_ai.core.config import SchedulerMode
+
+    config = _adaptive_config(scheduler=SchedulerConfig(mode=SchedulerMode.BASIC))
+    with _adaptive_capture(real_backend=False) as captured:
+        VeniceClientFactory._create_rate_limiter(config, MagicMock(), account_id="acct")
+    assert captured["scheduler_config"].mode == UpstreamSchedulerMode.INTELLIGENT
