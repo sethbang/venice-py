@@ -14,10 +14,10 @@ from pydantic import BaseModel, Field, field_validator
 class ConsumptionLimits(BaseModel):
     """API key consumption limits"""
 
-    usd: float | None = Field(None, description="USD limit")
-    diem: float | None = Field(None, description="Diem limit")
+    usd: float | None = Field(default=None, description="USD limit")
+    diem: float | None = Field(default=None, description="Diem limit")
     vcu: float | None = Field(
-        None,
+        default=None,
         description=(
             "VCU (legacy Diem) limit — deprecated; use ``diem`` instead. "
             "Still accepted by the API for backwards compatibility."
@@ -31,7 +31,7 @@ class TrailingSevenDaysUsage(BaseModel):
     usd: str = Field(..., description="USD usage in the trailing 7 days")
     diem: str = Field(..., description="Diem usage in the trailing 7 days")
     vcu: str | None = Field(
-        None,
+        default=None,
         description=(
             "VCU (legacy Diem) usage in the trailing 7 days. Present on the wire "
             "for backwards compatibility; prefer ``diem``."
@@ -50,9 +50,11 @@ class TrailingSevenDaysUsage(BaseModel):
 class CurrentPeriodUsage(BaseModel):
     """Usage accrued in the current limit period (per ``limitPeriod``)."""
 
-    usd: str | None = Field(None, description="USD usage in the current period")
-    diem: str | None = Field(None, description="Diem usage in the current period")
-    vcu: str | None = Field(None, description="VCU (legacy Diem) usage in the current period")
+    usd: str | None = Field(default=None, description="USD usage in the current period")
+    diem: str | None = Field(default=None, description="Diem usage in the current period")
+    vcu: str | None = Field(
+        default=None, description="VCU (legacy Diem) usage in the current period"
+    )
 
     @field_validator("usd", "diem", "vcu", mode="before")
     @classmethod
@@ -78,11 +80,11 @@ class ApiKey(BaseModel):
     apiKeyType: Literal["INFERENCE", "ADMIN"] = Field(..., description="API Key type")
     description: str = Field(..., description="API Key description")
     last6Chars: str = Field(..., description="Last 6 characters of the API Key")
-    createdAt: str | None = Field(None, description="API Key creation date")
-    expiresAt: str | None = Field(None, description="API Key expiration date")
-    lastUsedAt: str | None = Field(None, description="API Key last used date")
+    createdAt: str | None = Field(default=None, description="API Key creation date")
+    expiresAt: str | None = Field(default=None, description="API Key expiration date")
+    lastUsedAt: str | None = Field(default=None, description="API Key last used date")
     consumptionLimits: ConsumptionLimits | None = Field(
-        None,
+        default=None,
         description=(
             "API Key consumption limits. Optional — the docs list this as a "
             "non-required response field."
@@ -99,15 +101,15 @@ class ApiKey(BaseModel):
         ),
     )
     limitPeriod: Literal["EPOCH", "MONTH", "LIFETIME"] | None = Field(
-        None,
+        default=None,
         description=(
             "Period over which the consumption limit resets. One of "
             "``EPOCH``, ``MONTH``, or ``LIFETIME``."
         ),
     )
-    usage: ApiKeyUsage | None = Field(None, description="Usage statistics")
+    usage: ApiKeyUsage | None = Field(default=None, description="Usage statistics")
     currentPeriodUsage: CurrentPeriodUsage | None = Field(
-        None, description="Usage accrued in the current limit period"
+        default=None, description="Usage accrued in the current limit period"
     )
 
 
@@ -125,10 +127,10 @@ class CreatedApiKey(BaseModel):
     apiKey: str = Field(..., description="The full API key - save immediately!")
     apiKeyType: Literal["INFERENCE", "ADMIN"] = Field(..., description="The API Key type")
     description: str = Field(..., description="The API Key description")
-    expiresAt: str | None = Field(None, description="The API Key expiration date")
+    expiresAt: str | None = Field(default=None, description="The API Key expiration date")
     consumptionLimit: ConsumptionLimits = Field(..., description="The API Key consumption limits")
     limitPeriod: Literal["EPOCH", "MONTH", "LIFETIME"] | None = Field(
-        None, description="The consumption-limit period (EPOCH/MONTH/LIFETIME)."
+        default=None, description="The consumption-limit period (EPOCH/MONTH/LIFETIME)."
     )
 
 
@@ -170,7 +172,7 @@ class RateLimit(BaseModel):
 class ModelRateLimit(BaseModel):
     """Rate limits for a specific model"""
 
-    apiModelId: str | None = Field(None, description="The ID of the API model")
+    apiModelId: str | None = Field(default=None, description="The ID of the API model")
     rateLimits: list[RateLimit] = Field(..., description="Rate limit rules for this model")
 
 
@@ -190,8 +192,15 @@ class RateLimitsData(BaseModel):
 
     accessPermitted: bool = Field(..., description="Whether API key has access to inference APIs")
     apiTier: ApiTier = Field(..., description="API tier information")
-    balances: Balances = Field(..., description="Account balances")
-    keyExpiration: str | None = Field(None, description="API key expiration timestamp")
+    balances: Balances = Field(
+        ...,
+        description=(
+            "What this API key can still spend: the lesser of the account balance "
+            "and the key's remaining consumption limit. Not the account balance "
+            "(see billing.get_balance())"
+        ),
+    )
+    keyExpiration: str | None = Field(default=None, description="API key expiration timestamp")
     nextEpochBegins: str = Field(..., description="When the next epoch begins")
     rateLimits: list[ModelRateLimit] = Field(..., description="Rate limits for each model")
 

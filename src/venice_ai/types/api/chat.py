@@ -154,9 +154,9 @@ class LogProbToken(BaseModel):
 
     token: str = Field(..., description="The token string")
     logprob: float = Field(..., description="The log probability of this token")
-    bytes: list[int] | None = Field(None, description="Raw bytes of the token")
+    bytes: list[int] | None = Field(default=None, description="Raw bytes of the token")
     top_logprobs: list["LogProbToken"] | None = Field(
-        None, description="Top tokens considered with their log probabilities"
+        default=None, description="Top tokens considered with their log probabilities"
     )
 
 
@@ -203,7 +203,7 @@ class ChatChoice(BaseModel):
     confidence in token selections.
     """
 
-    stop_reason: str | None = Field(None, description="The reason the completion stopped")
+    stop_reason: str | None = Field(default=None, description="The reason the completion stopped")
 
     @field_validator("stop_reason", mode="before")
     @classmethod
@@ -222,7 +222,7 @@ class ChatUsage(BaseModel):
     completion_tokens: int = Field(..., description="The number of tokens in the completion")
     total_tokens: int = Field(..., description="The total number of tokens used")
     prompt_tokens_details: PromptTokensDetails | None = Field(
-        None, description="Breakdown of tokens used in the prompt"
+        default=None, description="Breakdown of tokens used in the prompt"
     )
     completion_tokens_details: CompletionTokensDetails | None = Field(
         default=None,
@@ -250,6 +250,35 @@ class ChatUsage(BaseModel):
         ),
     )
 
+    @property
+    def cached_tokens(self) -> int:
+        """Prompt tokens served from the prompt cache (cache read), ``0`` if none.
+
+        Reads ``prompt_tokens_details.cached_tokens``, falling back to the
+        top-level ``cache_read_input_tokens`` mirror. The two carry the same
+        count when both are sent, so they are never added together. Venice
+        omits the breakdown entirely on some models when nothing was cached;
+        that reads as ``0``, not as "this model does not cache".
+        """
+        details = self.prompt_tokens_details
+        nested = details.cached_tokens if details is not None else None
+        if nested is not None:
+            return nested
+        return self.cache_read_input_tokens or 0
+
+    @property
+    def cache_write_tokens(self) -> int:
+        """Prompt tokens written to the prompt cache (cache write), ``0`` if none.
+
+        Reads ``prompt_tokens_details.cache_creation_input_tokens``, falling
+        back to the top-level ``cache_creation_input_tokens`` mirror.
+        """
+        details = self.prompt_tokens_details
+        nested = details.cache_creation_input_tokens if details is not None else None
+        if nested is not None:
+            return nested
+        return self.cache_creation_input_tokens or 0
+
     def __str__(self) -> str:
         """Concise human-readable summary, suitable for logs and notebooks.
 
@@ -258,13 +287,14 @@ class ChatUsage(BaseModel):
             >>> str(response.usage)
             'prompt: 1234 / completion: 567 / total: 1801'
 
-            >>> # with cache hits and reasoning tokens
-            'prompt: 1234 (cache: 1100) / completion: 567 (reasoning: 200) / total: 1801'
+            >>> # with cache reads and reasoning tokens
+            'prompt: 1234 (cache read: 1100, write: 0) / completion: 567 (reasoning: 200) / total: 1801'
         """
         parts: list[str] = []
         prompt = f"prompt: {self.prompt_tokens}"
-        if self.cache_read_input_tokens:
-            prompt += f" (cache: {self.cache_read_input_tokens})"
+        cached, written = self.cached_tokens, self.cache_write_tokens
+        if cached or written:
+            prompt += f" (cache read: {cached}, write: {written})"
         parts.append(prompt)
 
         completion = f"completion: {self.completion_tokens}"
@@ -292,8 +322,12 @@ class ChatCost(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    diem: float | None = Field(None, description="DIEM-denominated portion of the request cost")
-    usd: float | None = Field(None, description="USD-denominated portion of the request cost")
+    diem: float | None = Field(
+        default=None, description="DIEM-denominated portion of the request cost"
+    )
+    usd: float | None = Field(
+        default=None, description="USD-denominated portion of the request cost"
+    )
 
 
 class ChatCompletionResponse(VeniceBaseModel):
@@ -317,27 +351,29 @@ class ChatCompletionResponse(VeniceBaseModel):
         ),
     )
     usage: ChatUsage | None = Field(
-        None,
+        default=None,
         description=(
             "Token usage information. Always populated for non-streaming responses; "
             "may be ``None`` on assembled-from-stream responses when no usage chunk arrived."
         ),
     )
     prompt_logprobs: dict[str, Any] | None = Field(
-        None, description="Log probability information for the prompt"
+        default=None, description="Log probability information for the prompt"
     )
     venice_parameters: VeniceParametersResponse | None = Field(
-        None, description="Venice-specific parameters"
+        default=None, description="Venice-specific parameters"
     )
     # Additional fields that may be present in responses
-    service_tier: str | None = Field(None, description="Service tier used for the request")
+    service_tier: str | None = Field(default=None, description="Service tier used for the request")
     system_fingerprint: str | None = Field(
-        None, description="System fingerprint for the completion"
+        default=None, description="System fingerprint for the completion"
     )
     kv_transfer_params: dict[str, Any] | None = Field(
-        None, description="Key-value transfer parameters"
+        default=None, description="Key-value transfer parameters"
     )
-    cost: ChatCost | None = Field(None, description="Request cost split by billing currency")
+    cost: ChatCost | None = Field(
+        default=None, description="Request cost split by billing currency"
+    )
 
     # ── Content accessors ─────────────────────────────────────────────
 

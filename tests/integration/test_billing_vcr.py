@@ -21,6 +21,7 @@ import pytest_asyncio
 from venice_ai import create_test_venice_client
 from venice_ai.core.config import SchedulerMode
 from venice_ai.exceptions import BillingTimeoutError
+from venice_ai.types.api.billing import BillingUsageHistoryCsvPage
 from venice_ai.types.enums import BillingFormatEnum
 
 
@@ -72,12 +73,12 @@ async def test_billing_get_usage_history_json_structure(vcr_cassette, venice_cli
 
 @pytest.mark.integration
 async def test_billing_get_usage_history_csv_format(vcr_cassette, venice_client):
-    """Usage-history retrieval in CSV format returns bytes."""
+    """Usage-history retrieval in CSV format returns a typed CSV page."""
     with vcr_cassette:
-        csv_data = await venice_client.billing.get_usage_history(format=BillingFormatEnum.CSV)
+        page = await venice_client.billing.get_usage_history(format=BillingFormatEnum.CSV)
 
-    assert isinstance(csv_data, bytes)
-    csv_text = csv_data.decode("utf-8")
+    assert isinstance(page, BillingUsageHistoryCsvPage)
+    csv_text = page.text
     assert "timestamp" in csv_text.lower() or "sku" in csv_text.lower()
 
 

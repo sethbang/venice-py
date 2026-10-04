@@ -85,6 +85,8 @@ class Paginator[T]:
                     return
                 yield item
                 yielded += 1
-            if not page.has_more:
+            # A cap reached on a page boundary ends the walk without fetching
+            # a page whose items would all be discarded.
+            if not page.has_more or (self._max_items is not None and yielded >= self._max_items):
                 return
             page_index += 1

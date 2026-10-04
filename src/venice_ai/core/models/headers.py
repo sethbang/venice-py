@@ -38,19 +38,29 @@ class PaginationInfo(VeniceBaseModel):
 class RateLimitInfo(VeniceBaseModel):
     """Rate limit information from headers."""
 
-    limit_requests: int | None = Field(None, description="Total requests allowed in current window")
-    remaining_requests: int | None = Field(None, description="Requests remaining in current window")
-    reset_requests: datetime | None = Field(None, description="When request limits reset")
-    limit_tokens: int | None = Field(None, description="Total tokens allowed in current window")
-    remaining_tokens: int | None = Field(None, description="Tokens remaining in current window")
+    limit_requests: int | None = Field(
+        default=None, description="Total requests allowed in current window"
+    )
+    remaining_requests: int | None = Field(
+        default=None, description="Requests remaining in current window"
+    )
+    reset_requests: datetime | None = Field(default=None, description="When request limits reset")
+    limit_tokens: int | None = Field(
+        default=None, description="Total tokens allowed in current window"
+    )
+    remaining_tokens: int | None = Field(
+        default=None, description="Tokens remaining in current window"
+    )
     reset_tokens: float | None = Field(
-        None,
+        default=None,
         description=(
             "Absolute Unix timestamp (seconds) when the token rate limit resets "
             "(normalized from the ms-epoch x-ratelimit-reset-tokens header)."
         ),
     )
-    type: str | None = Field(None, description="Rate limit type: 'user', 'api_key', or 'global'")
+    type: str | None = Field(
+        default=None, description="Rate limit type: 'user', 'api_key', or 'global'"
+    )
 
 
 # ============================================================================
@@ -61,8 +71,8 @@ class RateLimitInfo(VeniceBaseModel):
 class DeprecationInfo(VeniceBaseModel):
     """Model deprecation information from response headers."""
 
-    warning: str | None = Field(None, description="Deprecation warning message")
-    date: datetime | None = Field(None, description="Date when model will be deprecated")
+    warning: str | None = Field(default=None, description="Deprecation warning message")
+    date: datetime | None = Field(default=None, description="Date when model will be deprecated")
 
     @property
     def is_deprecated(self) -> bool:
@@ -76,10 +86,32 @@ class DeprecationInfo(VeniceBaseModel):
 
 
 class BalanceInfo(VeniceBaseModel):
-    """Account balance information from response headers."""
+    """Spendable balance of the calling API key, from response headers.
 
-    diem: float | None = Field(None, description="Account DIEM balance")
-    usd: float | None = Field(None, description="Account USD balance")
+    Read from ``x-venice-balance-usd`` and ``x-venice-balance-diem``, which
+    report the value before the request was processed. Like ``balances`` on
+    ``GET /api_keys/rate_limits``, this is what the key can still spend: the
+    lesser of the account's balance and what remains under the key's
+    consumption limit. It is not the account balance; for that use
+    ``client.billing.get_balance()``.
+    """
+
+    diem: float | None = Field(
+        default=None,
+        description=(
+            "DIEM the calling key could spend in the current epoch before this "
+            "request (1 DIEM is $1 of the staking allowance). ``None`` when the "
+            "header is absent. Whether it is capped by the key's DIEM consumption "
+            "limit has not been verified"
+        ),
+    )
+    usd: float | None = Field(
+        default=None,
+        description=(
+            "USD the calling key could spend before this request: the lesser of "
+            "the account's USD balance and the key's remaining consumption limit"
+        ),
+    )
 
 
 # ============================================================================

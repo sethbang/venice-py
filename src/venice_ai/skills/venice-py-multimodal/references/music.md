@@ -12,10 +12,11 @@ from venice_ai import VeniceClient
 
 async def make_track(prompt: str, out_path: Path, duration: int = 30) -> Path:
     async with VeniceClient() as client:
+        pick = await client.models.resolve_cheapest_music(duration_seconds=duration)
         async with await client.music.run(            # NOTE: `await` BEFORE `async with`
-            model=await client.models.resolve_music(),
+            model=pick.model,
             prompt=prompt,
-            duration_seconds=duration,
+            **pick.request_params,                    # the duration the model was quoted at
         ) as job:
             status = await job.wait(
                 on_progress=lambda s: print(f"\r{s.progress_percent:.0f}%", end=""),
@@ -26,6 +27,8 @@ async def make_track(prompt: str, out_path: Path, duration: int = 30) -> Path:
 
 `client.music.run(...)` is `async def` returning `MusicJob`. The form is `async with await client.music.run(...) as job:`.
 
+`resolve_cheapest_music()` quotes every generator at a request that fits the length you ask for and returns `request_params` to submit with. Models differ: some take any length in a range, some only fixed options (ace-step makes 60-second clips at minimum), and some (minimax, lyria) take no `duration_seconds` at all and choose the length themselves (`pick.effective_seconds is None`). Sending `duration_seconds` to one of those raises `ValueError` before the request. Name the file from `status.audio_format` (`"flac"`, `"mp3"`, `"wav"`, `"m4a"`).
+
 ## Methods
 
 | Method | Returns | Use when |
@@ -33,7 +36,7 @@ async def make_track(prompt: str, out_path: Path, duration: int = 30) -> Path:
 | `client.music.run(...)` | `MusicJob` (lifecycle manager) | Default — 90% of cases |
 | `client.music.submit(...)` | `MusicQueueResponse` (`.model` / `.queue_id` / `.status`) | Producer/consumer split — submit now, retrieve later |
 | `client.music.retrieve(*, model=, queue_id=)` | `MusicRetrieveResponse` (status object) | Poll a queued job from its `model` + `queue_id` |
-| `client.music.cancel(*, model=, queue_id=)` | `MusicCompleteResponse` | Release a job's stored media by `model` + `queue_id` without entering a context manager (does not stop generation) |
+| `client.music.release(*, model=, queue_id=)` | `MusicCompleteResponse` | Delete a finished job's stored media by `model` + `queue_id` without a context manager (does not stop generation) |
 | `client.music.quote(...)` | `MusicQuoteResponse` (`.quote`) | Pre-flight cost estimation |
 
 ## Parameters
@@ -95,21 +98,21 @@ async with VeniceClient() as client:
 
 `retrieve()` is keyword-only (`model=` + `queue_id=`) and returns a `MusicRetrieveResponse` status object — it does **not** rebuild a `MusicJob`. The file/URL state is server-side; poll `retrieve()` until the job reports complete.
 
-## Releasing storage (`cancel`)
+## Releasing storage (`release`)
 
-`cancel()` wraps `POST /audio/complete`: it deletes the job's stored audio and queue entry (best effort). It does **not** stop a generation that is still running — that job keeps going on the server and is billed. Call it after downloading. Two paths:
+`release()` wraps `POST /audio/complete`: it deletes the job's stored audio and queue entry. It does **not** stop or un-bill a job — billing happens when the job is queued, and a job still generating stores its audio when it finishes. Call it after downloading. Two paths:
 
 ```python
-# A. The async with block calls cancel() on exit
+# A. The async with block releases a finished job on exit
 async with await client.music.run(...) as job:
     status = await job.wait()
     await job.download(path, status)
 
 # B. By model + queue_id, no context manager (keyword-only)
-await client.music.cancel(model=stored_model, queue_id=stored_queue_id)
+await client.music.release(model=stored_model, queue_id=stored_queue_id)
 ```
 
-Leaving the `async with` block before the job reached a terminal status (e.g. a `wait()` timeout) logs a WARNING: the storage release happens, the generation does not stop.
+Leaving the `async with` block with an exception (a failed download, a disk error, a `wait()` timeout) releases nothing: the WARNING names the `queue_id`, and `client.music.retrieve(model=..., queue_id=...)` gets the audio back until you `release()` it. Leaving it cleanly before the job finished polls once more; if the job is still generating it is left alone and a WARNING names the `queue_id`. Call `wait()` again, download, then `release()`. Venice answers `success: true` even for an id that was already released; `success: false` means the cleanup did not complete and is logged. After a release, `retrieve()` raises `NotFoundError` ("Media could not be found").
 
 ## Common bugs
 
@@ -118,6 +121,8 @@ Leaving the `async with` block before the job reached a terminal status (e.g. a 
 - **Relying on the default `max_polls=120`** — for longer tracks raise it explicitly via `wait(max_polls=N, poll_interval=...)`.
 - **Treating a `MusicJob` like a `VideoJob`** — same shape, different class. Don't try to interchange instances.
 - **Skipping `client.music.quote()` for long tracks** — surprise costs.
+- **Sending `duration_seconds` to a model that chooses its own length** — raises `ValueError`. Build the request with `resolve_cheapest_music()` or `venice_ai.music_request_params(spec, seconds)`.
+- **Trusting `progress_percent`** — it is elapsed time over the model's typical run time, capped at 100. A slow job sits at 100% while still processing.
 
 ## Related references
 

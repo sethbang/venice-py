@@ -56,15 +56,15 @@ from .metrics import CacheStats, SchedulerMetrics, TimingInfo, UsageInfo  # noqa
 class PaginationParams(VeniceBaseModel):
     """Generic pagination parameters for requests."""
 
-    page: int | None = Field(1, ge=1, description="Page number")
-    limit: int | None = Field(50, ge=1, le=500, description="Items per page")
+    page: int | None = Field(default=1, ge=1, description="Page number")
+    limit: int | None = Field(default=50, ge=1, le=500, description="Items per page")
 
 
 class DateRangeParams(VeniceBaseModel):
     """Date range filtering parameters."""
 
-    start_date: datetime | None = Field(None, description="Start date")
-    end_date: datetime | None = Field(None, description="End date")
+    start_date: datetime | None = Field(default=None, description="Start date")
+    end_date: datetime | None = Field(default=None, description="End date")
 
     @field_validator("end_date")
     @classmethod
@@ -83,12 +83,25 @@ class DateRangeParams(VeniceBaseModel):
 class ConsumptionLimit(VeniceBaseModel):
     """Consumption limit specification for API keys and billing."""
 
-    usd: float | None = Field(None, ge=0, description="USD limit")
-    diem: float | None = Field(None, ge=0, description="Diem limit")
+    usd: float | None = Field(default=None, ge=0, description="USD limit")
+    diem: float | None = Field(default=None, ge=0, description="Diem limit")
 
 
 class Balances(VeniceBaseModel):
-    """Account balances."""
+    """What the calling API key can still spend, per currency.
+
+    Returned as ``balances`` by ``GET /api_keys/rate_limits``. This is not the
+    account balance: ``USD`` is the lesser of the account's USD balance and
+    what remains under this key's consumption limit, so a key with a $1
+    limit reports at most 1 USD however much the account holds. For the
+    account's own balance use ``client.billing.get_balance()``.
+
+    ``DIEM`` is the staking allowance, not a token balance: each staked DIEM
+    grants $1 of credit per epoch, the allowance resets at 00:00 UTC, and
+    unused DIEM does not roll over. Venice spends DIEM first, then bundled
+    credits, then USD. Other currencies the server reports, such as
+    ``BUNDLED_CREDITS``, land on ``model_extra``.
+    """
 
     # swagger marks USD/DIEM optional with no additionalProperties:false; allow a
     # future server-side currency to land on model_extra instead of crashing.
@@ -98,8 +111,22 @@ class Balances(VeniceBaseModel):
     # swagger (which declares no required array on the balances sub-object). Live
     # wire confirms both are always returned, so requiring them buys type-safety
     # without practical risk of a missing-key parse failure.
-    USD: float = Field(..., description="USD balance")
-    DIEM: float = Field(..., description="Diem balance")
+    USD: float = Field(
+        ...,
+        description=(
+            "USD this key can still spend: the lesser of the account's USD balance "
+            "and the key's remaining USD consumption limit"
+        ),
+    )
+    DIEM: float = Field(
+        ...,
+        description=(
+            "DIEM this key can still spend in the current epoch, where 1 DIEM is "
+            "$1 of credit. ``0`` for an account that stakes no DIEM. Whether it is "
+            "capped by the key's DIEM consumption limit the way ``USD`` is capped "
+            "by its USD limit has not been verified"
+        ),
+    )
 
 
 # ============================================================================
@@ -486,11 +513,15 @@ class VeniceParametersResponse(VeniceBaseModel):
     web_search_citations: list[WebSearchCitation] = Field(
         default_factory=list, description="Citations from web search"
     )
-    character_slug: str | None = Field(None, description="Character slug used")
+    character_slug: str | None = Field(default=None, description="Character slug used")
     strip_thinking_response: bool = Field(..., description="Whether thinking response was stripped")
     disable_thinking: bool = Field(..., description="Whether thinking was disabled")
-    enable_e2ee: bool = Field(False, description="Whether end-to-end encryption was enabled")
-    enable_x_search: bool = Field(False, description="Whether X (Twitter) search was enabled")
+    enable_e2ee: bool = Field(
+        default=False, description="Whether end-to-end encryption was enabled"
+    )
+    enable_x_search: bool = Field(
+        default=False, description="Whether X (Twitter) search was enabled"
+    )
 
 
 # ============================================================================
@@ -534,10 +565,10 @@ class HealthCheckResult(VeniceBaseModel):
 
     healthy: bool = Field(..., description="Overall health status")
     status: str = Field(..., description="Status description")
-    checks: dict[str, bool] | None = Field(None, description="Individual component checks")
-    timestamp: str | None = Field(None, description="Check timestamp")
-    uptime: float | None = Field(None, description="Service uptime in seconds")
-    version: str | None = Field(None, description="Service version")
+    checks: dict[str, bool] | None = Field(default=None, description="Individual component checks")
+    timestamp: str | None = Field(default=None, description="Check timestamp")
+    uptime: float | None = Field(default=None, description="Service uptime in seconds")
+    version: str | None = Field(default=None, description="Service version")
 
 
 class RequestEcho(VeniceBaseModel):
@@ -545,11 +576,11 @@ class RequestEcho(VeniceBaseModel):
 
     model_config = ConfigDict(extra="allow")  # Allow echoing arbitrary request parameters
 
-    model: str | None = Field(None, description="Model used")
-    prompt: str | None = Field(None, description="Original prompt")
-    temperature: float | None = Field(None, description="Temperature setting")
+    model: str | None = Field(default=None, description="Model used")
+    prompt: str | None = Field(default=None, description="Original prompt")
+    temperature: float | None = Field(default=None, description="Temperature setting")
     max_completion_tokens: int | None = Field(
-        None,
+        default=None,
         description=(
             "Echoed max completion tokens setting. On reasoning models this caps "
             "total completion tokens (visible output + reasoning)."

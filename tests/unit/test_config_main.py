@@ -33,16 +33,20 @@ class TestVeniceAIConfigValidators:
         assert config.environment == "production"
 
     def test_api_base_url_missing_protocol(self):
-        with pytest.raises(ValidationError, match="must start with http"):
+        with pytest.raises(ValidationError, match="absolute http:// or https:// URL"):
             VeniceAIConfig(api_base_url="api.venice.ai")
 
     def test_api_base_url_trailing_slash_stripped(self):
         config = VeniceAIConfig(api_base_url="https://api.venice.ai/")
         assert not config.api_base_url.endswith("/")
 
-    def test_api_base_url_valid(self):
+    def test_api_base_url_bare_host_becomes_the_api_root(self):
         config = VeniceAIConfig(api_base_url="https://api.venice.ai")
-        assert config.api_base_url == "https://api.venice.ai"
+        assert config.api_base_url == "https://api.venice.ai/api/v1"
+
+    def test_api_base_url_api_root_is_kept(self):
+        config = VeniceAIConfig(api_base_url="https://api.venice.ai/api/v1/")
+        assert config.api_base_url == "https://api.venice.ai/api/v1"
 
 
 class TestVeniceAIConfigMethods:

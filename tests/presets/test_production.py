@@ -25,7 +25,11 @@ class TestCreateProductionConfigEnvFallback:
 
     def test_redis_url_from_env_variable(self):
         """Test that redis_url is read from VENICE_REDIS_URL when not provided."""
-        with patch.dict(os.environ, {"VENICE_REDIS_URL": "redis://env-redis:6379"}):
+        with patch.dict(
+            os.environ,
+            _env_without_redis_urls(VENICE_REDIS_URL="redis://env-redis:6379"),
+            clear=True,
+        ):
             config = create_production_config()
 
             assert config.backend.redis is not None
@@ -39,6 +43,7 @@ class TestCreateProductionConfigEnvFallback:
             # Also need to clear the specific var if it exists
             env = os.environ.copy()
             env.pop("VENICE_REDIS_URL", None)
+            env.pop("VENICE_BACKEND__REDIS__REDIS_URL", None)
             with patch.dict(os.environ, env, clear=True):
                 with pytest.raises(ValueError) as exc_info:
                     create_production_config(redis_url=None)
@@ -48,7 +53,11 @@ class TestCreateProductionConfigEnvFallback:
 
     def test_explicit_redis_url_overrides_env(self):
         """Test that explicit redis_url parameter takes precedence over env."""
-        with patch.dict(os.environ, {"VENICE_REDIS_URL": "redis://env-redis:6379"}):
+        with patch.dict(
+            os.environ,
+            _env_without_redis_urls(VENICE_REDIS_URL="redis://env-redis:6379"),
+            clear=True,
+        ):
             config = create_production_config(redis_url="redis://explicit-redis:6379")
 
             assert config.backend.redis is not None
@@ -105,7 +114,11 @@ class TestCreateProductionConfigLocalhostValidation:
 
     def test_env_var_with_localhost_rejected(self):
         """Test that localhost from env var is also rejected (line 96 from env path)."""
-        with patch.dict(os.environ, {"VENICE_REDIS_URL": "redis://localhost:6379"}):
+        with patch.dict(
+            os.environ,
+            _env_without_redis_urls(VENICE_REDIS_URL="redis://localhost:6379"),
+            clear=True,
+        ):
             with pytest.raises(ValueError) as exc_info:
                 create_production_config()
 
@@ -117,7 +130,11 @@ class TestCreateProductionConfigHighThroughputEnvFallback:
 
     def test_redis_url_from_env_variable(self):
         """Test that redis_url is read from VENICE_REDIS_URL when not provided."""
-        with patch.dict(os.environ, {"VENICE_REDIS_URL": "redis://env-fast-redis:6379"}):
+        with patch.dict(
+            os.environ,
+            _env_without_redis_urls(VENICE_REDIS_URL="redis://env-fast-redis:6379"),
+            clear=True,
+        ):
             config = create_production_config_high_throughput()
 
             assert config.backend.redis is not None
@@ -127,6 +144,7 @@ class TestCreateProductionConfigHighThroughputEnvFallback:
         """Test that missing redis_url raises ValueError (lines 183-184)."""
         env = os.environ.copy()
         env.pop("VENICE_REDIS_URL", None)
+        env.pop("VENICE_BACKEND__REDIS__REDIS_URL", None)
         with patch.dict(os.environ, env, clear=True):
             with pytest.raises(ValueError) as exc_info:
                 create_production_config_high_throughput(redis_url=None)
@@ -135,7 +153,11 @@ class TestCreateProductionConfigHighThroughputEnvFallback:
 
     def test_explicit_redis_url_overrides_env(self):
         """Test that explicit redis_url takes precedence over env."""
-        with patch.dict(os.environ, {"VENICE_REDIS_URL": "redis://env-redis:6379"}):
+        with patch.dict(
+            os.environ,
+            _env_without_redis_urls(VENICE_REDIS_URL="redis://env-redis:6379"),
+            clear=True,
+        ):
             config = create_production_config_high_throughput(
                 redis_url="redis://explicit-fast-redis:6379"
             )
@@ -173,7 +195,11 @@ class TestCreateProductionConfigHighThroughputLocalhostValidation:
 
     def test_env_var_with_localhost_rejected(self):
         """Test that localhost from env var is also rejected."""
-        with patch.dict(os.environ, {"VENICE_REDIS_URL": "redis://localhost:6379"}):
+        with patch.dict(
+            os.environ,
+            _env_without_redis_urls(VENICE_REDIS_URL="redis://localhost:6379"),
+            clear=True,
+        ):
             with pytest.raises(ValueError) as exc_info:
                 create_production_config_high_throughput()
 
@@ -181,7 +207,11 @@ class TestCreateProductionConfigHighThroughputLocalhostValidation:
 
     def test_env_var_with_127_0_0_1_rejected(self):
         """Test that 127.0.0.1 from env var is also rejected."""
-        with patch.dict(os.environ, {"VENICE_REDIS_URL": "redis://127.0.0.1:6379"}):
+        with patch.dict(
+            os.environ,
+            _env_without_redis_urls(VENICE_REDIS_URL="redis://127.0.0.1:6379"),
+            clear=True,
+        ):
             with pytest.raises(ValueError) as exc_info:
                 create_production_config_high_throughput()
 
@@ -193,7 +223,11 @@ class TestCreateProductionConfigConservativeEnvFallback:
 
     def test_redis_url_from_env_variable(self):
         """Test that redis_url is read from VENICE_REDIS_URL when not provided."""
-        with patch.dict(os.environ, {"VENICE_REDIS_URL": "redis://env-safe-redis:6379"}):
+        with patch.dict(
+            os.environ,
+            _env_without_redis_urls(VENICE_REDIS_URL="redis://env-safe-redis:6379"),
+            clear=True,
+        ):
             config = create_production_config_conservative()
 
             assert config.backend.redis is not None
@@ -203,6 +237,7 @@ class TestCreateProductionConfigConservativeEnvFallback:
         """Test that missing redis_url raises ValueError (lines 272-273)."""
         env = os.environ.copy()
         env.pop("VENICE_REDIS_URL", None)
+        env.pop("VENICE_BACKEND__REDIS__REDIS_URL", None)
         with patch.dict(os.environ, env, clear=True):
             with pytest.raises(ValueError) as exc_info:
                 create_production_config_conservative(redis_url=None)
@@ -211,7 +246,11 @@ class TestCreateProductionConfigConservativeEnvFallback:
 
     def test_explicit_redis_url_overrides_env(self):
         """Test that explicit redis_url takes precedence over env."""
-        with patch.dict(os.environ, {"VENICE_REDIS_URL": "redis://env-redis:6379"}):
+        with patch.dict(
+            os.environ,
+            _env_without_redis_urls(VENICE_REDIS_URL="redis://env-redis:6379"),
+            clear=True,
+        ):
             config = create_production_config_conservative(
                 redis_url="redis://explicit-safe-redis:6379"
             )
@@ -249,7 +288,11 @@ class TestCreateProductionConfigConservativeLocalhostValidation:
 
     def test_env_var_with_localhost_rejected(self):
         """Test that localhost from env var is also rejected."""
-        with patch.dict(os.environ, {"VENICE_REDIS_URL": "redis://localhost:6379"}):
+        with patch.dict(
+            os.environ,
+            _env_without_redis_urls(VENICE_REDIS_URL="redis://localhost:6379"),
+            clear=True,
+        ):
             with pytest.raises(ValueError) as exc_info:
                 create_production_config_conservative()
 
@@ -257,7 +300,11 @@ class TestCreateProductionConfigConservativeLocalhostValidation:
 
     def test_env_var_with_127_0_0_1_rejected(self):
         """Test that 127.0.0.1 from env var is also rejected."""
-        with patch.dict(os.environ, {"VENICE_REDIS_URL": "redis://127.0.0.1:6379"}):
+        with patch.dict(
+            os.environ,
+            _env_without_redis_urls(VENICE_REDIS_URL="redis://127.0.0.1:6379"),
+            clear=True,
+        ):
             with pytest.raises(ValueError) as exc_info:
                 create_production_config_conservative()
 
@@ -315,7 +362,10 @@ class TestProductionConfigSettings:
         assert config.scheduler.max_queue_size == 8000
         assert config.scheduler.metrics_enabled is True
         assert config.backend.redis is not None
-        assert config.backend.redis.key_prefix == "custom:prefix:"
+        # key_prefix is deprecated: reading it warns, and the passed value round-trips.
+        with pytest.deprecated_call(match="does not apply a prefix"):
+            key_prefix = config.backend.redis.key_prefix
+        assert key_prefix == "custom:prefix:"
         assert config.scheduler.mode == SchedulerMode.INTELLIGENT
 
     def test_high_throughput_config_settings(self):
@@ -347,3 +397,76 @@ class TestProductionConfigSettings:
         assert config.backend.redis is not None
         assert config.backend.redis.max_retries == 5
         assert config.circuit_breaker.failure_threshold == 5
+
+
+PRESETS = [
+    create_production_config,
+    create_production_config_high_throughput,
+    create_production_config_conservative,
+]
+
+
+def _env_without_redis_urls(**extra: str) -> dict[str, str]:
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("VENICE_REDIS_URL", "VENICE_BACKEND__REDIS__REDIS_URL")
+    }
+    env.update(extra)
+    return env
+
+
+@pytest.mark.parametrize("preset", PRESETS, ids=lambda f: f.__name__)
+class TestRedisUrlEnvPrecedence:
+    """VENICE_BACKEND__REDIS__REDIS_URL wins; VENICE_REDIS_URL is the fallback."""
+
+    def test_nested_setting_alone_is_used(self, preset):
+        env = _env_without_redis_urls(VENICE_BACKEND__REDIS__REDIS_URL="redis://nested:6379")
+        with patch.dict(os.environ, env, clear=True):
+            config = preset()
+        assert config.backend.redis is not None
+        assert config.backend.redis.redis_url == "redis://nested:6379"
+        assert config.rate_limiter.redis_url == "redis://nested:6379"
+
+    def test_nested_setting_wins_over_short_form(self, preset):
+        env = _env_without_redis_urls(
+            VENICE_BACKEND__REDIS__REDIS_URL="redis://nested:6379",
+            VENICE_REDIS_URL="redis://short:6379",
+        )
+        with patch.dict(os.environ, env, clear=True):
+            config = preset()
+        assert config.backend.redis is not None
+        assert config.backend.redis.redis_url == "redis://nested:6379"
+
+    def test_empty_nested_setting_falls_back_to_short_form(self, preset):
+        env = _env_without_redis_urls(
+            VENICE_BACKEND__REDIS__REDIS_URL="", VENICE_REDIS_URL="redis://short:6379"
+        )
+        with patch.dict(os.environ, env, clear=True):
+            config = preset()
+        assert config.backend.redis is not None
+        assert config.backend.redis.redis_url == "redis://short:6379"
+
+    def test_explicit_argument_wins_over_both(self, preset):
+        env = _env_without_redis_urls(
+            VENICE_BACKEND__REDIS__REDIS_URL="redis://nested:6379",
+            VENICE_REDIS_URL="redis://short:6379",
+        )
+        with patch.dict(os.environ, env, clear=True):
+            config = preset(redis_url="redis://explicit:6379")
+        assert config.backend.redis is not None
+        assert config.backend.redis.redis_url == "redis://explicit:6379"
+
+    def test_nested_setting_localhost_rejected(self, preset):
+        env = _env_without_redis_urls(VENICE_BACKEND__REDIS__REDIS_URL="redis://localhost:6379")
+        with patch.dict(os.environ, env, clear=True), pytest.raises(ValueError, match="localhost"):
+            preset()
+
+    def test_missing_names_both_variables(self, preset):
+        with (
+            patch.dict(os.environ, _env_without_redis_urls(), clear=True),
+            pytest.raises(ValueError) as exc_info,
+        ):
+            preset()
+        assert "VENICE_BACKEND__REDIS__REDIS_URL" in str(exc_info.value)
+        assert "VENICE_REDIS_URL" in str(exc_info.value)

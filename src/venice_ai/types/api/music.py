@@ -14,6 +14,7 @@ from typing import Literal
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from ...core.models.common import VeniceBaseModel
+from .audio_format import audio_format_for
 
 
 class MusicQueueResponse(VeniceBaseModel):
@@ -54,7 +55,12 @@ class MusicProcessingStatus(VeniceBaseModel):
 
     @property
     def progress_percent(self) -> float:
-        """Estimate progress as a 0–100 percentage."""
+        """Estimate progress as a 0–100 percentage.
+
+        Elapsed time divided by the model's typical run time, capped at 100.
+        It is a time estimate, not a report from the job: a job that runs
+        longer than usual sits at 100 while still ``PROCESSING``.
+        """
         if self.average_execution_time <= 0:
             return 0.0
         return min(100.0, (self.execution_duration / self.average_execution_time) * 100)
@@ -70,8 +76,8 @@ class MusicFailedStatus(VeniceBaseModel):
     model_config = ConfigDict(extra="allow")
 
     status: Literal["FAILED"] = Field(..., description="Failed status")
-    error: str | None = Field(None, description="Error message if available")
-    error_code: str | None = Field(None, description="Error code if available")
+    error: str | None = Field(default=None, description="Error message if available")
+    error_code: str | None = Field(default=None, description="Error code if available")
 
 
 class MusicCompletedStatus(VeniceBaseModel):
@@ -88,10 +94,27 @@ class MusicCompletedStatus(VeniceBaseModel):
     model_config = ConfigDict(extra="allow")
 
     status: Literal["COMPLETED"] = Field(..., description="Completed status")
-    url: str | None = Field(None, description="Download URL if provided")
-    expires_at: str | None = Field(None, description="URL expiration timestamp")
+    url: str | None = Field(default=None, description="Download URL if provided")
+    expires_at: str | None = Field(default=None, description="URL expiration timestamp")
+    content_type: str | None = Field(
+        default=None,
+        description=(
+            "Media type of inline audio, from the retrieve response's Content-Type "
+            "(e.g. ``audio/flac``). ``None`` for a JSON status."
+        ),
+    )
 
     _data: bytes | None = PrivateAttr(default=None)
+
+    @property
+    def audio_format(self) -> str | None:
+        """File extension for the inline audio (``"mp3"``, ``"flac"``, ``"wav"``, ``"m4a"``).
+
+        Derived from :attr:`content_type`, so a caller can name the file
+        without inspecting the bytes. ``None`` when the type is unknown or the
+        status carried no inline audio.
+        """
+        return audio_format_for(self.content_type)
 
     def _set_data(self, data: bytes) -> None:
         """Set binary audio data (Pydantic PrivateAttr-compatible setter)."""

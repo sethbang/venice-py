@@ -35,7 +35,7 @@ class UsageInfo(VeniceBaseModel):
     completion_tokens: int = Field(..., description="Number of tokens in the completion")
     total_tokens: int = Field(..., description="Total number of tokens used")
     prompt_tokens_details: PromptTokensDetails | None = Field(
-        None, description="Breakdown of tokens used in the prompt"
+        default=None, description="Breakdown of tokens used in the prompt"
     )
 
 

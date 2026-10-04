@@ -16,7 +16,7 @@ Environment variables use the ``VENICE_`` prefix with ``__`` as the nested delim
 import warnings
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 if TYPE_CHECKING:
     # For type-checking purposes, always import the real BaseSettings/SettingsConfigDict.
@@ -39,6 +39,8 @@ else:
         SettingsConfigDict = ConfigDict  # type: ignore[assignment,misc]
         _pydantic_settings_available = False
 
+from ..._base_url import DEFAULT_API_VERSION, normalize_api_version, normalize_base_url
+from ..._constants import DEFAULT_BASE_URL
 from ...rate_limiting.config import RateLimiterConfig
 from .backends import BackendConfig, RedisBackendConfig
 from .enterprise import CircuitBreakerConfig, MetricsConfig, SchedulerConfig, StateConfig
@@ -112,11 +114,22 @@ class VeniceAIConfig(BaseSettings):
         description="Venice AI API key. Can also be set via the VENICE_API_KEY env-var.",
     )
 
-    api_base_url: str = Field(
-        default="https://api.venice.ai", description="Base URL for Venice AI API"
+    api_version: str = Field(
+        default=DEFAULT_API_VERSION,
+        description="API version path appended when api_base_url is a bare host",
     )
 
-    api_version: str = Field(default="v1", description="API version to use")
+    api_base_url: str = Field(
+        default=DEFAULT_BASE_URL,
+        description=(
+            "Root URL of the Venice API, version path included "
+            "(https://api.venice.ai/api/v1), the same form VeniceClient(base_url=...) "
+            "takes. A bare host such as https://api.venice.ai gets /api/{api_version} "
+            "appended; any other path is used as given. A gateway that serves the API "
+            "at its host root is the one unsupported shape: serve it under a path and "
+            "pass that path. Set it with the VENICE_API_BASE_URL environment variable too."
+        ),
+    )
 
     debug: bool = Field(default=False, description="Enable debug mode")
 
@@ -170,15 +183,17 @@ class VeniceAIConfig(BaseSettings):
             raise ValueError(f"Environment must be one of {valid_envs}")
         return v.lower()
 
+    @field_validator("api_version")
+    @classmethod
+    def validate_api_version(cls, v: str) -> str:
+        """Reject an empty version, which would turn a bare host into ``/api/``."""
+        return normalize_api_version(v)
+
     @field_validator("api_base_url")
     @classmethod
-    def validate_api_base_url(cls, v: str) -> str:
-        """Validate API base URL format."""
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("API base URL must start with http:// or https://")
-        if v.endswith("/"):
-            v = v.rstrip("/")
-        return v
+    def validate_api_base_url(cls, v: str, info: ValidationInfo) -> str:
+        """Normalize the base URL to the API root (see :mod:`venice_ai._base_url`)."""
+        return normalize_base_url(v, info.data.get("api_version", DEFAULT_API_VERSION))
 
     # === Convenience Methods ===
 
@@ -210,34 +225,41 @@ class VeniceAIConfig(BaseSettings):
     def create_test_config(
         cls,
         scheduler_mode: SchedulerMode = SchedulerMode.BASIC,
-        enable_redis: bool = True,
-        test_rate_multiplier: float = 10.0,
+        enable_redis: bool = False,
+        test_rate_multiplier: float | None = None,
     ) -> "VeniceAIConfig":
         """
         Create a configuration optimized for testing.
 
+        The configuration uses the default SIMPLE rate limiter, which reads
+        neither the backend nor the scheduler section, so by default both keep
+        settings that ``VeniceClientFactory.create_client`` accepts without an
+        inert-configuration warning.
+
         Args:
-            scheduler_mode: Scheduler mode to use. Defaults to ``BASIC`` so that
-                callers without a tier-discovery setup get a working test client
-                out of the box. Pass ``SchedulerMode.INTELLIGENT`` explicitly
-                when exercising tier-aware scheduling paths in the fixture.
-            enable_redis: Whether to enable Redis backend
-            test_rate_multiplier: Rate limit multiplier for faster testing
+            scheduler_mode: Value stored on ``scheduler.mode``. No rate limiter
+                reads it: the SIMPLE rate limiter ignores the scheduler section
+                and the ADAPTIVE scheduler always runs in INTELLIGENT mode.
+            enable_redis: Use a Redis backend on the throwaway test database
+                (``redis://localhost:6379/15``) instead of the memory backend.
+                Only the ADAPTIVE rate limiter contacts Redis, so unless
+                ``rate_limiter.mode`` is set to ``ADAPTIVE`` the factory warns
+                that the backend is unused. Defaults to ``False``.
+            test_rate_multiplier: Rate limit multiplier for faster testing. Only
+                the ADAPTIVE scheduler reads it; it is stored only when passed.
 
         Returns:
             VeniceAIConfig instance optimized for testing
         """
+        scheduler = (
+            SchedulerConfig(mode=scheduler_mode)
+            if test_rate_multiplier is None
+            else SchedulerConfig(mode=scheduler_mode, test_rate_multiplier=test_rate_multiplier)
+        )
         return cls(
             environment="test",
             debug=True,
-            scheduler=SchedulerConfig(
-                mode=scheduler_mode,
-                test_mode=True,
-                test_rate_multiplier=test_rate_multiplier,
-                max_concurrent_executions=10,
-                max_queue_size=100,
-                scheduler_interval=0.01,
-            ),
+            scheduler=scheduler,
             backend=BackendConfig(
                 backend_type=BackendType.REDIS if enable_redis else BackendType.MEMORY,
                 redis=RedisBackendConfig(

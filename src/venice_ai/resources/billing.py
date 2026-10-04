@@ -25,7 +25,8 @@ Classes:
 import asyncio
 import re
 import warnings
-from typing import TYPE_CHECKING, cast
+from email.message import Message
+from typing import TYPE_CHECKING, Literal, cast, overload
 
 import aiohttp
 
@@ -37,16 +38,22 @@ from ..types.api import BillingUsageHistoryQueryParams
 from ..types.api.billing import (
     BillingBalanceResponse,
     BillingUsageEntry,
+    BillingUsageHistoryCsvPage,
     BillingUsageHistoryResponse,
     UsageAnalyticsQueryParams,
     UsageAnalyticsResponse,
 )
 from ..types.enums import BillingFormatEnum
+from ..utils.errors import read_body
 
 # Aggressive timeout for billing API requests.
 # The Venice billing API is known to hang on small date ranges or empty results.
 # Using a shorter timeout to fail fast and provide actionable guidance.
 BILLING_REQUEST_TIMEOUT_SECONDS = 10
+
+# The usage-history endpoint's documented default ``pageSize``, used when a
+# CSV export leaves the page size to the server.
+USAGE_HISTORY_DEFAULT_PAGE_SIZE = 1000
 
 if TYPE_CHECKING:
     from .._client import VeniceClient  # noqa: F401
@@ -87,12 +94,51 @@ class Billing(APIResource["VeniceClient"]):
                 ):
                     print(entry.timestamp, entry.amount)
 
-                # Or fetch a single page as CSV bytes for export
-                csv_page = await client.billing.get_usage_history(
-                    format=BillingFormatEnum.CSV,
+                # Or export the same window as CSV, one document per page,
+                # named by its position in the walk
+                index = 0
+                async for csv_page in client.billing.iter_usage_history_csv(
                     startTimestamp="2025-01-01T00:00:00Z",
-                )
+                ):
+                    index += 1
+                    Path(f"usage-{index:04d}.csv").write_bytes(csv_page.content)
     """
+
+    @overload
+    async def get_usage_history(
+        self,
+        *,
+        format: Literal[BillingFormatEnum.JSON] = ...,
+        currency: str | None = None,
+        startTimestamp: str | None = None,
+        endTimestamp: str | None = None,
+        pageSize: int | None = None,
+        cursor: str | None = None,
+    ) -> BillingUsageHistoryResponse: ...
+
+    @overload
+    async def get_usage_history(
+        self,
+        *,
+        format: Literal[BillingFormatEnum.CSV],
+        currency: str | None = None,
+        startTimestamp: str | None = None,
+        endTimestamp: str | None = None,
+        pageSize: int | None = None,
+        cursor: str | None = None,
+    ) -> BillingUsageHistoryCsvPage: ...
+
+    @overload
+    async def get_usage_history(
+        self,
+        *,
+        format: BillingFormatEnum,
+        currency: str | None = None,
+        startTimestamp: str | None = None,
+        endTimestamp: str | None = None,
+        pageSize: int | None = None,
+        cursor: str | None = None,
+    ) -> BillingUsageHistoryResponse | BillingUsageHistoryCsvPage: ...
 
     async def get_usage_history(
         self,
@@ -103,19 +149,25 @@ class Billing(APIResource["VeniceClient"]):
         endTimestamp: str | None = None,
         pageSize: int | None = None,
         cursor: str | None = None,
-    ) -> BillingUsageHistoryResponse | bytes:
+    ) -> BillingUsageHistoryResponse | BillingUsageHistoryCsvPage:
         """Fetch one page of billing usage history (GET /billing/usage-history).
 
         The endpoint is a cursor-paginated walk in ascending timestamp order. The
         first request of a walk takes the filter parameters
-        (``currency``/``startTimestamp``/``endTimestamp``/``pageSize``); each JSON
-        response carries a ``nextCursor`` token. A continuation request passes that
+        (``currency``/``startTimestamp``/``endTimestamp``/``pageSize``); each
+        page carries a ``nextCursor`` token. A continuation request passes that
         token as ``cursor`` **and nothing else** — the filters travel inside the
         cursor, and the server rejects a request that sends filters alongside one.
-        Use :meth:`iter_usage_history` to walk every page automatically.
+        Use :meth:`iter_usage_history` (JSON entries) or
+        :meth:`iter_usage_history_csv` (CSV pages) to walk every page
+        automatically.
+
+        The whole exchange -- the response and, for CSV, its body -- must finish
+        within ``BILLING_REQUEST_TIMEOUT_SECONDS`` (10 seconds).
 
         Args:
-            format: ``JSON`` (default, structured) or ``CSV`` (raw bytes export).
+            format: ``JSON`` (default, structured) or ``CSV`` (a CSV document
+                per page).
             currency: Filter by consumable currency (``"USD"``, ``"DIEM"``,
                 ``"BUNDLED_CREDITS"``). First page only.
             startTimestamp: Inclusive lower bound on entry timestamps (ISO 8601 UTC).
@@ -128,12 +180,15 @@ class Billing(APIResource["VeniceClient"]):
 
         Returns:
             For JSON format: a :class:`BillingUsageHistoryResponse` (``data`` plus
-            ``nextCursor``). For CSV format: raw ``bytes`` (the next-page token is
-            returned in the ``x-next-cursor`` response header rather than the body).
+            ``nextCursor``). For CSV format: a :class:`BillingUsageHistoryCsvPage`
+            with the CSV document in ``content``, the continuation token the
+            server sends in the ``x-next-cursor`` header as ``nextCursor``, and
+            the server-assigned ``filename``.
 
         Raises:
             ValueError: If ``cursor`` is combined with any filter parameter.
-            BillingTimeoutError: If the request times out (10s limit).
+            BillingTimeoutError: If the response, or a CSV body, has not
+                arrived within the 10-second billing deadline.
             InvalidRequestError: If a parameter is invalid, or the cursor was
                 rejected (expired, tampered with, or issued to another user) —
                 restart the walk from the first page.
@@ -195,54 +250,49 @@ class Billing(APIResource["VeniceClient"]):
         # Convert to dictionary, excluding None values
         params = query_params.model_dump(exclude_none=True)
 
-        # Set headers based on requested format
-        headers = {}
-        raw_response = False
+        csv = format == BillingFormatEnum.CSV
+        headers = {"accept": "text/csv" if csv else "application/json"}
 
-        if format == BillingFormatEnum.CSV:
-            # Use lowercase header name to ensure it replaces any default header
-            headers["accept"] = "text/csv"
-            raw_response = True
-        else:  # JSON format
-            headers["accept"] = "application/json"
-
-        # Billing endpoints can be slow; fail fast with an aggressive timeout.
-        try:
-            result = await asyncio.wait_for(
-                self._client._request(
+        async def _exchange() -> BillingUsageHistoryResponse | BillingUsageHistoryCsvPage:
+            if not csv:
+                result = await self._client._request(
                     "GET",
                     "billing/usage-history",
                     params=params,
                     headers=headers,
-                    raw_response=raw_response,
+                    raw_response=False,
+                )
+                return BillingUsageHistoryResponse.model_validate(result)
+            # raw_response=True hands back the unread aiohttp response.
+            response = cast(
+                aiohttp.ClientResponse,
+                await self._client._request(
+                    "GET",
+                    "billing/usage-history",
+                    params=params,
+                    headers=headers,
+                    raw_response=True,
                 ),
-                timeout=BILLING_REQUEST_TIMEOUT_SECONDS,
             )
+            try:
+                content = await read_body(response)
+            finally:
+                response.release()
+            return BillingUsageHistoryCsvPage(
+                content=content,
+                nextCursor=response.headers.get("x-next-cursor") or None,
+                filename=_attachment_filename(response.headers.get("Content-Disposition")),
+            )
+
+        # Billing endpoints can hang on small ranges or empty results. One
+        # deadline covers the response and the CSV body together, so a body
+        # that stalls fails as fast as a response that never arrives.
+        try:
+            return await asyncio.wait_for(_exchange(), timeout=BILLING_REQUEST_TIMEOUT_SECONDS)
         except TimeoutError as e:
             raise BillingTimeoutError(original_error=e) from e
         except APITimeoutError as e:
-            # Re-raise as BillingTimeoutError for better context
             raise BillingTimeoutError(original_error=e.original_error) from e
-
-        # For JSON responses, properly validate with Pydantic
-        # For CSV responses, handle the raw aiohttp.ClientResponse
-        if format == BillingFormatEnum.JSON:
-            return BillingUsageHistoryResponse.model_validate(result)
-        else:
-            # Handle aiohttp.ClientResponse properly for CSV
-            if isinstance(result, aiohttp.ClientResponse):
-                try:
-                    content = await result.read()
-                    return content
-                finally:
-                    # Ensure response is always closed, even on error
-                    if not result.closed:
-                        result.close()
-            elif isinstance(result, bytes):
-                return result
-            else:
-                # Fallback: assume result can be converted to bytes
-                return cast(bytes, result)
 
     def iter_usage_history(
         self,
@@ -260,10 +310,15 @@ class Billing(APIResource["VeniceClient"]):
         subsequent page sends only the ``nextCursor`` token from the page before
         it, exactly as the endpoint requires.
 
-        Each page carries its own 10-second timeout; a slow page raises
+        Each page carries its own 10-second deadline; a slow page raises
         :class:`~venice_ai.exceptions.BillingTimeoutError` mid-walk, and because
         the cursor lives inside the iterator there is no resume handle — restart
-        the walk from the first page. Narrow the range if a walk is timing out.
+        the walk from the first page. The deadline wraps each page request on
+        its own, so a longer range means more pages rather than more entries
+        per page; ``page_size`` is what sets the size of a page. Lower it to
+        shrink each page, and use a range of at least a day where data is
+        known to exist, since the endpoint can hang on very short ranges or
+        filters that match nothing.
 
         :param page_size: Entries per page (default 100; server range 10-1000).
         :param max_items: Optional cap on total items yielded.
@@ -296,15 +351,81 @@ class Billing(APIResource["VeniceClient"]):
                     format=BillingFormatEnum.JSON,
                     cursor=cursor,
                 )
-            # iter_usage_history forces JSON, so this is always the response model,
-            # but get_usage_history's union return type needs a runtime narrow.
-            assert isinstance(response, BillingUsageHistoryResponse)
             cursor = response.nextCursor
             items = list(response.data)
             has_more = response.nextCursor is not None
             return _PageResult(items=items, has_more=has_more)
 
         return Paginator(_fetch_page, page_size=page_size, max_items=max_items)
+
+    def iter_usage_history_csv(
+        self,
+        *,
+        page_size: int | None = None,
+        max_pages: int | None = None,
+        currency: str | None = None,
+        startTimestamp: str | None = None,
+        endTimestamp: str | None = None,
+    ) -> Paginator[BillingUsageHistoryCsvPage]:
+        """Lazily export every usage entry matching the filters as CSV pages.
+
+        The CSV counterpart of :meth:`iter_usage_history`: it walks the same
+        cursor-paginated endpoint with ``format=CSV`` and yields one
+        :class:`~venice_ai.types.api.billing.BillingUsageHistoryCsvPage` per
+        page. Each page is a complete CSV document with its own header row, so
+        save pages as separate files, named by their position in the walk, or
+        drop the header row of every page after the first when joining them.
+        Nothing guarantees that the server-assigned ``page.filename`` values
+        sort in walk order, so do not rely on them for ordering.
+
+        Each page carries its own 10-second deadline; a slow page raises
+        :class:`~venice_ai.exceptions.BillingTimeoutError` mid-walk, and the
+        cursor lives inside the iterator, so restart from the first page. The
+        deadline wraps each page request on its own, so a longer range means
+        more pages rather than more entries per page; ``page_size`` is what
+        sets the size of a page. Lower it to shrink each page, and use a range
+        of at least a day where data is known to exist, since the endpoint can
+        hang on very short ranges or filters that match nothing.
+
+        :param page_size: Entries per page (server range 10-1000; the server
+            default of 1000 when ``None``).
+        :param max_pages: Optional cap on the number of pages yielded.
+        :param currency: Filter by consumable currency.
+        :param startTimestamp: Inclusive lower bound (ISO 8601 UTC).
+        :param endTimestamp: Exclusive upper bound (ISO 8601 UTC).
+
+        Example::
+
+            index = 0
+            async for page in client.billing.iter_usage_history_csv(
+                startTimestamp="2026-06-01T00:00:00Z",
+            ):
+                index += 1
+                Path(f"usage-{index:04d}.csv").write_bytes(page.content)
+        """
+        cursor: str | None = None
+
+        async def _fetch_page(page_index: int) -> _PageResult[BillingUsageHistoryCsvPage]:
+            nonlocal cursor
+            if page_index == 0:
+                cursor = None
+                page = await self.get_usage_history(
+                    format=BillingFormatEnum.CSV,
+                    currency=currency,
+                    startTimestamp=startTimestamp,
+                    endTimestamp=endTimestamp,
+                    pageSize=page_size,
+                )
+            else:
+                page = await self.get_usage_history(format=BillingFormatEnum.CSV, cursor=cursor)
+            cursor = page.nextCursor
+            return _PageResult(items=[page], has_more=page.nextCursor is not None)
+
+        return Paginator(
+            _fetch_page,
+            page_size=page_size or USAGE_HISTORY_DEFAULT_PAGE_SIZE,
+            max_items=max_pages,
+        )
 
     async def get_balance(self) -> BillingBalanceResponse:
         """Get current balance information (GET /billing/balance).
@@ -477,3 +598,12 @@ class Billing(APIResource["VeniceClient"]):
             raise BillingTimeoutError(original_error=e.original_error) from e
 
         return UsageAnalyticsResponse.model_validate(result)
+
+
+def _attachment_filename(content_disposition: str | None) -> str | None:
+    """Return the ``filename`` parameter of a ``Content-Disposition`` header, if any."""
+    if not content_disposition:
+        return None
+    message = Message()
+    message["Content-Disposition"] = content_disposition
+    return message.get_filename()

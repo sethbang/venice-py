@@ -15,12 +15,18 @@ class InferenceDetails(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    requestId: str | None = Field(None, description="Unique identifier for inference request")
-    promptTokens: float | None = Field(None, description="Tokens in prompt (LLM usage only)")
-    completionTokens: float | None = Field(
-        None, description="Tokens in completion (LLM usage only)"
+    requestId: str | None = Field(
+        default=None, description="Unique identifier for inference request"
     )
-    inferenceExecutionTime: float | None = Field(None, description="Execution time in milliseconds")
+    promptTokens: float | None = Field(
+        default=None, description="Tokens in prompt (LLM usage only)"
+    )
+    completionTokens: float | None = Field(
+        default=None, description="Tokens in completion (LLM usage only)"
+    )
+    inferenceExecutionTime: float | None = Field(
+        default=None, description="Execution time in milliseconds"
+    )
 
 
 class BillingUsageEntry(BaseModel):
@@ -42,7 +48,7 @@ class BillingUsageEntry(BaseModel):
     notes: str = Field(..., description="Notes about the billing usage entry")
     timestamp: str = Field(..., description="When the billing usage entry was created")
     inferenceDetails: InferenceDetails | None = Field(
-        None, description="Details about related inference request"
+        default=None, description="Details about related inference request"
     )
 
 
@@ -59,7 +65,7 @@ class BillingUsageHistoryResponse(BaseModel):
         ..., description="Usage entries in ascending timestamp order"
     )
     nextCursor: str | None = Field(
-        None,
+        default=None,
         description=(
             "Continuation token for the next page, sent as the ``cursor`` query "
             "parameter. ``None`` means this is the last page."
@@ -67,12 +73,54 @@ class BillingUsageHistoryResponse(BaseModel):
     )
 
 
+class BillingUsageHistoryCsvPage(BaseModel):
+    """One CSV page of GET /billing/usage-history.
+
+    A CSV page is a complete CSV document -- header row included -- covering
+    the entries of one page of the walk. Its continuation token travels in the
+    ``x-next-cursor`` response header rather than the body, and is surfaced
+    here as ``nextCursor``, the same name the JSON page uses, so a CSV walk
+    advances exactly like a JSON one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    content: bytes = Field(..., description="The CSV document, as sent by the server")
+    nextCursor: str | None = Field(
+        default=None,
+        description=(
+            "Continuation token for the next page, sent as the ``cursor`` query "
+            "parameter. ``None`` means this is the last page."
+        ),
+    )
+    filename: str | None = Field(
+        default=None,
+        description=(
+            "File name from the ``Content-Disposition`` header, or ``None`` when "
+            "the server sends none. Nothing guarantees these names sort in walk "
+            "order; to keep a multi-page export ordered, name or sort pages by "
+            "their position in the walk."
+        ),
+    )
+
+    @property
+    def text(self) -> str:
+        """The CSV document decoded as UTF-8."""
+        return self.content.decode("utf-8")
+
+
 class BillingBalances(BaseModel):
     """Nested balance amounts by currency."""
 
     model_config = ConfigDict(extra="allow")
 
-    diem: float | None = Field(default=None, description="Remaining DIEM balance")
+    diem: float | None = Field(
+        default=None,
+        description=(
+            "DIEM credit left in the current epoch (1 DIEM is $1 of the staking "
+            "allowance, reset at 00:00 UTC); ``None`` when the account stakes no DIEM"
+        ),
+    )
     usd: float | None = Field(default=None, description="Remaining USD balance")
 
 
@@ -95,7 +143,11 @@ class BillingBalanceResponse(BaseModel):
     diem_epoch_allocation: float | None = Field(
         default=None,
         alias="diemEpochAllocation",
-        description="DIEM epoch allocation used for usage-percentage calculations",
+        description=(
+            "DIEM allocated for the current epoch, equal to the staked amount; "
+            "``0`` when the account stakes no DIEM. Compare with ``balances.diem`` "
+            "for the share used so far"
+        ),
     )
 
     model_config = ConfigDict(populate_by_name=True)
@@ -107,12 +159,26 @@ class BillingBalanceResponse(BaseModel):
 
 
 class UsageAnalyticsByDate(BaseModel):
-    """Daily usage totals for a specific date."""
+    """Daily usage totals for a specific date.
+
+    ``USD`` is gross USD-denominated spend: debits paid in USD plus debits paid
+    from bundled credits, which Venice counts at their USD value. Refunds are
+    not netted out. It therefore does not equal the sum of
+    ``iter_usage_history(currency="USD")`` entries for the day, which leaves
+    out bundled-credit debits. The day's debits (not refunds) across the
+    ``"USD"`` and ``"BUNDLED_CREDITS"`` ledger entries add up to it.
+    """
 
     model_config = ConfigDict(extra="allow")
 
     date: str = Field(..., description="Date in YYYY-MM-DD format")
-    USD: float = Field(..., description="Total usage in USD for that day")
+    USD: float = Field(
+        ...,
+        description=(
+            "Gross USD-denominated spend for that day: USD plus bundled-credit "
+            "debits, refunds not netted"
+        ),
+    )
     DIEM: float = Field(..., description="Total usage in DIEM for that day")
 
 
@@ -139,13 +205,19 @@ class UsageAnalyticsByModel(BaseModel):
         ..., description="Type of units consumed (tokens, images, chars, minutes, seconds)"
     )
     modelType: str | None = Field(
-        None, description="Type of model (LLM, IMAGE, TTS, ASR, VIDEO), or null"
+        default=None, description="Type of model (LLM, IMAGE, TTS, ASR, VIDEO), or null"
     )
-    totalUsd: float = Field(..., description="Total USD spent on this model")
+    totalUsd: float = Field(
+        ...,
+        description=(
+            "Gross USD-denominated spend on this model: USD plus bundled-credit "
+            "debits, refunds not netted"
+        ),
+    )
     totalDiem: float = Field(..., description="Total DIEM spent on this model")
     totalUnits: float = Field(..., description="Total units consumed for this model")
     breakdown: list[UsageAnalyticsModelBreakdown] | None = Field(
-        None,
+        default=None,
         description="Array of usage breakdowns by type (only present if multiple types)",
     )
 
@@ -156,10 +228,16 @@ class UsageAnalyticsByKey(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     apiKeyId: str | None = Field(
-        None, description="The API key ID, or null if usage was from the web app"
+        default=None, description="The API key ID, or null if usage was from the web app"
     )
     description: str = Field(..., description="API key description or 'Web App'")
-    totalUsd: float = Field(..., description="Total USD spent via this key")
+    totalUsd: float = Field(
+        ...,
+        description=(
+            "Gross USD-denominated spend via this key: USD plus bundled-credit "
+            "debits, refunds not netted"
+        ),
+    )
     totalDiem: float = Field(..., description="Total DIEM spent via this key")
     totalUnits: float = Field(..., description="Total units consumed via this key")
 
@@ -241,18 +319,18 @@ class UsageAnalyticsQueryParams(BaseModel):
     """
 
     lookback: str | None = Field(
-        None,
+        default=None,
         description=(
             "Relative lookback period (e.g., '7d', '30d', up to '90d'). "
             "Cannot be used with startDate/endDate."
         ),
     )
     startDate: str | None = Field(
-        None,
+        default=None,
         description="Start date in YYYY-MM-DD format. Required if endDate is provided.",
     )
     endDate: str | None = Field(
-        None,
+        default=None,
         description="End date in YYYY-MM-DD format. Required if startDate is provided.",
     )
 
@@ -261,6 +339,7 @@ __all__ = [
     "InferenceDetails",
     "BillingUsageEntry",
     "BillingUsageHistoryResponse",
+    "BillingUsageHistoryCsvPage",
     "BillingBalanceResponse",
     # Usage Analytics (Beta)
     "UsageAnalyticsByDate",

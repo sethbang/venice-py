@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from ...core.models.common import VeniceBaseModel
+from .audio_format import audio_format_for
 
 
 class VoiceChangerQueueResponse(VeniceBaseModel):
@@ -85,7 +86,8 @@ class VoiceChangerCompletedStatus(VeniceBaseModel):
 
     Unlike video, this endpoint has **no JSON completed arm**: there is no
     ``url`` to download from and no ``expires_at``. A finished conversion comes
-    back as an ``audio/mpeg`` body, which the resource attaches here.
+    back as an audio body (the API spec declares ``audio/mpeg``), which the
+    resource attaches here together with its media type.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -98,9 +100,26 @@ class VoiceChangerCompletedStatus(VeniceBaseModel):
         ),
     )
 
+    content_type: str | None = Field(
+        default=None,
+        description=(
+            "Media type of the converted audio, from the retrieve response's "
+            "Content-Type (e.g. ``audio/mpeg``)."
+        ),
+    )
+
     # Binary audio. A PrivateAttr because it is set programmatically from the
     # HTTP body rather than parsed from JSON.
     _data: bytes | None = PrivateAttr(default=None)
+
+    @property
+    def audio_format(self) -> str | None:
+        """File extension for the converted audio (``"mp3"``, ``"wav"``, ``"flac"`` ...).
+
+        Derived from :attr:`content_type`, so a caller can name the file
+        without inspecting the bytes. ``None`` when the type is unknown.
+        """
+        return audio_format_for(self.content_type)
 
     def _set_data(self, data: bytes) -> None:
         """Attach the raw audio bytes (``object.__setattr__`` for PrivateAttr)."""

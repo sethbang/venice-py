@@ -58,8 +58,12 @@ class TestVeniceClientInitialization:
 
     def test_init_with_base_url(self):
         """Test initialization with custom base URL."""
+        client = VeniceClient(api_key="test", base_url="https://custom.api.com/v2/")
+        assert str(client._base_url) == "https://custom.api.com/v2/"
+
+    def test_init_with_bare_host_base_url_gets_the_api_path(self):
         client = VeniceClient(api_key="test", base_url="https://custom.api.com")
-        assert str(client._base_url) == "https://custom.api.com/"
+        assert str(client._base_url) == "https://custom.api.com/api/v1/"
 
     def test_init_with_timeout(self):
         """Test initialization with custom timeout."""

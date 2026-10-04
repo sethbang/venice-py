@@ -573,3 +573,27 @@ class TestErrorBudget429:
 
     def test_no_headers_is_not_an_error_budget(self):
         assert self._error({}).is_error_budget is False
+
+
+def test_resolver_errors_are_value_errors_and_exported() -> None:
+    import venice_ai
+    from venice_ai.exceptions import (
+        ModelQuotesUnavailableError,
+        NoMatchingModelError,
+        VeniceError,
+    )
+
+    for cls in (NoMatchingModelError, ModelQuotesUnavailableError):
+        assert issubclass(cls, ValueError)
+        assert issubclass(cls, VeniceError)
+        assert getattr(venice_ai, cls.__name__) is cls
+        assert cls.__name__ in venice_ai.__all__
+    assert not issubclass(ModelQuotesUnavailableError, NoMatchingModelError)
+
+    cause = RuntimeError("503")
+    err = ModelQuotesUnavailableError(
+        "none quoted", resource_type="video", failures={"m": cause}, skipped={"n": "too long"}
+    )
+    assert err.failures == {"m": cause}
+    assert err.skipped == {"n": "too long"}
+    assert NoMatchingModelError("none").skipped == {}

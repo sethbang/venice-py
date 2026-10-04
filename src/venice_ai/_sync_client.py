@@ -29,6 +29,7 @@ from typing import Any
 
 from ._client import VeniceClient
 from ._resource import APIResource
+from .core.http_client import ConnectionLimits
 from .middleware.retry import RetryOptions
 from .streaming import Stream
 
@@ -183,7 +184,8 @@ class SyncVeniceClient:
         ``connector_limit``, ``headers``, ``retry_options``, etc.) are
         forwarded directly to the underlying async client.
 
-        :param api_key: API key. Falls back to ``VENICE_API_KEY`` env var.
+        :param api_key: API key. When ``None``, falls back to ``config.api_key``
+            (if a ``config`` is passed), then the ``VENICE_API_KEY`` env var.
         :param base_url: Override the default API base URL.
         :param timeout: Request timeout in seconds.
         :param max_retries: Maximum retry attempts for failed requests.
@@ -255,6 +257,23 @@ class SyncVeniceClient:
             yield
         finally:
             self._retry_override = prev
+
+    @property
+    def retry_options(self) -> RetryOptions | None:
+        """The retry policy calls made now are sent with (frozen).
+
+        Inside a :meth:`with_retries` block this is the block's override;
+        otherwise the async client's construction-time policy. ``None`` when
+        the client wraps a caller-supplied ``http_client`` session.
+        """
+        if self._retry_override is not None:
+            return self._retry_override
+        return self._async_client.retry_options
+
+    @property
+    def connection_limits(self) -> ConnectionLimits:
+        """The connection-pool limits of the underlying HTTP session."""
+        return self._async_client.connection_limits
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._async_client, name)

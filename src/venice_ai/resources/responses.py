@@ -81,6 +81,26 @@ class Responses(APIResource["VeniceClient"]):
         stream: Literal[True],
     ) -> AsyncIterable[ResponsesStreamEvent]: ...
 
+    @overload
+    async def create(
+        self,
+        *,
+        model: str,
+        input: str | list[dict[str, Any]],  # noqa: A002 - matches API field name
+        include: list[str] | None = None,
+        max_output_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        fallbacks: list[dict[str, str]] | None = None,
+        reasoning: Any | None = None,
+        tools: list[Tool | dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        web_search: bool | None = None,
+        venice_parameters: Any | None = None,
+        anon_user_id: str | None = None,
+        stream: bool,
+    ) -> ResponsesResponse | AsyncIterable[ResponsesStreamEvent]: ...
+
     async def create(
         self,
         *,

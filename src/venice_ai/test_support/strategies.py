@@ -5,8 +5,11 @@ This module provides reusable selection strategies for the DynamicModelSelector,
 particularly useful for test suites that need cost optimization and load distribution.
 
 Functions:
-    get_model_price: Extract comparable price from a model dictionary
+    get_model_price: Comparable price of a model dict (alias of
+        :func:`venice_ai.models.selection.model_price`)
     random_cheap_strategy: Select randomly from the cheapest tier of models
+    cheapest_model_strategy: Deterministic cheapest pick (re-exported from
+        :mod:`venice_ai.models.selection`)
 
 Example:
     >>> from venice_ai import create_model_selector
@@ -19,54 +22,18 @@ Example:
 import random
 from typing import Any
 
+from venice_ai.models.selection import cheapest_model_strategy, model_price
 
-def get_model_price(model: dict[str, Any]) -> float | None:
-    """
-    Extract comparable price from a model dictionary.
+#: Comparable price of a model dict; see :func:`venice_ai.models.selection.model_price`.
+get_model_price = model_price
 
-    Handles different pricing structures for different model types:
-    - LLM models: input + output token prices
-    - Image models: generation price
-    - Audio/TTS models: input price
-
-    Args:
-        model: Model dictionary from the cache (contains model_spec with pricing)
-
-    Returns:
-        Comparable price as float, or None if pricing unavailable.
-        For LLM models, returns the sum of input and output prices.
-        For image models, returns the generation price.
-        For audio models, returns the input price.
-    """
-    pricing = model.get("model_spec", {}).get("pricing")
-    if pricing is None:
-        return None
-
-    # LLM pricing: input + output token prices
-    if "input" in pricing and "output" in pricing:
-        input_usd = pricing["input"].get("usd", 0) if pricing["input"] else 0
-        output_usd = pricing["output"].get("usd", 0) if pricing["output"] else 0
-        if input_usd is None:
-            input_usd = 0
-        if output_usd is None:
-            output_usd = 0
-        return float(input_usd) + float(output_usd)
-
-    # Image pricing: generation cost
-    if "generation" in pricing:
-        gen = pricing["generation"]
-        if gen and gen.get("usd") is not None:
-            return float(gen["usd"])
-        return None
-
-    # Audio/TTS pricing: input cost only
-    if "input" in pricing:
-        inp = pricing["input"]
-        if inp and inp.get("usd") is not None:
-            return float(inp["usd"])
-        return None
-
-    return None
+__all__ = [
+    "cheapest_model_strategy",
+    "first_available_strategy",
+    "get_model_price",
+    "random_cheap_strategy",
+    "random_strategy",
+]
 
 
 def random_cheap_strategy(
@@ -146,41 +113,6 @@ def random_cheap_strategy(
         return selected["id"]
 
     # Final fallback: shouldn't reach here, but return first candidate
-    return candidates[0]["id"]
-
-
-def cheapest_model_strategy(candidates: list[dict[str, Any]]) -> str:
-    """
-    Select the single cheapest model (no randomization).
-
-    Useful for production scenarios where cost optimization is the primary goal
-    and load distribution is not needed.
-
-    Args:
-        candidates: List of model dictionaries from the cache
-
-    Returns:
-        Selected model ID string (the cheapest priced model, or first unpriced)
-
-    Raises:
-        ValueError: If no candidates are available for selection
-    """
-    if not candidates:
-        raise ValueError("No candidates available for selection")
-
-    best_model = None
-    best_price = float("inf")
-
-    for model in candidates:
-        price = get_model_price(model)
-        if price is not None and price >= 0 and price < best_price:
-            best_price = price
-            best_model = model
-
-    if best_model:
-        return best_model["id"]
-
-    # No priced models, return first candidate
     return candidates[0]["id"]
 
 

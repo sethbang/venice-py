@@ -8,7 +8,7 @@ Sourced from `VeniceBaseModel` in `src/venice_ai/core/models/base.py`. Every Ven
 |---|---|---|---|
 | `response.headers` | `dict[str, str] \| None` | raw HTTP response headers (case-sensitive lookup) | Custom server headers; one-off correlation IDs |
 | `response.response_rate_limits` | `RateLimitInfo \| None` | `x-ratelimit-*` parsed | Proactive throttling before you hit a 429 |
-| `response.balance_info` | `BalanceInfo \| None` | x402 prepaid balance headers | Cost tracking without `CostTracker` |
+| `response.balance_info` | `BalanceInfo \| None` | `x-venice-balance-usd` / `-diem`: what the calling key can still spend | Cost tracking without `CostTracker` |
 | `response.deprecation_info` | `DeprecationInfo \| None` | model-deprecation headers | Logging "your model is being retired" warnings |
 | `response.pagination_info` | `PaginationInfo \| None` | `x-pagination-*` parsed | List-endpoint paging |
 
@@ -69,11 +69,11 @@ Fields:
 
 ```python
 class BalanceInfo:
-    usd:  float | None       # post-call prepaid USDC balance
-    diem: float | None       # Venice's internal accounting unit
+    usd:  float | None       # USD the calling key could spend before this request
+    diem: float | None       # the DIEM counterpart
 ```
 
-`balance_info.usd` is the **post-call** balance — i.e., the new remaining balance, not the cost of THIS call. To compute the cost of a single call without the helpers:
+`balance_info.usd` is what the calling API key can still spend: the lesser of the account balance and what remains under the key's consumption limit, as it stood **before this request was processed**. It is not the account balance (that is `client.billing.get_balance()`), and it is not the cost of this call: a key with a $1 limit reports at most $1 however much the account holds. It is the same value `client.api_keys.get_rate_limits()` returns as `data.balances.USD`. The drop between two consecutive responses is what the earlier call cost, plus anything else spent on the same key in between:
 
 ```python
 prev_balance = None
@@ -88,7 +88,7 @@ for question in questions:
 
 For most use cases, prefer `CostTracker` from `venice-py-production` — it does the bookkeeping and integrates with `BudgetManager`.
 
-`balance_info` may be `None` for accounts billed via API-key tier (where there's no prepaid ledger). Don't assume it's populated.
+`balance_info` is `None` when the response carries neither header. Don't assume it's populated.
 
 ## `deprecation_info` — `DeprecationInfo`
 
@@ -150,7 +150,7 @@ async with stream:
         if stream.final_response.deprecation_info:
             log.warning(...)
         if stream.final_response.balance_info:
-            log.info(f"balance_after_call=${stream.final_response.balance_info.usd}")
+            log.info(f"key_spendable_before_call=${stream.final_response.balance_info.usd}")
 ```
 
 See `streaming.md` for why `text_deltas()` doesn't populate `final_response`.
@@ -162,7 +162,7 @@ The raw `aiohttp.ClientResponse` (or equivalent) is on `response._response` for 
 ## Common bugs
 
 - **Treating a property as required**: `response.balance_info.usd` raises `AttributeError` when `balance_info` is `None`. Always null-check.
-- **Assuming `balance_info.usd` is the cost of THIS call**: it's the post-call balance. Compute deltas.
+- **Assuming `balance_info.usd` is the cost of THIS call, or the account balance**: it's what the key could spend before the call. Compute deltas between responses; read the account balance from `client.billing.get_balance()`.
 - **Reading `.headers["X-Request-Id"]` and getting `KeyError`**: use `.get()`, and the dict is a plain (case-sensitive) dict and Venice sends lowercased header names, so use `x-request-id`.
 - **Trying to read `final_response.usage` after `text_deltas()`**: doesn't populate. See `streaming.md`.
 

@@ -171,9 +171,11 @@ class TestValidateConnectionPools:
 
     def test_deprecated_keepalive_is_reported(self):
         """A non-default max_keepalive_connections has no effect and is reported."""
+        # VeniceAIConfig re-validates the nested model, which warns again.
         with pytest.warns(FutureWarning, match="max_keepalive_connections"):
             http_client = HttpClientConfig(max_connections=10, max_keepalive_connections=5)
-        result = validate_config(VeniceAIConfig(http_client=http_client))
+            config = VeniceAIConfig(http_client=http_client)
+        result = validate_config(config)
 
         assert result.is_valid
         assert any("max_keepalive_connections is deprecated" in w for w in result.warnings)

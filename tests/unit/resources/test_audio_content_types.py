@@ -55,6 +55,12 @@ async def test_prepare_content_type_for_extension(audio, fname, exp_ct, tmp_path
         (b"\xff\xf1\x50\x80", "audio.aac"),
         (b"\xff\xf9\x50\x80", "audio.aac"),
         (b"\xff\xf0\x50\x80", "audio.aac"),
+        # An ID3 tag (with a footer) in front of FLAC is FLAC, not MP3
+        (
+            b"ID3\x04\x00\x10\x00\x00\x00\x04TTTT3DI\x04\x00\x10\x00\x00\x00\x04fLaC\x00\x00",
+            "audio.flac",
+        ),
+        (b"ID3\x04\x00\x00\x00\x00\x00\x02TT\xff\xf1\x50\x80", "audio.aac"),
     ],
 )
 def test_detect_distinguishes_mpeg_frame_sync_from_adts(magic, exp_name):

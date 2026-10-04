@@ -18,6 +18,7 @@ Key features:
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -30,6 +31,37 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+
+#: Connection-pool limit the SDK-managed session uses when none is configured.
+#: Every SDK request targets one host, so a per-host limit below it would
+#: silently become the real concurrency cap; it defaults to unlimited (``0``).
+DEFAULT_CONNECTOR_LIMIT = 1000
+DEFAULT_CONNECTOR_LIMIT_PER_HOST = 0
+
+
+@dataclass(frozen=True)
+class ConnectionLimits:
+    """The connection-pool limits of a client's HTTP session.
+
+    Attributes:
+        limit: Simultaneous connections in total (``0`` means unlimited).
+        limit_per_host: Simultaneous connections to one host (``0`` means
+            unlimited).
+    """
+
+    limit: int
+    limit_per_host: int
+
+
+def resolve_connection_limits(limit: int | None, limit_per_host: int | None) -> ConnectionLimits:
+    """Apply the SDK defaults to configured connection-pool limits."""
+    return ConnectionLimits(
+        limit=DEFAULT_CONNECTOR_LIMIT if limit is None else limit,
+        limit_per_host=(
+            DEFAULT_CONNECTOR_LIMIT_PER_HOST if limit_per_host is None else limit_per_host
+        ),
+    )
 
 
 def _extract_rate_limit_headers(response: aiohttp.ClientResponse) -> dict[str, str]:
@@ -180,22 +212,11 @@ class VeniceHTTPClient:
         into a single, centralized location.
         """
         # Create the connector with appropriate settings
-        connector_kwargs: dict[str, Any] = {}
+        connector_kwargs: dict[str, Any] = dict(self._http_transport_options)
 
-        # High global limit and no per-host limit unless configured: every SDK
-        # request targets one host, so a per-host limit would be the real cap.
-        if self._connector_limit is not None:
-            connector_kwargs["limit"] = self._connector_limit
-        else:
-            connector_kwargs["limit"] = 1000  # High global limit
-
-        if self._connector_limit_per_host is not None:
-            connector_kwargs["limit_per_host"] = self._connector_limit_per_host
-        else:
-            connector_kwargs["limit_per_host"] = 0  # No per-host limit - let scheduler control
-
-        # Add any transport options
-        connector_kwargs.update(self._http_transport_options)
+        limits = self.connection_limits
+        connector_kwargs["limit"] = limits.limit
+        connector_kwargs["limit_per_host"] = limits.limit_per_host
 
         connector = aiohttp.TCPConnector(**connector_kwargs)
 
@@ -231,9 +252,8 @@ class VeniceHTTPClient:
         if self._skip_auto_headers is not None:
             session_kwargs["skip_auto_headers"] = self._skip_auto_headers
 
-        # Add retry middleware (enabled by default with sensible defaults)
-        # When retry_options is None, create_retry_middleware uses RetryOptions()
-        # which provides: 3 retries, backoff on 429/500/502/503/504, POST retries enabled
+        # Retry middleware: with retry_options=None it applies the billing-aware
+        # RetryOptions() defaults described in venice_ai.middleware.retry.
         retry_middleware = create_retry_middleware(self._retry_options)
         session_kwargs["middlewares"] = [retry_middleware]
 
@@ -389,6 +409,20 @@ class VeniceHTTPClient:
     def base_url(self) -> str | None:
         """Get the base URL for this client."""
         return self._base_url
+
+    @property
+    def connection_limits(self) -> ConnectionLimits:
+        """The connection-pool limits the session is (or will be) built with.
+
+        A ``limit`` or ``limit_per_host`` in ``http_transport_options`` takes
+        precedence over ``connector_limit`` / ``connector_limit_per_host``;
+        anything still unset gets the SDK default.
+        """
+        options = self._http_transport_options
+        return resolve_connection_limits(
+            options.get("limit", self._connector_limit),
+            options.get("limit_per_host", self._connector_limit_per_host),
+        )
 
     @property
     def default_timeout(self) -> aiohttp.ClientTimeout:

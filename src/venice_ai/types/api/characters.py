@@ -38,9 +38,11 @@ class Character(BaseModel):
 
     slug: str = Field(..., description="Unique character identifier for API usage")
     name: str = Field(..., description="Human-readable character name")
-    description: str | None = Field(None, description="Character description and background")
-    shareUrl: str | None = Field(None, description="Public sharing URL for the character")
-    photoUrl: str | None = Field(None, description="URL of the character's photo")
+    description: str | None = Field(
+        default=None, description="Character description and background"
+    )
+    shareUrl: str | None = Field(default=None, description="Public sharing URL for the character")
+    photoUrl: str | None = Field(default=None, description="URL of the character's photo")
     adult: bool = Field(..., description="Whether character is classified as adult content")
     webEnabled: bool = Field(..., description="Whether character is enabled for web use")
     createdAt: str = Field(..., description="ISO timestamp when character was created")
@@ -90,12 +92,16 @@ class CharacterReview(BaseModel):
     characterId: str = Field(..., description="UUID of the reviewed character")
     createdAt: str = Field(..., description="ISO timestamp when the review was created")
     rating: int = Field(..., description="User rating on a 1–5 scale")
-    message: str | None = Field(None, description="Review body text")
-    locale: str | None = Field(None, description="BCP-47 locale code for the review message")
-    username: str | None = Field(None, description="Public username of the reviewer")
-    userAvatarUrl: str | None = Field(None, description="URL of the reviewer's avatar image")
+    message: str | None = Field(default=None, description="Review body text")
+    locale: str | None = Field(
+        default=None, description="BCP-47 locale code for the review message"
+    )
+    username: str | None = Field(default=None, description="Public username of the reviewer")
+    userAvatarUrl: str | None = Field(
+        default=None, description="URL of the reviewer's avatar image"
+    )
     isOwner: bool | None = Field(
-        None, description="True when the review was written by the authenticated caller"
+        default=None, description="True when the review was written by the authenticated caller"
     )
 
 

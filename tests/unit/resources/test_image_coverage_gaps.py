@@ -15,7 +15,7 @@ Coverage gaps addressed:
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock
 
 import aiohttp
 import pytest
@@ -113,40 +113,12 @@ class TestBackgroundRemove:
     async def test_background_remove_response_client_response(self, image_resource):
         """Lines 918-919: Response is aiohttp.ClientResponse."""
         mock_response = Mock(spec=aiohttp.ClientResponse)
-        mock_response.content = Mock()
-        mock_response.content.read = AsyncMock(return_value=b"client-response-content")
+        mock_response.read = AsyncMock(return_value=b"client-response-content")
         image_resource._request_multipart = AsyncMock(return_value=mock_response)
 
         result = await image_resource.background_remove(image=b"\x89PNG\r\n\x1a\n")
 
         assert result == b"client-response-content"
-
-    @pytest.mark.asyncio
-    async def test_background_remove_response_with_content_attr(self, image_resource):
-        """Lines 920-921: Response has .content attribute (not ClientResponse)."""
-        mock_response = Mock()
-        mock_response.content = b"content-attr-bytes"
-        image_resource._request_multipart = AsyncMock(return_value=mock_response)
-
-        result = await image_resource.background_remove(image=b"\x89PNG\r\n\x1a\n")
-
-        assert result == b"content-attr-bytes"
-
-    @pytest.mark.asyncio
-    async def test_background_remove_response_fallback_cast(self, image_resource):
-        """Line 922: Final cast(bytes, response) fallback."""
-
-        # A response object without .content attribute and not bytes/ClientResponse
-        class FakeResponse:
-            pass
-
-        fake = FakeResponse()
-        image_resource._request_multipart = AsyncMock(return_value=fake)
-
-        result = await image_resource.background_remove(image=b"\x89PNG\r\n\x1a\n")
-
-        # The cast just passes through the object
-        assert result is fake
 
     @pytest.mark.asyncio
     async def test_background_remove_image_url_takes_priority_over_image(self, image_resource):
@@ -328,8 +300,7 @@ class TestMultiEdit:
     async def test_multi_edit_response_client_response(self, image_resource):
         """Response is aiohttp.ClientResponse."""
         mock_response = Mock(spec=aiohttp.ClientResponse)
-        mock_response.content = Mock()
-        mock_response.content.read = AsyncMock(return_value=b"cr-content")
+        mock_response.read = AsyncMock(return_value=b"cr-content")
 
         mock_client = AsyncMock()
         mock_client._request = AsyncMock(return_value=mock_response)
@@ -338,37 +309,6 @@ class TestMultiEdit:
         result = await image_resource.multi_edit(prompt="Edit", image=b"\x89PNG\r\n\x1a\n")
 
         assert result == b"cr-content"
-
-    @pytest.mark.asyncio
-    async def test_multi_edit_response_with_content_attr(self, image_resource):
-        """Response has .content attribute."""
-        mock_response = Mock()
-        mock_response.content = b"content-attr"
-
-        mock_client = AsyncMock()
-        mock_client._request = AsyncMock(return_value=mock_response)
-        image_resource._client = mock_client
-
-        result = await image_resource.multi_edit(prompt="Edit", image=b"\x89PNG\r\n\x1a\n")
-
-        assert result == b"content-attr"
-
-    @pytest.mark.asyncio
-    async def test_multi_edit_response_fallback_cast(self, image_resource):
-        """Final cast fallback."""
-
-        class FakeResponse:
-            pass
-
-        fake = FakeResponse()
-
-        mock_client = AsyncMock()
-        mock_client._request = AsyncMock(return_value=fake)
-        image_resource._client = mock_client
-
-        result = await image_resource.multi_edit(prompt="Edit", image=b"\x89PNG\r\n\x1a\n")
-
-        assert result is fake
 
     @pytest.mark.asyncio
     async def test_multi_edit_three_images_with_safe_mode(self, image_resource):
@@ -568,23 +508,6 @@ class TestEditMaskAndModel:
 
         call_kwargs = mock_client._request.call_args[1]
         assert "safe_mode" not in call_kwargs["json_data"]
-
-    @pytest.mark.asyncio
-    async def test_edit_final_cast_fallback(self, image_resource):
-        """Final cast(bytes, response) fallback when response has no .content."""
-
-        class FakeResponse:
-            pass
-
-        fake = FakeResponse()
-
-        mock_client = AsyncMock()
-        mock_client._request = AsyncMock(return_value=fake)
-        image_resource._client = mock_client
-
-        result = await image_resource.edit(prompt="Edit", image=b"\x89PNG\r\n\x1a\n")
-
-        assert result is fake
 
 
 # ===========================================================================
@@ -818,55 +741,3 @@ class TestIsUrl:
         assert image_resource._is_url("/path/to/file.png") is False
         assert image_resource._is_url("data:image/png;base64,abc") is False
         assert image_resource._is_url("just-a-string") is False
-
-
-# ===========================================================================
-# Gap 13: generate() metrics exception handler — line 358
-# ===========================================================================
-
-
-class TestGenerateMetricsFallback:
-    """Test the metrics exception handler in generate()."""
-
-    @pytest.fixture
-    def image_resource(self):
-        mock_client = Mock()
-        return Image(mock_client)
-
-    @pytest.mark.asyncio
-    async def test_generate_metrics_exception_swallowed(self, image_resource):
-        """Line 358: except Exception: pass in metrics fallback."""
-        mock_client = AsyncMock()
-
-        # Create a ClientResponse mock that returns empty content first,
-        # then succeeds on response.read() fallback
-        mock_response = Mock(spec=aiohttp.ClientResponse)
-        mock_response.content = Mock()
-        mock_response.content.read = AsyncMock(return_value=b"")  # Empty triggers fallback
-        mock_response.read = AsyncMock(return_value=b"fallback-data")
-
-        mock_client._request = AsyncMock(return_value=mock_response)
-        image_resource._client = mock_client
-
-        # Patch the metrics import to raise an exception
-        with (
-            patch(
-                "venice_ai.resources.image.Image.create.__module__",
-                new="venice_ai.resources.image",
-            ),
-            patch.dict(
-                "sys.modules",
-                {"venice_ai.observability.metrics": Mock(side_effect=ImportError("no metrics"))},
-            ),
-        ):
-            # The metrics import happens inside the method; we patch it at module level
-            # Even if metrics fail, the method should still work
-            result = await image_resource.create(
-                model="test-model", prompt="test", return_binary=True
-            )
-
-            assert result == b"fallback-data"
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

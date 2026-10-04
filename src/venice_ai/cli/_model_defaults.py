@@ -20,6 +20,7 @@ _RESOLVE_KWARGS: dict[str, dict[str, Any]] = {
     "tts": {"type": "tts"},
     "stt": {"type": "asr"},
     "embedding": {"type": "embedding"},
+    "decision": {"type": "decision"},
     "video_t2v": {"type": "video", "video_type": "text-to-video"},
     "video_i2v": {"type": "video", "video_type": "image-to-video"},
 }
@@ -40,7 +41,8 @@ async def resolve_default_model(
 
     :param client: An open ``VeniceClient``.
     :param config: The loaded CLI config dict.
-    :param kind: One of ``chat, image, tts, stt, embedding, video_t2v, video_i2v``.
+    :param kind: One of ``chat, image, tts, stt, embedding, decision, video_t2v,
+        video_i2v``.
     :param explicit: A model ID the user passed via ``--model`` (or ``None``).
     """
     if explicit:

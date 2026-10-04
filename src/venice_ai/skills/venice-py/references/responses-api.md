@@ -96,7 +96,7 @@ response = await client.responses.create(
 )
 ```
 
-`reasoning.effort` controls thinking depth: `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Higher = more thinking tokens billed.
+`reasoning.effort` requests a thinking depth: `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. What a tier does depends on the model. `supportsReasoningEffort` and `reasoningEffortOptions` say which values a model accepts, not that a higher tier thinks longer: some models scale with the tier, some use about the same reasoning tokens at every tier, and some have used fewer at `"high"` than at `"low"`. Measure `usage` at the tiers you plan to send before relying on an order.
 
 ## Web search (Venice extension)
 

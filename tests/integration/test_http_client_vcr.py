@@ -69,12 +69,12 @@ async def test_http_client_session_creation(http_client, vcr_cassette):
         assert session is not None
         assert not http_client.is_closed
 
-        # Verify session can make requests
-        # We'll use the models endpoint as a simple GET test
-        response = await session.get("/models")
-        assert (
-            response.status == 200 or response.status == 404
-        )  # Some APIs might not have /models at root
+        # The session resolves relative paths against the API root, so a live
+        # run reaches /api/v1/models and gets 200 (a path off the root 404s).
+        # vcrpy records and replays the URL as passed ("models"), so a replay
+        # can only check the recorded status, not the resolved path.
+        async with session.get("models") as response:
+            assert response.status == 200
 
 
 @pytest.mark.integration
@@ -101,10 +101,9 @@ async def test_http_client_with_custom_headers(vcr_cassette):
             assert session.headers.get("X-Custom-Header") == "test-value"
             assert "venice-ai-test" in session.headers.get("User-Agent", "")
 
-            # Verify session can make authenticated requests
-            response = await session.get("/models")
-            # Should get some response (200, 404, etc.) not auth errors
-            assert response.status < 500  # No server errors due to headers
+            # The custom headers ride along on an authenticated request.
+            async with session.get("models") as response:
+                assert response.status == 200
         finally:
             await client.close()
 
@@ -129,12 +128,9 @@ async def test_http_client_timeout_configuration(vcr_cassette):
             assert session.timeout is not None
             assert session.timeout.total == config.http_client.timeout
 
-            # Make a quick request that should complete within timeout
-            response = await session.get("/models")
-            assert response.status is not None  # Request completed
-        except TimeoutError:
-            # If timeout occurs, that's also valid behavior
-            pytest.skip("Request timed out - timeout configuration working")
+            # A quick request completes within the configured timeout.
+            async with session.get("models") as response:
+                assert response.status == 200
         finally:
             await client.close()
 
@@ -234,22 +230,16 @@ async def test_http_client_connection_reuse(http_client, vcr_cassette):
         session = await http_client.get_session()
 
         # Make multiple requests using the same session
-        responses = []
+        statuses = []
         for _i in range(3):
-            try:
-                response = await session.get("/models")
-                responses.append(response)
-            except Exception as e:
-                # Some endpoints might not exist, but connection should work
-                responses.append(e)
+            async with session.get("models") as response:
+                statuses.append(response.status)
 
         # Verify session was reused (same object)
         session2 = await http_client.get_session()
         assert session is session2
 
-        # At least some requests should have worked
-        # Allow for API endpoints that might not exist
-        assert len(responses) == 3  # All requests attempted
+        assert statuses == [200, 200, 200]
 
 
 @pytest.mark.integration

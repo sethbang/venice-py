@@ -256,7 +256,6 @@ class VeniceClientFactory:
         config: VeniceAIConfig,
         api_key: str | None = None,
         account_id: str = "default",
-        account_key: str | None = None,
         http_client: aiohttp.ClientSession | None = None,
     ) -> VeniceClient:
         """
@@ -274,12 +273,12 @@ class VeniceClientFactory:
         Args:
             config: Complete Venice AI configuration containing settings for all
                    components including backend, scheduler, rate limiting, and more.
-            api_key: API key for Venice AI services. If not provided, must be set
-                    via environment variables or account_key.
+            api_key: API key for Venice AI services. When ``None``, the key is
+                    taken from ``config.api_key``, then from the
+                    ``VENICE_API_KEY`` environment variable -- the same
+                    precedence :class:`~venice_ai.VeniceClient` applies.
             account_id: Unique identifier for this account instance. Used for
                        multi-tenant scenarios and resource isolation.
-            account_key: Account-specific API key that overrides the global api_key
-                        for this account. Defaults to api_key if not provided.
             http_client: Pre-configured aiohttp.ClientSession for HTTP requests.
                         If not provided, the client will create its own session.
 
@@ -324,12 +323,10 @@ class VeniceClientFactory:
         # 1. Create VeniceClient
         from ._client import VeniceClient
 
-        # Construct full base URL with API version
-        full_base_url = f"{config.api_base_url}/api/{config.api_version}"
-
+        # The client takes its base URL from config.api_base_url, which is
+        # already the API root (version path included).
         client = VeniceClient(
             api_key=api_key,
-            base_url=full_base_url,
             http_client=http_client,
             timeout=config.http_client.timeout,
             max_retries=config.http_client.max_retries,

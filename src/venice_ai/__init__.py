@@ -90,6 +90,7 @@ from .core import (
     RateLimitDiscovery,
     RedisBackendConfig,
 )
+from .core.http_client import ConnectionLimits
 from .core.models.common import Tool, ToolChoice, ToolFunction
 from .core.models.headers import BalanceInfo, DeprecationInfo, RateLimitInfo
 from .costs import (
@@ -117,7 +118,9 @@ from .exceptions import (
     InvalidRequestError,
     MaxIterationsExceededError,
     ModelGoneError,
+    ModelQuotesUnavailableError,
     MusicGenerationError,
+    NoMatchingModelError,
     NotFoundError,
     PaymentRequiredError,
     PermissionDeniedError,
@@ -139,11 +142,19 @@ from .helpers import (
     tool_from_function,
     tool_from_model,
 )
-from .middleware.retry import RetryOptions
+from .middleware.retry import RetryClass, RetryOptions, classify_request
 from .models.selection import (
+    CheapestMusicResult,
     CheapestVideoResult,
     DynamicModelSelector,
+    VideoInputMode,
+    cheapest_model_strategy,
+    cheapest_selector,
+    cheapest_video_params,
     create_model_selector,
+    model_price,
+    music_request_params,
+    video_input_mode,
 )
 from .rate_limiting import (
     RateLimiterConfig,
@@ -351,7 +362,10 @@ __all__ = [
     "DeprecationInfo",
     "BalanceInfo",
     # Retry options
+    "ConnectionLimits",
+    "RetryClass",
     "RetryOptions",
+    "classify_request",
     # Rate limiting (core)
     "RateLimitDiscovery",
     "RateLimitBucket",
@@ -372,9 +386,17 @@ __all__ = [
     "SchedulerConfig",
     "SchedulerMode",
     # Model selection
+    "CheapestMusicResult",
     "CheapestVideoResult",
     "DynamicModelSelector",
+    "cheapest_model_strategy",
+    "cheapest_selector",
+    "cheapest_video_params",
     "create_model_selector",
+    "model_price",
+    "music_request_params",
+    "video_input_mode",
+    "VideoInputMode",
     # Model selection helpers (lazy)
     "get_chat_model",
     "get_embedding_model",
@@ -396,6 +418,8 @@ __all__ = [
     # Exceptions
     "VideoGenerationError",
     "MusicGenerationError",
+    "NoMatchingModelError",
+    "ModelQuotesUnavailableError",
     "VeniceAPIErrorCode",
     "VeniceError",
     "APIError",

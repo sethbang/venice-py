@@ -19,7 +19,7 @@ class CreateApiKeyRequest(BaseModel):
 
     apiKeyType: Literal["INFERENCE", "ADMIN"] = Field(..., description="API key type")
     description: str = Field(..., description="API key description")
-    consumptionLimit: ConsumptionLimit | None = Field(None, description="Spending limits")
+    consumptionLimit: ConsumptionLimit | None = Field(default=None, description="Spending limits")
     modelPrivacy: Literal["ALL", "PRIVATE_TEXT", "PRIVATE_ONLY"] | None = Field(
         default=None,
         description=(
@@ -30,7 +30,7 @@ class CreateApiKeyRequest(BaseModel):
         default=None, description="Period over which the consumption limit resets"
     )
     expiresAt: str | None = Field(
-        None, description="Expiration date (ISO format, date, or empty string)"
+        default=None, description="Expiration date (ISO format, date, or empty string)"
     )
 
     @field_validator("expiresAt")
@@ -84,8 +84,8 @@ class Web3CreateApiKeyRequest(BaseModel):
     token: str = Field(..., description="Token from generate_web3_key endpoint")
 
     # Optional parameters
-    description: str | None = Field("Web3 API Key", description="API key description")
-    consumptionLimit: ConsumptionLimit | None = Field(None, description="Spending limits")
+    description: str | None = Field(default="Web3 API Key", description="API key description")
+    consumptionLimit: ConsumptionLimit | None = Field(default=None, description="Spending limits")
     modelPrivacy: Literal["ALL", "PRIVATE_TEXT", "PRIVATE_ONLY"] | None = Field(
         default=None,
         description=(
@@ -99,7 +99,7 @@ class Web3CreateApiKeyRequest(BaseModel):
     limitPeriod: Literal["EPOCH", "MONTH", "LIFETIME"] | None = Field(
         default=None, description="Period over which the consumption limit resets"
     )
-    expiresAt: str | None = Field(None, description="Expiration date")
+    expiresAt: str | None = Field(default=None, description="Expiration date")
 
 
 # ============================================================================
@@ -120,7 +120,7 @@ class ModelsQueryParams(BaseModel):
     """Query parameters for models endpoint"""
 
     type: str | None = Field(
-        None,
+        default=None,
         description=(
             "Filter models by type. Official API enum: asr, embedding, image, music, text, "
             "tts, upscale, inpaint, video. Also accepts 'code' and 'all'. "
@@ -139,7 +139,7 @@ class ModelTraitsQueryParams(BaseModel):
     """Query parameters for model traits endpoint"""
 
     type: str | None = Field(
-        "text",
+        default="text",
         description=(
             "Filter traits by model type. Official API enum: asr, embedding, image, music, "
             "text, tts, upscale, inpaint, video. Also accepts 'code' and 'all'. "
@@ -162,31 +162,31 @@ class BillingUsageHistoryQueryParams(BaseModel):
     """
 
     currency: str | None = Field(
-        None, description="Filter by consumable currency (USD, DIEM, BUNDLED_CREDITS)"
+        default=None, description="Filter by consumable currency (USD, DIEM, BUNDLED_CREDITS)"
     )
     cursor: str | None = Field(
-        None,
+        default=None,
         description=(
             "Opaque continuation token from a prior response's nextCursor. Sent "
             "alone; never combined with filter parameters."
         ),
     )
     startTimestamp: str | None = Field(
-        None,
+        default=None,
         description="Inclusive lower bound on entry timestamps (ISO 8601 UTC). First page only.",
     )
     endTimestamp: str | None = Field(
-        None, description="Exclusive upper bound on entry timestamps (ISO 8601 UTC)."
+        default=None, description="Exclusive upper bound on entry timestamps (ISO 8601 UTC)."
     )
     pageSize: int | None = Field(
-        None, ge=10, le=1000, description="Entries per page (10-1000, server default 1000)."
+        default=None, ge=10, le=1000, description="Entries per page (10-1000, server default 1000)."
     )
 
 
 class DeleteApiKeyQueryParams(BaseModel):
     """Query parameters for deleting API key"""
 
-    id: str | None = Field(None, description="API key ID to delete")
+    id: str | None = Field(default=None, description="API key ID to delete")
 
 
 # ============================================================================

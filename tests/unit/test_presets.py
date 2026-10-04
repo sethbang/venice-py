@@ -127,7 +127,10 @@ class TestProductionPresets:
 
         assert config.backend.redis is not None
         assert config.backend.redis.redis_url == "redis://prod-server:6379"
-        assert config.backend.redis.key_prefix == "myapp:prod:"
+        # key_prefix is deprecated: reading it warns, and the passed value round-trips.
+        with pytest.deprecated_call(match="does not apply a prefix"):
+            key_prefix = config.backend.redis.key_prefix
+        assert key_prefix == "myapp:prod:"
 
     def test_create_production_config_custom_concurrency(self):
         """Test production config with custom concurrency."""
@@ -175,7 +178,10 @@ class TestProductionPresets:
 
         assert config.backend.redis is not None
         assert config.backend.redis.redis_url == "redis://fast-redis:6379"
-        assert config.backend.redis.key_prefix == "fast:"
+        # key_prefix is deprecated: reading it warns, and the passed value round-trips.
+        with pytest.deprecated_call(match="does not apply a prefix"):
+            key_prefix = config.backend.redis.key_prefix
+        assert key_prefix == "fast:"
 
     def test_create_production_config_conservative(self):
         """Test conservative production config."""
@@ -201,7 +207,10 @@ class TestProductionPresets:
 
         assert config.backend.redis is not None
         assert config.backend.redis.redis_url == "redis://reliable:6379"
-        assert config.backend.redis.key_prefix == "safe:"
+        # key_prefix is deprecated: reading it warns, and the passed value round-trips.
+        with pytest.deprecated_call(match="does not apply a prefix"):
+            key_prefix = config.backend.redis.key_prefix
+        assert key_prefix == "safe:"
 
 
 class TestTestingPresets:

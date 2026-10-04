@@ -133,7 +133,8 @@ class APIResource[ClientT: "VeniceClient"]:
                 # response is now bytes, not JSON
 
         Note:
-            - The 'Authorization' header is automatically added using the client's API key
+            - The client's authentication (``Authorization: Bearer`` or a signed
+              ``X-Sign-In-With-X`` envelope) is attached to the request
             - The default 'Accept' header is 'application/json' unless overridden
             - Image responses (when Accept: image/*) return raw bytes instead of JSON
             - Form data values are automatically serialized using `serialize_form_value()`
@@ -177,25 +178,15 @@ class APIResource[ClientT: "VeniceClient"]:
             for key, value in data.items():
                 form_data.add_field(key, serialize_form_value(value))
 
-        # Prepare headers
-        request_headers: dict[str, str] = {}
-        if headers:
-            request_headers.update(headers)
+        # JSON is the default response type; per-call headers override it.
+        call_headers = {"Accept": "application/json", **(headers or {})}
 
-        # Ensure authorization header is present
-        if "Authorization" not in request_headers:
-            from .core.auth import create_auth_headers
-
-            request_headers.update(create_auth_headers(self._client._api_key))
-
-        # Accept JSON response by default
-        if "Accept" not in request_headers:
-            request_headers["Accept"] = "application/json"
-
-        # Make the request using aiohttp
+        # Make the request using aiohttp. Authentication is attached here, per
+        # request, like every other API call (see VeniceClient._request_headers).
         session = await self._client._get_session()
+        request_headers = self._client._request_headers(session, call_headers)
 
-        from .utils.errors import wrap_aiohttp_errors
+        from .utils.errors import read_body, resolve_timeout, wrap_aiohttp_errors
 
         request_kwargs: dict[str, Any] = {
             "method": method,
@@ -203,43 +194,49 @@ class APIResource[ClientT: "VeniceClient"]:
             "data": form_data,
             "headers": request_headers,
         }
-        if timeout is not None:
-            request_kwargs["timeout"] = (
-                timeout
-                if isinstance(timeout, aiohttp.ClientTimeout)
-                else aiohttp.ClientTimeout(total=timeout)
-            )
+        request_kwargs["timeout"] = resolve_timeout(timeout, self._client._timeout)
 
-        async with (
-            wrap_aiohttp_errors(),
-            session.request(**request_kwargs) as response,
-        ):
-            if not response.ok:
-                from .exceptions import _make_status_error
+        with self._client._siwe_resigning(call_headers):
+            async with (
+                wrap_aiohttp_errors(),
+                session.request(**request_kwargs) as response,
+            ):
+                if not response.ok:
+                    from .exceptions import _make_status_error
 
-                body = await response.text()
-                raise _make_status_error(
-                    message=f"API request failed with status {response.status}",
-                    request=None,
-                    body=body,
-                    response=response,
-                )
+                    body = await response.text()
+                    raise _make_status_error(
+                        message=f"API request failed with status {response.status}",
+                        request=None,
+                        body=body,
+                        response=response,
+                    )
 
-            # Check content type to determine how to handle the response
-            content_type = response.headers.get("Content-Type", "")
+                # Check content type to determine how to handle the response
+                content_type = response.headers.get("Content-Type", "")
 
-            # If we're expecting binary image data (Accept: image/*)
-            if "image/*" in request_headers.get("Accept", "") or content_type.startswith("image/"):
-                # Return binary data for image responses
-                return await response.read()
-            elif content_type.startswith("text/"):
-                # Plain-text responses (e.g. augment.parse_text(response_format="text")
-                # returns text/plain). Calling .json() here raises ContentTypeError
-                # which got miswrapped as APIConnectionError — return raw bytes so
-                # the caller can decode without surprises.
-                return await response.read()
-            else:
-                # Parse as JSON for other responses
-                # Cast from Any to Dict[str, Any] for type safety
-                json_response: dict[str, Any] = await response.json()
-                return json_response
+                # If we're expecting binary image data (Accept: image/*)
+                if "image/*" in request_headers.get("Accept", "") or content_type.startswith(
+                    "image/"
+                ):
+                    # Return binary data for image responses
+                    return await read_body(response)
+                elif content_type.startswith("text/"):
+                    # Plain-text responses (augment.parse_text(response_format="text")
+                    # returns text/plain) are returned as raw bytes for the caller
+                    # to decode.
+                    return await read_body(response)
+                else:
+                    # The body is read under the transport-error mapping and parsed
+                    # below, outside it, so a body that is not JSON is reported as
+                    # a parsing error rather than a connection failure.
+                    await read_body(response)
+        try:
+            json_response: dict[str, Any] = await response.json()
+        except (aiohttp.ContentTypeError, ValueError) as e:
+            from .exceptions import APIResponseProcessingError
+
+            raise APIResponseProcessingError(
+                "Failed to parse JSON response", original_error=e, response=response
+            ) from e
+        return json_response

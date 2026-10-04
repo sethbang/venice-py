@@ -544,16 +544,17 @@ class ApiKeys(APIResource["VeniceClient"]):
 
     async def get_rate_limits(self) -> RateLimitsResponse:
         """
-        Retrieve current rate limit information and usage statistics.
+        Retrieve the calling API key's rate limits and spendable balance.
 
-        Returns comprehensive rate limiting data for the authenticated API key, including
-        configured limits across different time periods and current usage levels.
+        Wraps ``GET /api/v1/api_keys/rate_limits``.
 
         Returns:
-            Rate limit configuration and current usage statistics including:
-            - Limits per minute, hour, day, and month
-            - Current usage counts for each period
-            - Remaining capacity and reset times
+            :class:`RateLimitsResponse` whose ``data`` carries the per-model
+            rate limit rules (``rateLimits``), the API tier, whether the key
+            may call inference, when the next epoch begins, and ``balances``:
+            what this key can still spend, which is the lesser of the account
+            balance and what remains under the key's consumption limit. For
+            the account balance itself use ``client.billing.get_balance()``.
 
         Raises:
             AuthenticationError: If the API key is invalid or expired.
@@ -563,10 +564,11 @@ class ApiKeys(APIResource["VeniceClient"]):
         Example:
             .. code-block:: python
 
-                # Check current rate limits
                 limits = await client.api_keys.get_rate_limits()
-                print(f"Requests per minute: {limits.data.requests_per_minute}")
-                print(f"Current usage: {limits.data.current_usage}")
+                print(f"This key can still spend ${limits.data.balances.USD:.2f}")
+                for model in limits.data.rateLimits:
+                    rules = {rule.type: rule.amount for rule in model.rateLimits}
+                    print(model.apiModelId, rules)
         """
         response = await self._client.get("api_keys/rate_limits")
         return RateLimitsResponse.model_validate(response)

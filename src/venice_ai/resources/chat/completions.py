@@ -69,7 +69,9 @@ Note:
 
 import asyncio
 import inspect
+import json
 import logging
+import math
 import warnings
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping, Sequence
 from typing import (
@@ -84,7 +86,15 @@ from typing import (
 from pydantic import BaseModel, TypeAdapter
 
 from ..._resource import APIResource
-from ...costs import VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE, ChatCostEstimate, _estimate_costs
+from ...costs import (
+    CHAT_MESSAGE_TOKEN_ALLOWANCE,
+    CHAT_TEMPLATE_TOKEN_ALLOWANCE,
+    SCHEMA_JSON_CHARS_PER_TOKEN,
+    TOOLS_TEMPLATE_TOKEN_ALLOWANCE,
+    VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE,
+    ChatCostEstimate,
+    _estimate_costs,
+)
 from ...exceptions import InvalidRequestError, MaxIterationsExceededError
 from ...helpers import tool_from_function
 from ...streaming import ChatStream, Stream
@@ -257,6 +267,57 @@ def _coerce_messages(messages: Sequence[ChatMessageParam]) -> list[_ChatMessageM
     ``AttributeError`` on ``.content``.
     """
     return _MESSAGE_LIST_ADAPTER.validate_python(list(messages))
+
+
+def _schema_response_format(
+    model_cls: type[BaseModel], *, name: str | None = None, strict: bool = True
+) -> JSONSchemaFormat:
+    """Build the ``json_schema`` response format sent for a Pydantic model class."""
+    return JSONSchemaFormat(
+        type="json_schema",
+        json_schema={
+            "name": name or model_cls.__name__,
+            "strict": strict,
+            "schema": model_cls.model_json_schema(),
+        },
+    )
+
+
+def _compact_json_length(value: Any) -> int:
+    """Length of *value* as the compact JSON the request body carries.
+
+    Accepts dicts and lists and Pydantic model instances (dumped). A Pydantic
+    model class passed as ``response_format`` is measured as the ``json_schema``
+    format :meth:`ChatCompletions.create` sends for it. ``None`` is ``0``.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, type) and issubclass(value, BaseModel):
+        value = _schema_response_format(value)
+
+    def _plain(item: Any) -> Any:
+        if isinstance(item, BaseModel):
+            return item.model_dump(exclude_none=True, by_alias=True)
+        if isinstance(item, Mapping):
+            return {k: _plain(v) for k, v in item.items()}
+        if isinstance(item, list | tuple):
+            return [_plain(v) for v in item]
+        return item
+
+    return len(json.dumps(_plain(value), separators=(",", ":"), default=str))
+
+
+def _schema_token_allowance(tools: Sequence[Any] | None, response_format: Any | None) -> int:
+    """Prompt-token allowance for the ``tools`` and ``response_format`` of a request.
+
+    The compact JSON at :data:`~venice_ai.costs.SCHEMA_JSON_CHARS_PER_TOKEN`
+    characters per token, plus
+    :data:`~venice_ai.costs.TOOLS_TEMPLATE_TOKEN_ALLOWANCE` once when any tool
+    is sent, for the tool-calling instructions the chat template adds.
+    """
+    chars = _compact_json_length(tools or None) + _compact_json_length(response_format)
+    preamble = TOOLS_TEMPLATE_TOKEN_ALLOWANCE if tools else 0
+    return preamble + math.ceil(chars / SCHEMA_JSON_CHARS_PER_TOKEN)
 
 
 def _concat_message_text(
@@ -574,6 +635,57 @@ class ChatCompletions(APIResource["VeniceClient"]):
     ) -> AsyncIterable[ChatCompletionChunk]:  # Return type for streaming (async iterator of dicts)
         ...
 
+    @overload
+    async def create(
+        self,
+        *,
+        model: str,
+        messages: Sequence[ChatMessageParam],
+        stream: bool,
+        stream_cls: type[ChunkModelFactory[ChatCompletionChunk]] | None = None,
+        # --- Common Optional Parameters ---
+        frequency_penalty: float | None = None,
+        max_completion_tokens: int | None = None,
+        n: int | None = None,
+        presence_penalty: float | None = None,
+        response_format: (
+            JSONSchemaFormat | JSONObjectFormat | TextResponseFormat | type[BaseModel] | None
+        ) = None,
+        seed: int | None = None,
+        stop: str | Sequence[str] | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        max_temp: float | None = None,
+        min_temp: float | None = None,
+        min_p: float | None = None,
+        tools: Sequence[Tool] | None = None,
+        tool_choice: Literal["none", "auto"] | SpecificToolChoice | None = None,
+        user: str | None = None,
+        venice_parameters: VeniceParameters | Mapping[str, Any] | None = None,
+        # --- Venice-Specific Params ---
+        reasoning_effort: ReasoningEffortLevel | None = None,
+        reasoning: ReasoningConfig | None = None,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: Literal["default", "extended", "24h"] | None = None,
+        store: bool | None = None,
+        text: dict[str, Any] | None = None,
+        include: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        verbosity: Literal["low", "medium", "high", "auto"] | None = None,
+        fallbacks: list[dict[str, str]] | None = None,
+        # --- Less Common / Newer Params ---
+        logprobs: bool | None = None,
+        top_logprobs: int | None = None,
+        parallel_tool_calls: bool | None = None,
+        repetition_penalty: float | None = None,
+        stop_token_ids: Sequence[int] | None = None,
+        top_k: int | None = None,
+        stream_options: StreamOptions | None = None,
+        e2ee: bool | TeeOptions = False,
+        **kwargs: Any,
+    ) -> ChatCompletionResponse | AsyncIterable[ChatCompletionChunk]:  # stream not known statically
+        ...
+
     async def create(
         self,
         *,
@@ -802,14 +914,7 @@ class ChatCompletions(APIResource["VeniceClient"]):
 
         # Convert Pydantic BaseModel subclass → JSONSchemaFormat
         if isinstance(response_format, type) and issubclass(response_format, BaseModel):
-            response_format = JSONSchemaFormat(
-                type="json_schema",
-                json_schema={
-                    "name": response_format.__name__,
-                    "strict": True,
-                    "schema": response_format.model_json_schema(),
-                },
-            )
+            response_format = _schema_response_format(response_format)
 
         seed = kwargs.pop("seed", None)
         stop = kwargs.pop("stop", None)
@@ -1080,8 +1185,11 @@ class ChatCompletions(APIResource["VeniceClient"]):
         )
 
         # (4) Shape the wire body: force stream + include_usage, encrypt content,
-        # force the Venice system prompt off. Only pass enable_e2ee through if the
-        # caller set it (the body is NOT required for the flow to work).
+        # force the Venice system prompt off. E2EE mode has no Venice system
+        # prompt (it would have to be encrypted client-side), so a caller's
+        # include_venice_system_prompt=True cannot apply here. Only pass
+        # enable_e2ee through if the caller set it (the body is NOT required for
+        # the flow to work).
         body["stream"] = True
         existing_stream_options = body.get("stream_options")
         if isinstance(existing_stream_options, dict):
@@ -1178,14 +1286,38 @@ class ChatCompletions(APIResource["VeniceClient"]):
         expected_completion_tokens: int = 500,
         tokens_per_word: float = 1.3,
         venice_parameters: VeniceParameters | Mapping[str, Any] | None = None,
+        tools: Sequence[Any] | None = None,
+        response_format: Any | None = None,
     ) -> ChatCostEstimate:
         """Estimate the USD cost of a chat completion before sending it.
 
         Mirrors the pre-flight ``quote()`` method on ``client.video`` and
-        ``client.audio`` for symmetry. Token counts are heuristic
-        (word-count x ``tokens_per_word``) - the same approximation used
-        by :func:`venice_ai.costs.estimate_completion_cost` - so the
-        result is an estimate, not a guarantee.
+        ``client.audio`` for symmetry. Venice has no tokenize endpoint, so the
+        prompt is counted from every billed component of the request with
+        allowances sized to be at least what the measured models bill. The
+        result is an estimate meant to err high, not a guarantee; a system
+        prompt built into a model's own chat template is not included (see
+        :class:`~venice_ai.costs.ChatCostEstimate`):
+
+        - message text (and any ``name``): word count x ``tokens_per_word``,
+          the approximation :func:`venice_ai.costs.estimate_completion_cost`
+          uses;
+        - the chat template the model wraps the request in:
+          :data:`~venice_ai.costs.CHAT_TEMPLATE_TOKEN_ALLOWANCE` per request
+          plus :data:`~venice_ai.costs.CHAT_MESSAGE_TOKEN_ALLOWANCE` per
+          message (``template_overhead_tokens``);
+        - ``tools`` and ``response_format`` (``schema_tokens``): their compact
+          JSON at :data:`~venice_ai.costs.SCHEMA_JSON_CHARS_PER_TOKEN`
+          characters per token, plus
+          :data:`~venice_ai.costs.TOOLS_TEMPLATE_TOKEN_ALLOWANCE` once when
+          tools are sent, for the tool-calling instructions the chat template
+          adds. Chat templates differ widely here: measured on five models,
+          the same tool cost between 43 and 270 prompt tokens. The allowance
+          covers the most expensive template measured with at least 20%
+          headroom, so it can overstate a model with a compact template
+          several times over. A ``json_schema`` response format is free on
+          models that enforce it while decoding and billed on models that put
+          it in the prompt; the allowance assumes the latter.
 
         Unless ``venice_parameters`` sets
         ``include_venice_system_prompt=False`` (or ``enable_e2ee=True``,
@@ -1213,6 +1345,10 @@ class ChatCompletions(APIResource["VeniceClient"]):
                 send (a :class:`VeniceParameters` or a mapping). Only
                 ``include_venice_system_prompt`` and ``enable_e2ee`` affect
                 the estimate.
+            tools: The ``tools`` you intend to send (dicts or models).
+            response_format: The ``response_format`` you intend to send: a
+                dict, a model instance, or a Pydantic model class (counted as
+                the ``json_schema`` format :meth:`create` sends for it).
 
         Returns:
             :class:`~venice_ai.costs.ChatCostEstimate` with the prompt /
@@ -1237,8 +1373,16 @@ class ChatCompletions(APIResource["VeniceClient"]):
         """
         pricing = await self._fetch_chat_pricing(model)
 
-        prompt_text = _concat_message_text(_coerce_messages(messages))
-        message_tokens = int(len(prompt_text.split()) * tokens_per_word)
+        coerced = _coerce_messages(messages)
+        names = " ".join(str(n) for msg in coerced if (n := getattr(msg, "name", None)))
+        prompt_text = f"{_concat_message_text(coerced)} {names}".strip()
+        template_tokens = CHAT_TEMPLATE_TOKEN_ALLOWANCE + CHAT_MESSAGE_TOKEN_ALLOWANCE * len(
+            coerced
+        )
+        schema_tokens = _schema_token_allowance(tools, response_format)
+        message_tokens = (
+            int(len(prompt_text.split()) * tokens_per_word) + template_tokens + schema_tokens
+        )
         opted_out = (
             _venice_params_as_dict(venice_parameters).get("include_venice_system_prompt") is False
         )
@@ -1257,6 +1401,8 @@ class ChatCompletions(APIResource["VeniceClient"]):
             model=model,
             prompt_tokens=message_tokens + system_prompt_tokens,
             venice_system_prompt_tokens=system_prompt_tokens,
+            template_overhead_tokens=template_tokens,
+            schema_tokens=schema_tokens,
             expected_completion_tokens=expected_completion_tokens,
             prompt_cost_usd=prompt_cost,
             completion_cost_usd=completion_cost,
@@ -1342,14 +1488,7 @@ class ChatCompletions(APIResource["VeniceClient"]):
                 "ChatCompletionResponse.parse_as() on the collected response."
             )
 
-        schema_format = JSONSchemaFormat(
-            type="json_schema",
-            json_schema={
-                "name": schema_name or response_format.__name__,
-                "strict": strict,
-                "schema": response_format.model_json_schema(),
-            },
-        )
+        schema_format = _schema_response_format(response_format, name=schema_name, strict=strict)
 
         result = await self.create(
             model=model,

@@ -166,6 +166,8 @@ __all__ = [
     "MissingStreamClassError",
     "VideoGenerationError",
     "MusicGenerationError",
+    "NoMatchingModelError",
+    "ModelQuotesUnavailableError",
     "StreamConsumedError",
     "StreamClosedError",
     "PaymentRequiredError",
@@ -572,6 +574,72 @@ class MusicGenerationError(VeniceError):
     ) -> None:
         super().__init__(message, request=request, response=response)
         self.error_code = error_code
+
+
+class NoMatchingModelError(VeniceError, ValueError):
+    """Raised by the model resolvers when no catalog model passes the filters.
+
+    Raised by ``client.models.resolve*`` (including ``resolve_cheapest_video``
+    and ``resolve_cheapest_music``) when the catalog has no model of the
+    requested kind, or none that satisfies every filter and can serve the
+    requested settings. Nothing was quoted or billed. This is an answer about
+    the catalog, not an outage: retrying returns the same result until the
+    catalog or the filters change.
+
+    Subclasses :class:`ValueError`, so ``except ValueError`` still catches it.
+
+    Attributes:
+        resource_type: The kind of model asked for (``"chat"``, ``"video"``,
+            ``"music"`` ...), or ``None`` when not known.
+        skipped: Candidates that were considered and rejected, mapped to the
+            reason, when the resolver records them; otherwise empty.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resource_type: str | None = None,
+        skipped: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.resource_type = resource_type
+        self.skipped: dict[str, str] = dict(skipped or {})
+
+
+class ModelQuotesUnavailableError(VeniceError, ValueError):
+    """Raised when candidate models exist but every price quote failed.
+
+    ``resolve_cheapest_video`` and ``resolve_cheapest_music`` (and
+    ``resolve(..., prefer="cheapest")`` for video and music) rank models by
+    free quote calls. When at least one model passes the filters but no quote
+    succeeds, there is nothing to rank, so this is raised instead of
+    :class:`NoMatchingModelError`. The cause is on the quote side: a rate
+    limit, a server error or outage, a connection failure, or Venice rejecting
+    the quote request. Inspect :attr:`failures` to tell which; the same
+    exceptions are grouped in ``__cause__`` as an :class:`ExceptionGroup`.
+
+    Subclasses :class:`ValueError`, so ``except ValueError`` still catches it.
+
+    Attributes:
+        resource_type: ``"video"`` or ``"music"``.
+        failures: Each quoted model id mapped to the exception its quote raised.
+        skipped: Candidates rejected before quoting (no valid request for the
+            requested settings), mapped to the reason.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resource_type: str,
+        failures: dict[str, Exception],
+        skipped: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.resource_type = resource_type
+        self.failures: dict[str, Exception] = dict(failures)
+        self.skipped: dict[str, str] = dict(skipped or {})
 
 
 class MissingStreamClassError(VeniceError):

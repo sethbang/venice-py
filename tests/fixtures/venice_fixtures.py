@@ -257,7 +257,6 @@ def mock_venice_account():
     """Create a mock Venice account."""
     account = Mock()
     account.account_id = "test-account"
-    account.account_key = "test-key"
     account.can_make_request = AsyncMock(return_value=True)
     account.record_request_success = AsyncMock()
     account.record_request_failure = AsyncMock()

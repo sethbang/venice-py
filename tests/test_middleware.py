@@ -224,10 +224,10 @@ class TestRetryMiddleware:
 
         handler.side_effect = [response_503, response_200]
 
-        # Create mock POST request
+        # A POST to an endpoint whose documented 503 means "at capacity"
         request = Mock()
         request.method = "POST"
-        request.url = "http://example.com/api"
+        request.url = "http://example.com/api/v1/image/generate"
 
         # Execute middleware
         result = await middleware(request, handler)
@@ -297,19 +297,19 @@ class TestRetryMiddleware:
             base_delay=1.0,  # Would normally wait 1 second
             respect_retry_after=True,
             max_retry_after=0.1,  # Cap at 0.1 seconds for testing
-            retry_status_codes={429},  # 429 is not in the default set
+            retry_status_codes={503},
         )
         middleware = create_retry_middleware(options)
 
-        # Mock handler that returns 429 with Retry-After, then 200
+        # Mock handler that returns 503 with Retry-After, then 200
         handler = AsyncMock()
-        response_429 = Mock(spec=ClientResponse)
-        response_429.status = 429
-        response_429.headers = {"Retry-After": "0.05"}  # Request 50ms delay
+        response_503 = Mock(spec=ClientResponse)
+        response_503.status = 503
+        response_503.headers = {"Retry-After": "0.05"}  # Request 50ms delay
         response_200 = Mock(spec=ClientResponse)
         response_200.status = 200
 
-        handler.side_effect = [response_429, response_200]
+        handler.side_effect = [response_503, response_200]
 
         # Create mock request
         request = Mock()
@@ -478,8 +478,8 @@ class TestIntegrationWithAioHTTP:
             request_times.append(time.time())
 
             if len(request_times) == 1:
-                # First request: return 429 with Retry-After
-                return web.Response(status=429, headers={"Retry-After": "0.1"}, text="Rate Limited")
+                # First request: return 503 with Retry-After
+                return web.Response(status=503, headers={"Retry-After": "0.1"}, text="Unavailable")
             else:
                 # Second request: success
                 return web.Response(status=200, text="Success")
@@ -500,7 +500,7 @@ class TestIntegrationWithAioHTTP:
                 max_attempts=1,
                 base_delay=1.0,  # Would normally wait 1 second
                 respect_retry_after=True,
-                retry_status_codes={429},
+                retry_status_codes={503},
             )
             middleware = create_retry_middleware(retry_options)
 

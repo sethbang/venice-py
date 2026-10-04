@@ -1038,15 +1038,9 @@ class TestFetchRateLimitsEdgeCases:
         """
         discovery = discovery_with_mock_client
 
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = Mock()
-        mock_response.json = AsyncMock(
+        discovery.client.get = AsyncMock(
             return_value={"data": 12345}  # Not list, not dict with rateLimits
         )
-
-        mock_session = AsyncMock()
-        mock_session.get = AsyncMock(return_value=mock_response)
-        discovery.client._get_session = AsyncMock(return_value=mock_session)
 
         result = await discovery._fetch_rate_limits_simple()
         assert result is None
@@ -1058,15 +1052,9 @@ class TestFetchRateLimitsEdgeCases:
         """
         discovery = discovery_with_mock_client
 
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = Mock()
-        mock_response.json = AsyncMock(
+        discovery.client.get = AsyncMock(
             return_value={"data": {"otherKey": "value"}}  # Dict but no 'rateLimits'
         )
-
-        mock_session = AsyncMock()
-        mock_session.get = AsyncMock(return_value=mock_response)
-        discovery.client._get_session = AsyncMock(return_value=mock_session)
 
         result = await discovery._fetch_rate_limits_simple()
         assert result is None
@@ -1078,17 +1066,11 @@ class TestFetchRateLimitsEdgeCases:
         """
         discovery = discovery_with_mock_client
 
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = Mock()
-        mock_response.json = AsyncMock(
+        discovery.client.get = AsyncMock(
             return_value={
                 "data": {"rateLimits": "not-a-list"}  # rateLimits key but not list
             }
         )
-
-        mock_session = AsyncMock()
-        mock_session.get = AsyncMock(return_value=mock_response)
-        discovery.client._get_session = AsyncMock(return_value=mock_session)
 
         result = await discovery._fetch_rate_limits_simple()
         assert result is None

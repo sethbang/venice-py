@@ -400,8 +400,8 @@ class TestNestedConstraintCapabilityExtraAllow:
     models. Pydantic's ``extra='allow'`` does NOT recurse, so each nested model
     sets it explicitly; otherwise it would silently drop live fields such as:
 
-      - image/inpaint ``constraints``: ``aspectRatios`` / ``resolutions`` /
-        ``defaultResolution`` (needed for the ``aspect_ratio`` feature)
+      - image/inpaint ``constraints``: ``aspectRatios`` /
+        ``defaultAspectRatio`` (needed for the ``aspect_ratio`` feature)
       - video ``constraints``: ``audio_input`` / ``per_reference_audio`` /
         ``prompt_character_limit`` / ``reference_image_*``
       - text-model ``capabilities``: ``maxImages``
@@ -425,9 +425,11 @@ class TestNestedConstraintCapabilityExtraAllow:
         )
         assert c.model_extra is not None
         assert c.model_extra.get("aspectRatios") == ["1:1", "16:9", "9:16"]
-        assert c.model_extra.get("resolutions") == ["1024x1024", "1920x1080"]
-        assert c.model_extra.get("defaultResolution") == "1024x1024"
+        assert c.model_extra.get("defaultAspectRatio") == "1:1"
         assert c.model_dump()["aspectRatios"] == ["1:1", "16:9", "9:16"]
+        # Resolution tiers are typed fields, so they parse onto attributes.
+        assert c.resolutions == ["1024x1024", "1920x1080"]
+        assert c.defaultResolution == "1024x1024"
 
     def test_inpaint_constraints_preserve_aspect_ratio_fields(self):
         # Real wire shape from firered-image-edit (GET /models?type=inpaint).
@@ -533,3 +535,29 @@ class TestUncensoredFlag:
             _wrap("video", {"name": "A Video Model", "uncensored": True})
         )
         assert entry.model_spec.uncensored is True
+
+
+class TestSubclassFieldsSerialize:
+    """``model_dump`` keeps the fields only a ``ModelSpec`` subclass declares."""
+
+    CASES = (
+        ("text", {"name": "t", "availableContextTokens": 200000}, "availableContextTokens"),
+        ("image", {"name": "i", "supportsWebSearch": True}, "supportsWebSearch"),
+        ("music", {"name": "m", "min_duration": 5}, "min_duration"),
+        ("tts", {"name": "s", "voices": ["alpha"]}, "voices"),
+        (
+            "embedding",
+            {"name": "e", "embeddingDimensions": 1024, "maxInputTokens": 8192},
+            "embeddingDimensions",
+        ),
+    )
+
+    def test_dump_and_round_trip_keep_subclass_fields(self):
+        for model_type, spec, field_name in self.CASES:
+            original = ModelResponse.model_validate(_wrap(model_type, spec))
+            dumped = original.model_dump(by_alias=True)
+            assert field_name in dumped["model_spec"], model_type
+            assert field_name in original.model_dump_json(), model_type
+            again = ModelResponse.model_validate(dumped)
+            assert type(again.model_spec) is type(original.model_spec)
+            assert getattr(again.model_spec, field_name) == getattr(original.model_spec, field_name)

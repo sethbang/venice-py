@@ -67,10 +67,9 @@ import asyncio
 import aiohttp
 
 from .exceptions import (
-    APIConnectionError,
-    APITimeoutError,
     StreamConsumedError,
 )
+from .utils.errors import map_aiohttp_error
 
 logger = logging.getLogger(__name__)
 
@@ -206,21 +205,13 @@ class Stream[ChunkType]:
         await self.close()
 
     def _convert_to_api_error(self, error: Exception) -> Exception:
-        """
-        Convert known errors to appropriate API error types.
+        """Map a transport error raised mid-stream to the SDK exception.
 
-        Uses standardized exception hierarchy - more specific exceptions
-        are checked first before general ones.
+        Uses the same mapping as every request and body read
+        (:func:`venice_ai.utils.errors.map_aiohttp_error`); any other error is
+        returned unchanged.
         """
-        if isinstance(error, aiohttp.ServerTimeoutError):
-            # Server-side timeout - more specific, check first
-            return APITimeoutError("Server timeout during streaming", original_error=error)
-        elif isinstance(error, TimeoutError):
-            # General timeout - includes client-side timeouts
-            return APITimeoutError("Stream request timed out", original_error=error)
-        elif isinstance(error, aiohttp.ClientError):
-            return APIConnectionError("Connection error during streaming", original_error=error)
-        return error
+        return map_aiohttp_error(error, phase="stream") or error
 
     async def __anext__(self) -> ChunkType:
         """
@@ -245,6 +236,10 @@ class Stream[ChunkType]:
         Error Handling:
             * Timeouts are converted to APITimeoutError with original exception context
             * Network errors are converted to APIConnectionError
+            * SDK errors (``VeniceError`` subclasses, such as an ``APIError``
+              or an ``APITimeoutError`` raised while sending the request) are
+              re-raised unchanged and logged at DEBUG only, since the caller
+              receives them
             * Unexpected errors are logged and wrapped in VeniceError
             * CancelledError is always re-raised for graceful shutdown
             * Stream is marked as consumed and cleaned up on any error
@@ -275,12 +270,20 @@ class Stream[ChunkType]:
         except asyncio.CancelledError:
             raise  # Always re-raise for graceful shutdown
         except Exception as e:
-            from .exceptions import APIError, VeniceError
+            from .exceptions import VeniceError
 
-            # APIError subclasses are re-raised unchanged to preserve detailed API
-            # error information (status codes, headers, retry-after, etc.)
-            if isinstance(e, APIError):
-                await self._handle_unexpected_error(e)
+            # SDK errors are re-raised unchanged: an APIError keeps its status
+            # code, headers and retry-after, and an APITimeoutError or
+            # APIConnectionError raised while the request was being sent keeps
+            # its type. The caller receives the error, so it is not also
+            # logged as a failure, matching the non-streaming request path.
+            if isinstance(e, VeniceError):
+                logger.debug(
+                    "Stream ended with %s (status %s)",
+                    type(e).__name__,
+                    getattr(e, "status_code", None),
+                )
+                await self._handle_stream_error(e)
                 raise
 
             # RuntimeError indicates programmer errors (assertions, invalid states)

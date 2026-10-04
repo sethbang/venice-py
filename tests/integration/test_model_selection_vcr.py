@@ -186,7 +186,7 @@ async def test_select_chat_model_require_function_calling(venice_client, vcr_cas
     with vcr_cassette:
         selector = DynamicModelSelector(venice_client)
 
-        # This should delegate to select_function_calling_model
+        # Function calling is applied as a filter on the shared chat pool
         model = await selector.select_chat_model(require_function_calling=True)
 
         assert model is not None
@@ -270,7 +270,7 @@ async def test_select_audio_model(venice_client, vcr_cassette):
             assert isinstance(model, str)
         except ValueError as e:
             # It's okay if no audio models are available
-            assert "No available audio models" in str(e)
+            assert "No available text-to-speech (tts) models" in str(e)
 
 
 @pytest.mark.integration
@@ -283,7 +283,7 @@ async def test_select_audio_model_with_preferences(venice_client, vcr_cassette):
             model = await selector.select_audio_model(preferred_models=["tts-kokoro", "af_sky"])
             assert model is not None
         except ValueError as e:
-            assert "No available audio models" in str(e)
+            assert "No available text-to-speech (tts) models" in str(e)
 
 
 @pytest.mark.integration

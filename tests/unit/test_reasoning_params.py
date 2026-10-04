@@ -87,3 +87,17 @@ class TestBackgroundRemoveClassification:
         request = {"endpoint": "image/background-remove", "model": "rembg-bria-2.0"}
         metadata = await classifier.classify(request)
         assert metadata.resource_type == ResourceType.IMAGE
+
+
+class TestReasoningEnabled:
+    def test_enabled_false_is_serialized(self) -> None:
+        req = ChatCompletionRequest(  # type: ignore[call-arg]
+            model="m",
+            messages=[UserMessage(content="hi")],
+            reasoning=ReasoningConfig(enabled=False),
+        )
+        assert req.model_dump(exclude_none=True)["reasoning"] == {"enabled": False}
+
+    def test_enabled_defaults_to_none(self) -> None:
+        assert ReasoningConfig().enabled is None
+        assert ReasoningConfig(effort="low").model_dump(exclude_none=True) == {"effort": "low"}

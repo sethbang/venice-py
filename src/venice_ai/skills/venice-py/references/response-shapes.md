@@ -15,7 +15,7 @@ Sourced from `src/venice_ai/types/api/`. This page exists because agents repeate
 | `video` | `VideoModelSpec` | `constraints.{model_type, aspect_ratios, resolutions, durations, audio, ...}`, pricing varies by model |
 | `inpaint` | `InpaintModelSpec` | `constraints.{promptCharacterLimit, image_combination, ...}` |
 | `music` | `MusicModelSpec` | `voices`, `default_voice`, `duration_options` (enum) OR `min_duration` / `max_duration` (range), `default_duration`, `supported_formats`, `default_format`, `prompt_character_limit`, `lyrics_character_limit`, `min_prompt_length`, `supports_lyrics`, `lyrics_required`, `supports_lyrics_optimizer`, `supports_force_instrumental`, `supports_language_code`, `supports_speed`, `min_speed`, `max_speed`, `default_speed`, `pricing.durations[<dur>].usd` (`MusicModelPricing`) |
-| `tts` | `TtsModelSpec` | `voices: list[str]`, `default_voice`, `pricing.input.usd` (`AudioModelPricing`) |
+| `tts` | `TtsModelSpec` | `voices: list[str]`, `default_voice`, `supported_formats`, `default_format`, `supports_custom_voice_id`, `voice_cloning` (`TtsVoiceCloning`: `mode` -- open `str`, narrow with `KNOWN_VOICE_CLONING_MODES` -- `accepted_formats`, `min_sample_seconds`, `retention_days`; `None` when the model cannot clone), `pricing.input.usd` (`AudioModelPricing`) |
 | `asr` | `AsrModelSpec` | (no type-specific fields today), `pricing.per_audio_second.usd` (`ASRModelPricing`) |
 | `embedding` | `EmbeddingModelSpec` | `embeddingDimensions`, `maxInputTokens`, `supportsCustomDimensions`, `pricing.{input, output}.usd` (`LLMModelPricing`) |
 | `upscale` | `UpscaleModelSpec` | image upscaler — see `UpscaleModelSpec` in `src/venice_ai/types/api/models.py` |
@@ -25,7 +25,7 @@ Sourced from `src/venice_ai/types/api/`. This page exists because agents repeate
 This trips up generic helpers. Field names mirror the wire and the wire is not consistent across types:
 
 - **camelCase**: `availableContextTokens` (text), `maxCompletionTokens` (text), `embeddingDimensions` (embedding), `maxInputTokens` (embedding), `supportsCustomDimensions` (embedding), `supportsWebSearch` (image), `supportsVision` / `supportsFunctionCalling` / etc. (`ModelCapabilities`), `promptCharacterLimit` (image constraints).
-- **snake_case**: every field on `MusicModelSpec` (`duration_options`, `min_duration`, `default_duration`, `prompt_character_limit`, `supports_lyrics`, `supports_force_instrumental`, ...), `default_voice` on `TtsModelSpec`, `model_type` / `aspect_ratios` on `VideoModelConstraints`.
+- **snake_case**: every field on `MusicModelSpec` (`duration_options`, `min_duration`, `default_duration`, `prompt_character_limit`, `supports_lyrics`, `supports_force_instrumental`, ...), `default_voice` / `supported_formats` / `default_format` / `supports_custom_voice_id` / `voice_cloning` on `TtsModelSpec`, `model_type` / `aspect_ratios` on `VideoModelConstraints`.
 
 Notably `prompt_character_limit` is **snake_case on music but `promptCharacterLimit` on image** — same concept, different casing. A generic "extract a prompt cap" helper has to try both spellings or hardcode per-type. There's no sentinel field on `ModelSpec` to dispatch on; use `model.type` and the table above.
 

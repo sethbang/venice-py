@@ -82,6 +82,7 @@ venice-py chat start                  # Interactive chat
 venice-py image generate "..."        # Image generation
 venice-py image multi-edit -p "..."   # Multi-image edit
 venice-py models                      # Browse models
+venice-py decisions "..." --noul ...  # Typed answers from a decision model
 venice-py characters reviews <slug>   # Character reviews
 venice-py account keys rate-limits    # Per-model RPM/TPM limits
 venice-py configure                   # Setup wizard
@@ -272,6 +273,10 @@ embedding_model = await client.models.resolve_embedding()
 
 # Capability filters via the unified entry point:
 vision_model = await client.models.resolve(type="chat", require_vision=True)
+
+# Lowest-priced model that passes the filters (default: Venice's own pick):
+cheap_agent = await client.models.resolve_chat(require_function_calling=True, prefer="cheapest")
+cheap_embedder = await client.models.resolve_embedding(prefer="cheapest")
 ```
 
 ---
@@ -576,7 +581,7 @@ Rate limiting, distributed state, monitoring, observability, and performance tun
 | `image` | Image generation | `create()`, `background_remove()` | [text_to_image.py](https://github.com/sethbang/venice-py/blob/main/examples/image/text_to_image.py) |
 | `video` | Async video generation | `run()` → `VideoJob`, low-level `submit()` / `quote()` / `retrieve()` / `cancel()` | [text_to_video.py](https://github.com/sethbang/venice-py/blob/main/examples/video/text_to_video.py) |
 | `audio` | TTS / ASR | `create_speech()`, `transcribe()` | [text_to_speech.py](https://github.com/sethbang/venice-py/blob/main/examples/audio/text_to_speech.py) |
-| `music` | Async music generation | `run()` → `MusicJob`, low-level `submit()` / `quote()` / `retrieve()` / `cancel()` | [music_generation.py](https://github.com/sethbang/venice-py/blob/main/examples/music/music_generation.py) |
+| `music` | Async music generation | `run()` → `MusicJob`, low-level `submit()` / `quote()` / `retrieve()` / `release()` | [music_generation.py](https://github.com/sethbang/venice-py/blob/main/examples/music/music_generation.py) |
 | `decisions` | Typed judgments from decision models (Beta) | `create()` | [ticket_routing.py](https://github.com/sethbang/venice-py/blob/main/examples/decisions/ticket_routing.py) |
 | `voice_changer` | Async voice conversion | `run()` → `VoiceChangerJob`, low-level `submit()` / `quote()` / `retrieve()` / `cancel()` | [voice_changer.py](https://github.com/sethbang/venice-py/blob/main/examples/audio/voice_changer.py) |
 | `embeddings` | Text embeddings | `create()` | [basic_embeddings.py](https://github.com/sethbang/venice-py/blob/main/examples/embeddings/basic_embeddings.py) |

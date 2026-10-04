@@ -5,7 +5,10 @@ This module provides comprehensive test coverage for the factory pattern impleme
 that serves as the composition root for dependency injection in Venice AI v2.0.0.
 """
 
+import warnings
 from unittest.mock import Mock, patch
+
+import pytest
 
 from venice_ai.core.config import (
     BackendType,
@@ -55,7 +58,6 @@ class TestVeniceClientFactoryBasicCreation:
             config=config,
             api_key="custom-api-key",
             account_id="custom-account",
-            account_key="custom-account-key",
             http_client=mock_http_client,
         )
 
@@ -63,7 +65,9 @@ class TestVeniceClientFactoryBasicCreation:
         call_kwargs = mock_venice_client_class.call_args[1]
         assert call_kwargs["api_key"] == "custom-api-key"
         assert call_kwargs["http_client"] == mock_http_client
-        assert call_kwargs["base_url"] == f"{config.api_base_url}/api/{config.api_version}"
+        # The client reads the API root from config.api_base_url itself.
+        assert "base_url" not in call_kwargs
+        assert call_kwargs["config"] is config
 
         assert result == mock_client
 
@@ -93,7 +97,7 @@ class TestVeniceClientFactoryBasicCreation:
             # create_test_config defaults to BASIC so callers without
             # tier-discovery setup get a working test client out of the box.
             assert config_arg.scheduler.mode == SchedulerMode.BASIC
-            assert config_arg.scheduler.test_mode is True
+            assert config_arg.is_test_environment() is True
             assert config_arg.scheduler.test_rate_multiplier == 5.0
             assert config_arg.backend.backend_type == BackendType.MEMORY
 
@@ -374,3 +378,45 @@ class TestCreateDeveloperClient:
         client = create_developer_client()
         # VeniceClient strips and stashes the key on construction
         assert client._api_key == "env-resolved-key"
+
+
+class TestConfigBuildersThroughFactory:
+    """First-party config builders must not trip the factory's own warnings."""
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            VeniceAIConfig.create_test_config,
+            VeniceAIConfig.create_minimal_config,
+        ],
+        ids=["create_test_config", "create_minimal_config"],
+    )
+    async def test_builder_default_through_create_client_is_silent(self, build):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            config = build()
+            client = VeniceClientFactory.create_client(
+                config, api_key="test-key", account_id="acct"
+            )
+            await client.close()
+
+        assert [f"{w.category.__name__}: {w.message}" for w in caught] == []
+
+    def test_create_test_config_redis_opt_in_is_honoured_and_reported(self):
+        """Asking for Redis under the SIMPLE rate limiter still builds it, and says it is unused."""
+        config = VeniceAIConfig.create_test_config(enable_redis=True, test_rate_multiplier=10.0)
+
+        assert config.backend.backend_type == BackendType.REDIS
+        assert config.backend.redis is not None
+        assert config.backend.redis.redis_url == "redis://localhost:6379/15"
+        assert config.scheduler.test_rate_multiplier == 10.0
+
+        with (
+            patch("venice_ai._client.VeniceClient"),
+            pytest.warns(UserWarning) as record,
+        ):
+            VeniceClientFactory.create_client(config, api_key="test-key")
+
+        messages = [str(w.message) for w in record]
+        assert any("backend_type=BackendType.REDIS has no effect" in m for m in messages)
+        assert any("['test_rate_multiplier']" in m for m in messages)

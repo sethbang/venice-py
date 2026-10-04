@@ -413,13 +413,12 @@ def _make_wav_bytes(duration_ms: int = 200) -> bytes:
 class TestTranscribeFromBytes:
     """Cover transcribe() with raw bytes input (line 676-677).
 
-    The Venice API requires a recognisable audio content-type.  When raw
-    ``bytes`` are passed the client sets ``filename="audio"`` (no extension),
-    so the content-type falls back to ``application/octet-stream`` and the
-    API rejects the request.
+    The Venice API requires a recognisable audio content-type.  Raw ``bytes``
+    carry no filename, so the client names them from their magic bytes
+    (``audio.wav`` for RIFF/WAVE) and derives the content type from that name.
 
-    We therefore test the *branch* offline (mocking ``_request_multipart``)
-    and test the *happy-path* via a temp file with a ``.wav`` extension.
+    The *branch* is tested offline (mocking ``_request_multipart``) and the
+    *happy-path* via a temp file with a ``.wav`` extension.
     """
 
     async def test_transcribe_bytes_branch_offline(self, offline_client):
@@ -448,6 +447,7 @@ class TestTranscribeFromBytes:
             assert _content is wav_bytes
             # _detect_audio_filename recognises WAV magic bytes → "audio.wav"
             assert _fname == "audio.wav"
+            assert _ctype == "audio/wav"
 
     async def test_transcribe_bytes_via_file_path(
         self,
@@ -478,7 +478,8 @@ class TestTranscribeFromBytes:
 class TestTranscribeFromBytesIO:
     """Cover transcribe() with BytesIO input (line 678-679).
 
-    Same content-type limitation as raw bytes — we test the branch offline.
+    A ``BytesIO`` has no filename either, so it is named from its magic bytes
+    the same way as raw ``bytes``.  The branch is tested offline.
     """
 
     async def test_transcribe_bytesio_branch_offline(self, offline_client):
@@ -505,6 +506,9 @@ class TestTranscribeFromBytesIO:
             files_dict = call_kwargs.kwargs.get("files") or call_kwargs[1].get("files")
             _fname, _content, _ctype = files_dict["file"]
             assert _content == wav_bytes
+            # No name → sniffed from the RIFF/WAVE header
+            assert _fname == "audio.wav"
+            assert _ctype == "audio/wav"
 
 
 class TestTranscribeFromFilePath:
@@ -611,7 +615,7 @@ class TestTranscribeFromFileLike:
             os.unlink(tmp_path)
 
     async def test_transcribe_file_like_no_name_offline(self, offline_client):
-        """File-like object without .name attribute uses default filename (offline)."""
+        """File-like object without .name is named from its magic bytes (offline)."""
         from unittest.mock import AsyncMock, patch
 
         wav_bytes = _make_wav_bytes(duration_ms=200)
@@ -638,8 +642,39 @@ class TestTranscribeFromFileLike:
             call_kwargs = mock_req.call_args
             files_dict = call_kwargs.kwargs.get("files") or call_kwargs[1].get("files")
             _fname, _content, _ctype = files_dict["file"]
-            # No .name → default filename "audio"
+            assert _content == wav_bytes
+            # No .name → sniffed from the RIFF/WAVE header
+            assert _fname == "audio.wav"
+            assert _ctype == "audio/wav"
+
+    async def test_transcribe_file_like_no_name_unrecognised_offline(self, offline_client):
+        """Nameless file-like with unrecognised content keeps the bare name (offline)."""
+        from unittest.mock import AsyncMock, patch
+
+        payload = b"\x00\x01\x02\x03not-audio"
+
+        class FakeFile:
+            """File-like object without .name attribute."""
+
+            def read(self):
+                return payload
+
+        with patch.object(
+            offline_client.audio,
+            "_request_multipart",
+            new_callable=AsyncMock,
+            return_value={"text": ""},
+        ) as mock_req:
+            await offline_client.audio.transcribe(
+                file=FakeFile(),
+                model="nvidia/parakeet-tdt-0.6b-v3",
+            )
+
+            files_dict = mock_req.call_args.kwargs["files"]
+            _fname, _content, _ctype = files_dict["file"]
+            assert _content == payload
             assert _fname == "audio"
+            assert _ctype == "application/octet-stream"
 
     async def test_transcribe_file_like_non_bytes_read_raises(self, offline_client):
         """File-like object returning non-bytes from read() raises TypeError (line 686-688)."""

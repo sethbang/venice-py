@@ -20,6 +20,7 @@ The audio API allows for:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import json
 import logging
@@ -47,7 +48,9 @@ from ..types.api import (
     VoiceList,
 )
 from ..types.enums import ResponseFormat, Voice
+from ..utils.errors import read_body, resolve_timeout, wrap_aiohttp_errors
 from ..validation.validators import validate_model_id
+from ._inline_audio import sniff_audio_format
 
 if TYPE_CHECKING:
     from .._client import VeniceClient  # noqa: F401
@@ -222,6 +225,23 @@ class Audio(APIResource["VeniceClient"]):
         stream: Literal[True],
         timeout: float | aiohttp.ClientTimeout | None = None,
     ) -> AsyncIterator[bytes]: ...
+
+    @overload
+    async def create_speech(
+        self,
+        *,
+        input: str,
+        model: str,
+        voice: str | Voice,
+        response_format: str | ResponseFormat | None = None,
+        speed: float | None = None,
+        language: str | None = None,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        stream: bool,
+        timeout: float | aiohttp.ClientTimeout | None = None,
+    ) -> AudioResponse | AsyncIterator[bytes]: ...
 
     async def create_speech(
         self,
@@ -407,7 +427,7 @@ class Audio(APIResource["VeniceClient"]):
             )
             # Handle aiohttp.ClientResponse properly
             if isinstance(response, aiohttp.ClientResponse):
-                content = await response.read()
+                content = await read_body(response)
                 return AudioResponse(content, response)
             elif isinstance(response, bytes):
                 return AudioResponse(response, None)
@@ -432,9 +452,7 @@ class Audio(APIResource["VeniceClient"]):
         rather than JSON data, specifically for the audio/speech endpoint.
         """
         session = await self._client._get_session()
-        request_headers = dict(session.headers)
-        if headers:
-            request_headers.update(headers)
+        request_headers = self._client._request_headers(session, headers)
 
         # Properly join the base URL path with the endpoint path
         base_path = self._client._base_url.path.rstrip("/")
@@ -442,20 +460,28 @@ class Audio(APIResource["VeniceClient"]):
         full_path = f"{base_path}/{endpoint_path}"
         url = self._client._base_url.with_path(full_path)
 
-        # Convert timeout if needed
-        final_timeout = None
-        if timeout is not None and isinstance(timeout, (int, float)):
-            final_timeout = aiohttp.ClientTimeout(total=timeout)
+        final_timeout = resolve_timeout(timeout, self._client._timeout)
 
-        try:
-            async with session.request(
-                method,
-                url,
-                json=json_data,
-                params=params,
-                headers=request_headers,
-                timeout=final_timeout,
-            ) as response:
+        # The whole exchange, the streamed body included, maps transport
+        # failures the way every other request does.
+        # The SIWE re-signer is published only while the request is sent, where
+        # the retry middleware runs, and withdrawn as soon as the response
+        # arrives: this generator may be finalized in another context after the
+        # caller stops iterating, where the withdrawal could not run.
+        with contextlib.ExitStack() as resign_scope:
+            resign_scope.enter_context(self._client._siwe_resigning(headers))
+            async with (
+                wrap_aiohttp_errors(),
+                session.request(
+                    method,
+                    url,
+                    json=json_data,
+                    params=params,
+                    headers=request_headers,
+                    timeout=final_timeout,
+                ) as response,
+            ):
+                resign_scope.close()
                 if not response.ok:
                     try:
                         body = await response.json()
@@ -471,50 +497,52 @@ class Audio(APIResource["VeniceClient"]):
                         response=response,
                     )
 
-                # Stream the audio content as raw bytes
-                #
-                # PRIMARY PATH: Standard aiohttp streaming via iter_chunked()
-                # FALLBACK PATH: Ensures compatibility with older aiohttp versions,
-                # proxies that buffer responses, or edge cases where streaming fails.
-                # This fallback handles environments where iter_chunked() may not work
-                # as expected due to HTTP middleware, non-standard server implementations,
-                # or library version differences.
-                chunk_count = 0
-                fallback_reason = None
-                try:
-                    # First attempt: normal streaming from HTTP response
-                    async for chunk in response.content.iter_chunked(8192):
-                        if chunk:
-                            chunk_count += 1
-                            yield chunk
-                    logger.debug(f"Audio streaming: Used standard path, {chunk_count} chunks")
-                except (AttributeError, StopAsyncIteration) as e:
-                    fallback_reason = type(e).__name__
-                    logger.debug(f"Audio streaming: Standard path failed ({e}), using fallback")
-                    pass  # Will fall through to fallback logic
-
-                # Fallback: If streaming failed or no chunks were yielded, read full body
-                # This handles non-streaming responses, proxies, and various HTTP client behaviors
-                if chunk_count == 0:
-                    if fallback_reason is None:
-                        fallback_reason = "empty_stream"
-                    logger.warning(
-                        f"Audio streaming: Using fallback read path (reason: {fallback_reason})"
-                    )
-
-                    # Track fallback metrics
+                # The status arrived; a stall from here on is reported as a
+                # stream that was cut off, like a chat Stream.
+                async with wrap_aiohttp_errors(phase="stream"):
+                    # Stream the audio content as raw bytes
+                    #
+                    # PRIMARY PATH: Standard aiohttp streaming via iter_chunked()
+                    # FALLBACK PATH: Ensures compatibility with older aiohttp versions,
+                    # proxies that buffer responses, or edge cases where streaming fails.
+                    # This fallback handles environments where iter_chunked() may not work
+                    # as expected due to HTTP middleware, non-standard server implementations,
+                    # or library version differences.
+                    chunk_count = 0
+                    fallback_reason = None
                     try:
-                        from ..observability.metrics import get_enhanced_metrics
+                        # First attempt: normal streaming from HTTP response
+                        async for chunk in response.content.iter_chunked(8192):
+                            if chunk:
+                                chunk_count += 1
+                                yield chunk
+                        logger.debug(f"Audio streaming: Used standard path, {chunk_count} chunks")
+                    except (AttributeError, StopAsyncIteration) as e:
+                        fallback_reason = type(e).__name__
+                        logger.debug(f"Audio streaming: Standard path failed ({e}), using fallback")
+                        pass  # Will fall through to fallback logic
 
-                        metrics = get_enhanced_metrics()
-                        if metrics._enabled:
-                            metrics.streaming_fallback_total.labels(
-                                endpoint="audio/speech", reason=fallback_reason
-                            ).inc()
-                    except Exception:
-                        pass  # nosec B110
+                    # Fallback: If streaming failed or no chunks were yielded, read full body
+                    # This handles non-streaming responses, proxies, and various HTTP client behaviors
+                    if chunk_count == 0:
+                        if fallback_reason is None:
+                            fallback_reason = "empty_stream"
+                        logger.warning(
+                            f"Audio streaming: Using fallback read path (reason: {fallback_reason})"
+                        )
 
-                    try:
+                        # Track fallback metrics
+                        try:
+                            from ..observability.metrics import get_enhanced_metrics
+
+                            metrics = get_enhanced_metrics()
+                            if metrics._enabled:
+                                metrics.streaming_fallback_total.labels(
+                                    endpoint="audio/speech", reason=fallback_reason
+                                ).inc()
+                        except Exception:
+                            pass  # nosec B110
+
                         full_body = await response.read()
                         if full_body:
                             # Chunk the full body for consistent streaming interface
@@ -532,22 +560,6 @@ class Audio(APIResource["VeniceClient"]):
                                     chunk = full_body[i : i + 8192]
                                     if chunk:
                                         yield chunk
-                    except Exception:
-                        # If all else fails, just re-raise the original error
-                        raise
-
-        except TimeoutError as e:
-            from ..exceptions import APITimeoutError
-
-            raise APITimeoutError("Request timed out", original_error=e) from e
-        except aiohttp.ClientConnectorError as e:
-            from ..exceptions import APIConnectionError
-
-            raise APIConnectionError("Connection failed", original_error=e) from e
-        except aiohttp.ClientError as e:
-            from ..exceptions import APIConnectionError
-
-            raise APIConnectionError("A connection error occurred", original_error=e) from e
 
     async def stream_long_text(
         self,
@@ -699,33 +711,21 @@ class Audio(APIResource["VeniceClient"]):
 
         This allows the multipart upload to include a correct content-type
         even when the caller supplies raw ``bytes`` without a file path.
+        Containers are identified by the same sniffer that reads inline job
+        results (a leading ID3v2 tag is skipped, AAC ADTS is told apart from
+        MPEG audio by its layer bits). What it does not recognise falls back
+        to looser upload hints: any MPEG frame sync or a bare ID3 tag is named
+        ``.mp3``, and an EBML header ``.webm``.
         """
-        if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
-            return "audio.wav"
-        if data[:4] == b"fLaC":
-            return "audio.flac"
-        if len(data) >= 3 and data[:3] == b"\xff\xfb\x90":
-            return "audio.mp3"
-        # AAC ADTS sync – must be checked BEFORE the MP3 frame-sync test
-        # because the ADTS pattern (0xFFF0) is a subset of the MP3 frame-sync
-        # pattern (0xFFE0); any byte matching 0xF0 also matches 0xE0, so if the
-        # MP3 check came first the AAC branch would be unreachable. ADTS always
-        # carries layer bits ``00``, which is what separates it from an MPEG
-        # audio frame header (Layer III is ``01``: 0xFB, 0xF3, ...).
-        if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xF6) == 0xF0:
-            return "audio.aac"
-        # MP3 frame sync (various bitrate/layer combos)
+        sniffed = sniff_audio_format(data)
+        if sniffed is not None:
+            return f"audio.{sniffed}"
+        # MPEG audio frame sync whose header the sniffer could not parse
         if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
             return "audio.mp3"
-        # ID3-tagged MP3
+        # ID3 tag in front of audio the sniffer did not recognise
         if data[:3] == b"ID3":
             return "audio.mp3"
-        # ISO BMFF container (M4A / MP4)
-        if len(data) >= 8 and data[4:8] == b"ftyp":
-            return "audio.m4a"
-        # OGG container (Opus / Vorbis)
-        if data[:4] == b"OggS":
-            return "audio.ogg"
         # WebM / Matroska (EBML header)
         if data[:4] == b"\x1a\x45\xdf\xa3":
             return "audio.webm"

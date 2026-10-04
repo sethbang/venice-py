@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import aiohttp
 import pytest
 
+from tests.fixtures.mock_fixtures import with_request_plumbing
 from venice_ai.exceptions import APIError
 from venice_ai.resources.audio import REGION_LANGUAGE_MAPPING, Audio
 from venice_ai.types import AudioResponse, ResponseFormat, Voice, VoiceList
@@ -44,7 +45,7 @@ class TestAudioCreateSpeech:
     @pytest.mark.asyncio
     async def test_create_speech_basic(self):
         """Test basic speech creation without streaming."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
         client._request = AsyncMock(return_value=b"audio_data")
 
         audio_resource = Audio(client)
@@ -72,7 +73,7 @@ class TestAudioCreateSpeech:
     @pytest.mark.asyncio
     async def test_create_speech_with_voice_enum(self):
         """Test speech creation with Voice enum."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
         client._request = AsyncMock(return_value=b"audio_data")
 
         audio_resource = Audio(client)
@@ -90,7 +91,7 @@ class TestAudioCreateSpeech:
     @pytest.mark.asyncio
     async def test_create_speech_with_response_format_enum(self):
         """Test speech creation with ResponseFormat enum."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
         client._request = AsyncMock(return_value=b"audio_data")
 
         audio_resource = Audio(client)
@@ -111,7 +112,7 @@ class TestAudioCreateSpeech:
     @pytest.mark.asyncio
     async def test_create_speech_with_custom_speed(self):
         """Test speech creation with custom speed."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
         client._request = AsyncMock(return_value=b"audio_data")
 
         audio_resource = Audio(client)
@@ -129,7 +130,7 @@ class TestAudioCreateSpeech:
     @pytest.mark.asyncio
     async def test_create_speech_empty_input_error(self):
         """Test that empty input raises ValueError."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
         audio_resource = Audio(client)
 
         with pytest.raises(ValueError) as exc_info:
@@ -144,7 +145,7 @@ class TestAudioCreateSpeech:
     @pytest.mark.asyncio
     async def test_create_speech_with_timeout(self):
         """Test speech creation with custom timeout."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
         client._request = AsyncMock(return_value=b"audio_data")
 
         audio_resource = Audio(client)
@@ -166,7 +167,7 @@ class TestAudioCreateSpeech:
     @pytest.mark.asyncio
     async def test_create_speech_with_aiohttp_timeout(self):
         """Test speech creation with aiohttp.ClientTimeout."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
         client._request = AsyncMock(return_value=b"audio_data")
 
         audio_resource = Audio(client)
@@ -189,7 +190,7 @@ class TestAudioCreateSpeech:
     @pytest.mark.asyncio
     async def test_create_speech_streaming(self):
         """Test speech creation with streaming enabled."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
 
         # Mock the session and its attributes
         mock_session = AsyncMock()
@@ -236,7 +237,7 @@ class TestAudioCreateSpeech:
     @pytest.mark.asyncio
     async def test_create_speech_api_error(self):
         """Test API error handling during speech creation."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
         client._request = AsyncMock(
             side_effect=APIError("TTS service unavailable", request=None, response=Mock())
         )
@@ -253,7 +254,7 @@ class TestAudioCreateSpeech:
     @pytest.mark.asyncio
     async def test_create_speech_with_all_parameters(self):
         """Test speech creation with all parameters specified."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
         client._request = AsyncMock(return_value=b"audio_data")
 
         audio_resource = Audio(client)
@@ -288,7 +289,7 @@ class TestAudioGetVoices:
     @pytest.mark.asyncio
     async def test_get_voices_basic(self):
         """Test basic voice listing."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
 
         # Create mock voice data
         mock_voice_data = [
@@ -347,7 +348,7 @@ class TestAudioGetVoices:
     @pytest.mark.asyncio
     async def test_get_voices_with_language_filter(self):
         """Test voice listing with language filter."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
 
         # Create mock voice data
         mock_voice_data = [
@@ -434,7 +435,7 @@ class TestAudioEdgeCases:
     @pytest.mark.asyncio
     async def test_create_speech_with_long_input(self):
         """Test speech creation with long input text (under 4096 char limit)."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
         client._request = AsyncMock(return_value=b"audio_data")
 
         audio_resource = Audio(client)
@@ -456,7 +457,7 @@ class TestAudioEdgeCases:
     @pytest.mark.asyncio
     async def test_create_speech_with_special_characters(self):
         """Test speech creation with special characters in input."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
         client._request = AsyncMock(return_value=b"audio_data")
 
         audio_resource = Audio(client)
@@ -476,7 +477,7 @@ class TestAudioEdgeCases:
     @pytest.mark.asyncio
     async def test_create_speech_with_edge_speed_values(self):
         """Test speech creation with edge speed values."""
-        client = AsyncMock()
+        client = with_request_plumbing(AsyncMock())
         client._request = AsyncMock(return_value=b"audio_data")
 
         audio_resource = Audio(client)

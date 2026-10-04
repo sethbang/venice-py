@@ -65,7 +65,9 @@ class RedisBackend(AccountBackend):
     _max_pools: ClassVar[int] = 20
 
     # WeakRef registry for automatic cleanup
-    _loop_registry: ClassVar[weakref.WeakValueDictionary] = weakref.WeakValueDictionary()
+    _loop_registry: ClassVar[weakref.WeakValueDictionary[int, asyncio.AbstractEventLoop]] = (
+        weakref.WeakValueDictionary()
+    )
     _cleanup_callbacks: ClassVar[dict[int, Any]] = {}
 
     def __init__(
@@ -128,18 +130,14 @@ class RedisBackend(AccountBackend):
             # Check if we need to switch pools (event loop changed)
             if self._event_loop_id and self._event_loop_id != loop_id:
                 old_loop_id = self._event_loop_id
-                old_connection = self._redis
 
+                # The old client's connections belong to the old loop and cannot
+                # be awaited from this one. The old loop's pool is dropped when
+                # that loop is garbage collected.
                 logger.debug(
                     f"Event loop changed from {old_loop_id} to {loop_id}, "
-                    "performing cleanup and switching connection pool"
+                    "releasing the old client and switching connection pool"
                 )
-
-                if old_connection is not None:
-                    asyncio.create_task(
-                        self._cleanup_connection(old_loop_id, old_connection),
-                        name=f"cleanup_switched_loop_{old_loop_id}",
-                    )
 
                 self._redis = None
                 self._connected = False
@@ -272,20 +270,20 @@ class RedisBackend(AccountBackend):
         """Register cleanup callback for when event loop is garbage collected."""
         loop_id = id(loop)
 
-        def cleanup_callback(_weak_loop_ref):
-            logger.debug(f"Event loop {loop_id} was garbage collected, scheduling cleanup")
-
-            if loop_id in self._cleanup_callbacks:
-                del self._cleanup_callbacks[loop_id]
-
-            try:
-                current_loop = asyncio.get_running_loop()
-                current_loop.create_task(
-                    self._cleanup_connection(loop_id, connection),
-                    name=f"cleanup_dead_loop_{loop_id}",
-                )
-            except RuntimeError:
-                logger.debug(f"No running loop for cleanup of {loop_id}, relying on OS cleanup")
+        def cleanup_callback(_weak_loop_ref: Any) -> None:
+            # Runs from the garbage collector, possibly inside another loop or
+            # while _pool_lock is held on this thread. The dead loop's
+            # connections cannot be awaited anywhere, so only the references
+            # are released: no task is scheduled and no lock is taken.
+            RedisBackend._cleanup_callbacks.pop(loop_id, None)
+            pool = RedisBackend._connection_pools.pop(loop_id, None)
+            if self._event_loop_id == loop_id and self._redis is connection:
+                self._redis = None
+                self._connected = False
+            logger.debug(
+                f"Event loop {loop_id} was garbage collected; released its Redis client"
+                f"{' and connection pool' if pool is not None else ''}"
+            )
 
         weak_loop = weakref.ref(loop, cleanup_callback)
         self._cleanup_callbacks[loop_id] = weak_loop
@@ -621,7 +619,7 @@ class RedisBackend(AccountBackend):
         await self._ensure_connected()
         return self
 
-    async def __aexit__(self, exc_type, _exc_val, _exc_tb) -> None:
+    async def __aexit__(self, exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:
         """Async context manager exit with guaranteed cleanup."""
         if self._redis and self._owned_redis:
             try:

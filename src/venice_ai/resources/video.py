@@ -8,7 +8,7 @@ The video API allows for:
 - Queuing video generation requests (text-to-video and image-to-video)
 - Getting price quotes before generation
 - Retrieving video generation results (polling for completion)
-- Marking videos as complete / deleting from storage
+- Releasing a finished job's stored media
 - High-level VideoJob abstraction for lifecycle management
 """
 
@@ -20,9 +20,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, overload
 
+import aiohttp
+
 from .._resource import APIResource
-from ..exceptions import InvalidRequestError, VideoGenerationError
+from ..exceptions import InvalidRequestError, UnprocessableEntityError, VideoGenerationError
 from ..helpers import normalize_duration_seconds
+from ..middleware import RetryOptions
 from ..types.api.models import VideoModelSpec
 from ..types.api.requests.video import (
     CameraKeyframe,
@@ -46,6 +49,7 @@ from ..types.api.video import (
     VideoRetrieveResponse,
     VideoTranscriptionResponse,
 )
+from ..utils.errors import read_body, wrap_aiohttp_errors
 
 if TYPE_CHECKING:
     from .._client import VeniceClient  # noqa: F401
@@ -53,8 +57,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _is_unknown_request_id(exc: InvalidRequestError) -> bool:
-    """Whether a 400 says the queue id itself is unknown or already released.
+def _is_unknown_request_id(exc: InvalidRequestError | UnprocessableEntityError) -> bool:
+    """Whether a 400 or 422 says the queue id itself is unknown or already released.
 
     That rejection concerns the lookup, not the job: it must not be reported
     as a generation failure.
@@ -71,9 +75,10 @@ def _format_video_duration(duration_seconds: int | str) -> str:
     once at the resource boundary so the request model still matches the
     wire schema exactly.
 
-    Some upscale models accept the sentinel string ``"Auto"`` (or other
-    model-specific values) — when the input doesn't parse as a number of
-    seconds, pass it through unchanged and let the server validate.
+    A string that doesn't parse as a number of seconds (such as the
+    source-matched ``"auto"`` / ``"-1"``) is passed through unchanged for the
+    server to validate. Upscale models take no duration at all: leave
+    ``duration_seconds`` out for them.
     """
     try:
         return f"{normalize_duration_seconds(duration_seconds)}s"
@@ -84,10 +89,49 @@ def _format_video_duration(duration_seconds: int | str) -> str:
 
 
 #: Duration values that ask the output to match the source clip rather than
-#: naming a length. They are never members of a model's
-#: ``constraints.durations`` enum, so the duration preflight has to let them
-#: through.
+#: naming a length. Generation models that accept them do not list them in
+#: ``constraints.durations``, so the duration preflight lets them through. A
+#: catalog entry of ``"Auto"`` marks a model that takes its length from the
+#: source video and is sent no duration.
 _SOURCE_MATCHED_DURATIONS = frozenset({"auto", "-1"})
+
+
+def _video_duration_wire(duration_seconds: int | str | None) -> str | None:
+    """The wire ``duration`` for a queue or quote body; ``None`` leaves it out."""
+    if duration_seconds is None:
+        return None
+    return _format_video_duration(duration_seconds)
+
+
+async def _preflight_require_video_duration(
+    client: VeniceClient,
+    model_id: str,
+    duration_seconds: int | str | None,
+) -> None:
+    """Reject a missing ``duration_seconds`` for a model that needs one.
+
+    Upscale and other video-to-video models take their length from the source
+    clip: the catalog lists only ``"Auto"`` for them and the request carries
+    no duration. Generation models list numeric tiers (``"5s"``, ``"10s"``)
+    and the API rejects a request without one, so that case raises a
+    ``ValueError`` before anything is sent.
+
+    Best-effort: a catalog miss, a non-video spec or an empty ``durations``
+    list falls through and leaves the decision to the server.
+    """
+    if duration_seconds is not None:
+        return
+    try:
+        entry = await client.models.get(model_id)
+    except Exception:  # noqa: BLE001  - network/catalog miss => let server validate
+        return
+    spec = entry.model_spec
+    if not isinstance(spec, VideoModelSpec) or spec.constraints is None:
+        return
+    durations = spec.constraints.durations
+    if not durations or any(d.strip().lower() in _SOURCE_MATCHED_DURATIONS for d in durations):
+        return
+    raise ValueError(f"duration_seconds is required for model {model_id!r}; allowed: {durations}")
 
 
 async def _preflight_validate_video_duration(
@@ -100,6 +144,7 @@ async def _preflight_validate_video_duration(
     Best-effort: silent fall-through on catalog miss or non-video spec.
     Raises a ``ValueError`` only when the spec exposes an explicit
     ``constraints.durations`` enum and the requested value isn't in it.
+    A missing value is checked by :func:`_preflight_require_video_duration`.
 
     The source-matched sentinels (``"auto"`` / ``"-1"``, used by Seedance R2V
     edit and extend to follow the source clip's length) are exempt — they are
@@ -133,10 +178,22 @@ async def _preflight_validate_video_duration(
         )
 
 
+#: Status codes a ``DELETE`` on a queue-time ``download_url`` answers when the
+#: file is gone afterwards: removed now, or already removed earlier.
+_LINK_DELETED_STATUSES = frozenset({200, 202, 204, 404})
+
+#: The link is a bearer URL: it is sent once, without retries, so the retry
+#: middleware never writes it to a log.
+_NO_RETRIES = RetryOptions(max_attempts=0)
+
+
 class VideoJob:
     """Manages the lifecycle of an async video generation request.
 
-    Use as an async context manager to guarantee server-side cleanup::
+    Use as an async context manager to release the stored media once the job
+    has finished and the block exits cleanly (an exception in the block, or
+    an exit before the job finished, releases nothing; see
+    :meth:`__aexit__`)::
 
         async with await client.video.run(model=model, prompt="...", duration_seconds=5) as job:
             status = await job.wait()
@@ -150,11 +207,15 @@ class VideoJob:
         self._status: VideoRetrieveResponse | None = None
         # For VPS-backed models the file URL is handed back at queue time and
         # /video/retrieve only returns JSON status (no url/data). Keep it so
-        # download() can fall back to it.
+        # download() can fall back to it and cancel() can delete the file.
+        # The URL grants access on its own: it is never logged.
         self._download_url: str | None = getattr(queue_response, "download_url", None)
         # Set when /video/retrieve rejects the job outright (server-side
         # validation failure): the job is over even though no status was seen.
         self._rejected = False
+        # Set once cancel() succeeds on a finished job, so exiting the context
+        # does not release it a second time.
+        self._released = False
 
     async def __aenter__(self) -> VideoJob:
         return self
@@ -165,48 +226,82 @@ class VideoJob:
         _exc_val: BaseException | None,
         _exc_tb: object,
     ) -> None:
-        """Release the job's stored media on exit (best effort).
+        """Release the job's stored media on a clean exit, once it has finished.
 
-        Calls :meth:`cancel`, which frees server-side storage. It does not stop
-        generation: leaving the block before the job reached a terminal status
-        (for example after a :meth:`wait` timeout) leaves the job running, and
-        billed, on the server. That case is logged at WARNING.
+        The media is released only when the block exits without an exception.
+        If the block raised (a failed download, a disk error, a cancelled
+        task), nothing is released and a WARNING names the ``queue_id``: the
+        job was already billed, and the video stays retrievable until it
+        expires. Resume with this job's :meth:`wait` (or
+        ``client.video.retrieve(model=..., queue_id=...)``), save the video,
+        then call :meth:`cancel`. Call :meth:`cancel` inside the block to
+        discard the video on purpose; a finished job already released that way
+        is left alone on exit, whichever way the block exits. A job that
+        failed or was rejected has no video to keep, so it is released
+        whichever way the block exits.
 
-        Propagates any in-flight exception from the user's block. If both the
-        user code and cleanup raise, the user's exception wins; the cleanup
-        failure is logged.
+        A clean exit before the job reached a terminal status releases
+        nothing and sends no request: releasing a job that is still generating
+        deletes nothing, and Venice stores the video when it finishes anyway.
+        That case is logged at WARNING with the ``queue_id``; call
+        :meth:`wait` again (a :class:`TimeoutError` from it leaves the job
+        resumable), save the video, then call :meth:`cancel`. Cleanup failures
+        are logged, never raised.
         """
+        if self._released:
+            return
+        failed = self._rejected or isinstance(self._status, VideoFailedStatus)
+        if exc_type is not None and not failed:
+            if self._download_url:
+                logger.warning(
+                    "VideoJob queue_id=%s (model %s) left its context with %s, so its stored "
+                    "media was not released (last status: %s). The job is billed; to keep the "
+                    "video, call wait() on this job and save it, then cancel() to delete the "
+                    "file behind its download_url.",
+                    self.queue_id,
+                    self.model,
+                    exc_type.__name__,
+                    self._status.status if self._status is not None else "never polled",
+                )
+            else:
+                logger.warning(
+                    "VideoJob queue_id=%s (model %s) left its context with %s, so its stored "
+                    "media was not released (last status: %s). The job is billed; to keep the "
+                    "video, call client.video.retrieve(model=%r, queue_id=%r) and save it, "
+                    "then client.video.cancel(model=%r, queue_id=%r).",
+                    self.queue_id,
+                    self.model,
+                    exc_type.__name__,
+                    self._status.status if self._status is not None else "never polled",
+                    self.model,
+                    self.queue_id,
+                    self.model,
+                    self.queue_id,
+                )
+            return
         if not self._is_terminal:
             logger.warning(
-                "VideoJob queue_id=%s left its context before reaching a terminal "
-                "status (last status: %s). Releasing it frees stored media only; "
-                "generation keeps running on the server and is still billed.",
+                "VideoJob queue_id=%s (model %s) left its context before reaching a terminal "
+                "status (last status: %s). The job is already billed and keeps running; "
+                "Venice stores the video when it finishes. Call wait() again, then cancel(), "
+                "to collect and delete it.",
                 self.queue_id,
+                self.model,
                 self._status.status if self._status is not None else "never polled",
             )
+            return
         try:
             await self.cancel()
         except Exception as e:
-            # A 400 ("Request ID is invalid") means the queue entry is already
-            # gone — the job reached a terminal state and the server released it,
-            # or it was never completable. That's benign on a normal exit (e.g.
-            # queue → poll-to-completion → exit), so log it at DEBUG rather than
-            # spamming a WARNING; an exit before a terminal status has already
-            # been reported above. Genuine cleanup failures (5xx, network) stay
-            # at WARNING. Cleanup is best-effort either way and never raised.
-            level = logging.DEBUG if isinstance(e, InvalidRequestError) else logging.WARNING
-            if exc_type is None:
-                logger.log(level, "VideoJob cleanup failed for queue_id=%s: %s", self.queue_id, e)
-            else:
-                logger.log(
-                    level,
-                    "VideoJob cleanup failed during exception handling "
-                    "(queue_id=%s, original=%s): %s",
-                    self.queue_id,
-                    exc_type.__name__,
-                    e,
-                )
-        # Returning ``None`` lets the original exception (if any) propagate.
+            # A 400 "Request ID is invalid" means the queue entry is already
+            # gone: the server released it when the job reached a terminal
+            # state, or it was never completable. That is benign on a normal
+            # exit (queue, poll to completion, exit), so it is logged at DEBUG.
+            # Every other failure (a rejected link DELETE, 5xx, network) leaves
+            # the media stored and stays at WARNING.
+            benign = isinstance(e, InvalidRequestError) and _is_unknown_request_id(e)
+            level = logging.DEBUG if benign else logging.WARNING
+            logger.log(level, "VideoJob cleanup failed for queue_id=%s: %s", self.queue_id, e)
 
     @property
     def status(self) -> VideoRetrieveResponse | None:
@@ -251,18 +346,24 @@ class VideoJob:
         :param max_polls: Maximum number of polls before raising ``TimeoutError``.
         :param on_progress: Optional callback invoked on each processing status update.
         :raises VideoGenerationError: If the server reports generation failure,
-            including a queued job that ``/video/retrieve`` rejects with a 400
-            because it failed server-side validation (the original
-            :class:`~venice_ai.exceptions.InvalidRequestError` is chained as
-            ``__cause__``). A 400 saying the request ID is invalid (an unknown
-            or already released ``queue_id``) is not a generation failure and
-            propagates as :class:`~venice_ai.exceptions.InvalidRequestError`.
+            including a queued job that ``/video/retrieve`` rejects outright:
+            a 400 for a job that failed server-side validation, or a 422 for
+            one the provider refused (for example on content policy, with the
+            credits refunded). The original
+            :class:`~venice_ai.exceptions.InvalidRequestError` or
+            :class:`~venice_ai.exceptions.UnprocessableEntityError` is chained
+            as ``__cause__``, and the job counts as finished. A 400 saying the
+            request ID is invalid (an unknown or already released
+            ``queue_id``) is not a generation failure and propagates as
+            :class:`~venice_ai.exceptions.InvalidRequestError`. Other client
+            errors (401, 403, 404, 429) describe the credentials, the lookup
+            or the request rate rather than the job, and propagate unchanged.
         :raises TimeoutError: If ``max_polls`` is exhausted.
         """
         for _ in range(max_polls):
             try:
                 status = await self.poll()
-            except InvalidRequestError as e:
+            except (InvalidRequestError, UnprocessableEntityError) as e:
                 if _is_unknown_request_id(e):
                     raise
                 self._rejected = True
@@ -297,6 +398,9 @@ class VideoJob:
         :raises VideoGenerationError: If the status carries no inline data and
             no ``url``, and the job has no queue-time ``download_url``; nothing
             is written in that case.
+        :raises APITimeoutError: If the URL fetch times out.
+        :raises APIConnectionError: If the connection fails during the URL fetch.
+        :raises aiohttp.ClientResponseError: If the URL answers with an error status.
         """
         if not (status.data or status.url or self._download_url):
             raise VideoGenerationError(
@@ -319,17 +423,89 @@ class VideoJob:
         return path
 
     async def cancel(self) -> VideoCompleteResponse:
-        """Release this job's server-side storage (best effort).
+        """Delete this finished job's stored video (best effort).
 
-        Wraps the ``/video/complete`` endpoint, which deletes the job's stored
-        media and queue entry. It does not stop a generation that is still
-        running: the job continues on the server and is billed. Call it once
-        the video has been downloaded. Named ``cancel`` (rather than the
-        wire-format ``complete``) to distinguish it from the
-        :attr:`is_complete` state check — terminal states are polled via
-        :meth:`wait` / :attr:`status`.
+        Call it once the video has been saved; the ``async with`` block does
+        this for you on a clean exit after the job finished. It does not stop
+        a generation that is still running: such a job continues on the
+        server, is billed, and its video is stored when it finishes, so a call
+        made before then deletes nothing.
+
+        For a model whose queue response carried a ``download_url``, the file
+        lives behind that link and ``/video/complete`` does not know the job:
+        it answers 400 "Request ID is invalid". This method first sends
+        ``DELETE`` to the ``download_url`` (without the client's credentials:
+        the link authorizes itself), treating a 404 as already deleted, then
+        calls ``/video/complete``. When that call answers "Request ID is
+        invalid" after the link was deleted, the result is a synthesized
+        ``VideoCompleteResponse(success=True)``. Without a ``download_url``
+        this is a single ``/video/complete`` call.
+
+        Named ``cancel`` (rather than the wire-format ``complete``) to
+        distinguish it from the :attr:`is_complete` state check; terminal
+        states are polled via :meth:`wait` / :attr:`status`. Once this
+        succeeds on a finished job, leaving the ``async with`` block does not
+        release it again.
+
+        :return: The ``/video/complete`` response, or the synthesized success
+            described above.
+        :raises APIError: If the ``DELETE`` on the ``download_url`` answers
+            another error status (mapped by status code, e.g.
+            :class:`~venice_ai.exceptions.PermissionDeniedError` for a 403),
+            or ``/video/complete`` fails. ``/video/complete`` is not called
+            when the ``DELETE`` fails.
+        :raises APITimeoutError: If the ``DELETE`` times out.
+        :raises APIConnectionError: If the connection fails during the ``DELETE``.
         """
-        return await self._client.video.cancel(model=self.model, queue_id=self.queue_id)
+        link_deleted = False
+        if self._download_url:
+            await self._delete_download_url(self._download_url)
+            link_deleted = True
+        try:
+            result = await self._client.video.cancel(model=self.model, queue_id=self.queue_id)
+        except InvalidRequestError as e:
+            if not (link_deleted and _is_unknown_request_id(e)):
+                raise
+            logger.debug(
+                "VideoJob queue_id=%s: /video/complete does not know a download_url job "
+                "(%s); its file was deleted through the link",
+                self.queue_id,
+                e,
+            )
+            result = VideoCompleteResponse(success=True)
+        # Only a job that has finished has stored media to release; a release
+        # sent while it is still generating deletes nothing, and the media it
+        # stores later still needs releasing on exit.
+        if result.success and self._is_terminal:
+            self._released = True
+        return result
+
+    async def _delete_download_url(self, url: str) -> None:
+        """Send ``DELETE`` to the queue-time ``download_url``.
+
+        The request goes through the client's session (so proxy, SSL and
+        timeout settings apply) with no per-request headers: the client's
+        credentials are attached per request, never to the session, so none
+        reach the storage host. It is sent once, without retries. A 2xx or a
+        404 (already deleted) counts as success. Error messages never include
+        the URL, which grants access to the file on its own.
+        """
+        session = await self._client._get_session()
+        async with self._client.with_retries(_NO_RETRIES), wrap_aiohttp_errors():
+            resp = await session.delete(url, timeout=self._client._timeout)
+        try:
+            if resp.status in _LINK_DELETED_STATUSES:
+                return
+            raw = await read_body(resp)
+            from ..exceptions import _make_status_error
+
+            raise _make_status_error(
+                f"Deleting the video's download_url failed with status {resp.status}",
+                body=raw.decode("utf-8", errors="replace"),
+                response=resp,
+            )
+        finally:
+            resp.release()
 
 
 class Video(APIResource["VeniceClient"]):
@@ -344,7 +520,7 @@ class Video(APIResource["VeniceClient"]):
         - **Image-to-Video**: Animate a reference image into video
         - **Price Quoting**: Get cost estimates before generation
         - **Result Retrieval**: Poll for video generation status and download URL
-        - **Cleanup**: Mark videos as complete and delete from storage
+        - **Cleanup**: Delete a finished job's stored video
 
     **Usage Patterns:**
         The Video class is accessed through the Venice AI client's
@@ -356,7 +532,9 @@ class Video(APIResource["VeniceClient"]):
         2. Call :meth:`submit` to start generation (returns a ``queue_id``)
         3. Poll :meth:`retrieve` with the ``queue_id`` until status is COMPLETED
         4. Download the video from the returned URL
-        5. Call :meth:`cancel` to clean up server-side storage
+        5. Call :meth:`cancel` to clean up server-side storage (for a job whose
+           queue response carried a ``download_url``, use :meth:`VideoJob.cancel`
+           instead; see :meth:`cancel`)
 
     Args:
         client: The Venice AI client instance providing authentication
@@ -406,7 +584,7 @@ class Video(APIResource["VeniceClient"]):
         *,
         model: str,
         prompt: str | None = None,
-        duration_seconds: int | str,
+        duration_seconds: int | str | None = None,
         negative_prompt: str | None = None,
         resolution: str | None = None,
         audio: bool | None = None,
@@ -469,8 +647,13 @@ class Video(APIResource["VeniceClient"]):
             (or ``"-1"``) matches the source clip's length instead; that
             requires ``reference_video_urls``, and on :meth:`quote` it
             requires ``reference_video_total_duration``, which is what the
-            job bills (rounded up).
-        :type duration_seconds: int | str
+            job bills (rounded up). Leave it out for upscale and other
+            video-to-video models whose catalog ``durations`` is ``["Auto"]``:
+            they take the length from ``video_url`` and the request then
+            carries no duration. Generation models require it; when the
+            model catalog lists numeric tiers and it is missing, a
+            ``ValueError`` is raised before the request is sent.
+        :type duration_seconds: int | str | None
         :param negative_prompt: Negative prompt to avoid unwanted content.
         :type negative_prompt: Optional[str]
         :param resolution: Output resolution (e.g., ``"720p"``, ``"1080p"``).
@@ -530,6 +713,8 @@ class Video(APIResource["VeniceClient"]):
 
         :raises venice_ai.exceptions.APIError: If the API request fails.
         :raises pydantic.ValidationError: If request parameters are invalid.
+        :raises ValueError: If ``duration_seconds`` is missing for a model
+            that requires one, or is not among the model's supported values.
 
         Example:
             Text-to-video::
@@ -550,12 +735,21 @@ class Video(APIResource["VeniceClient"]):
                     duration_seconds=5,
                     image_url="https://example.com/photo.jpg",
                 )
+
+            Upscale (the length comes from the source clip)::
+
+                result = await client.video.submit(
+                    model="topaz-video-upscale",
+                    video_url="https://example.com/clip.mp4",
+                    upscale_factor=2,
+                )
         """
+        await _preflight_require_video_duration(self._client, model, duration_seconds)
         await _preflight_validate_video_duration(self._client, model, duration_seconds)
         # Build request params, only including non-None values
         request_params: dict = {
             "model": model,
-            "duration": _format_video_duration(duration_seconds),
+            "duration": _video_duration_wire(duration_seconds),
         }
         for key, val in {
             "prompt": prompt,
@@ -616,7 +810,7 @@ class Video(APIResource["VeniceClient"]):
         self,
         *,
         model: str,
-        duration_seconds: int | str,
+        duration_seconds: int | str | None = None,
         aspect_ratio: str | None = None,
         resolution: str | None = None,
         upscale_factor: Literal[1, 2, 4] | None = None,
@@ -639,7 +833,9 @@ class Video(APIResource["VeniceClient"]):
         :param duration_seconds: Duration as an integer number of seconds
             (e.g. ``5``, ``10``). Liberal string parsing also accepts
             ``"5"`` / ``"5s"`` / ``"5 seconds"``. The wire form ``"5s"``
-            is generated internally.
+            is generated internally. Leave it out for upscale and other
+            video-to-video models, which price from the length of
+            ``video_url``; generation models require it (see :meth:`submit`).
         :param aspect_ratio: Aspect ratio (e.g., ``"16:9"``, ``"9:16"``).
         :param resolution: Output resolution (e.g., ``"720p"``, ``"1080p"``).
         :param upscale_factor: For upscale models: ``1`` = quality enhancement,
@@ -658,6 +854,8 @@ class Video(APIResource["VeniceClient"]):
 
         :raises venice_ai.exceptions.APIError: If the API request fails.
         :raises pydantic.ValidationError: If request parameters are invalid.
+        :raises ValueError: If ``duration_seconds`` is missing for a model
+            that requires one, or is not among the model's supported values.
 
         Example::
 
@@ -669,10 +867,11 @@ class Video(APIResource["VeniceClient"]):
             )
             print(f"Estimated cost: ${quote.quote}")
         """
+        await _preflight_require_video_duration(self._client, model, duration_seconds)
         await _preflight_validate_video_duration(self._client, model, duration_seconds)
         request = VideoQuoteRequest(
             model=model,
-            duration=_format_video_duration(duration_seconds),
+            duration=_video_duration_wire(duration_seconds),
             aspect_ratio=aspect_ratio,
             resolution=resolution,
             upscale_factor=upscale_factor,
@@ -782,8 +981,10 @@ class Video(APIResource["VeniceClient"]):
             )
             # The API streams the completed video as binary data.
             # Read the body so callers can save it to disk.
-            video_bytes = await raw_response.read()
-            raw_response.close()
+            try:
+                video_bytes = await read_body(raw_response)
+            finally:
+                raw_response.close()
 
             result = VideoCompletedStatus.model_validate(
                 {
@@ -797,19 +998,18 @@ class Video(APIResource["VeniceClient"]):
             return result
 
         # JSON response path
+        # Read under the transport-error mapping, then parse: a stalled body
+        # is an APITimeoutError, and a body that is not JSON is a parse error.
+        body_bytes = await read_body(raw_response)
         try:
             response_data = await raw_response.json()
-        except Exception as e:
-            try:
-                body_preview = await raw_response.text()
-            except Exception:
-                body_preview = "<unable to read body>"
+        except (aiohttp.ContentTypeError, ValueError) as e:
             logger.error(
                 "Failed to parse JSON from video.retrieve response: %s. "
                 "Content-Type: %r, Body preview: %.500s",
                 e,
                 content_type,
-                body_preview,
+                body_bytes[:500].decode("utf-8", errors="replace"),
             )
             raise
 
@@ -845,14 +1045,22 @@ class Video(APIResource["VeniceClient"]):
         queue_id: str,
     ) -> VideoCompleteResponse:
         """
-        Release server-side storage for a video job (best-effort cleanup).
+        Release server-side storage for a finished video job (best-effort cleanup).
 
         Wraps the ``/video/complete`` endpoint, which deletes the job's
         stored media and queue entry. Call this after successfully
         downloading the video. It does not stop a generation that is still
-        running; that job continues on the server and is billed. Not needed
-        if ``delete_media_on_completion`` was set to ``True`` in the
-        :meth:`retrieve` request.
+        running: that job continues on the server, is billed, and its video
+        is stored when it finishes, so a call made before then deletes
+        nothing. Not needed if ``delete_media_on_completion`` was set to
+        ``True`` in the :meth:`retrieve` request.
+
+        Jobs whose queue response carried a ``download_url`` are not known to
+        ``/video/complete``: it answers 400 "Request ID is invalid"
+        (:class:`~venice_ai.exceptions.InvalidRequestError`) both while they
+        run and after they finish. Their file lives behind the link; delete it
+        by sending ``DELETE`` to the ``download_url`` (no API key needed), or
+        call :meth:`VideoJob.cancel`, which does that first.
 
         :param model: Model ID used for generation.
         :type model: str
@@ -892,7 +1100,7 @@ class Video(APIResource["VeniceClient"]):
         *,
         model: str,
         prompt: str | None = None,
-        duration_seconds: int | str,
+        duration_seconds: int | str | None = None,
         negative_prompt: str | None = None,
         resolution: str | None = None,
         audio: bool | None = None,
@@ -1042,6 +1250,7 @@ class Video(APIResource["VeniceClient"]):
                 raw_response=True,
             )
             try:
+                await read_body(raw_response)
                 text: str = await raw_response.text()
                 return text
             finally:

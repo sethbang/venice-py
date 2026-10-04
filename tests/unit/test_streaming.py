@@ -93,7 +93,7 @@ class TestStream:
 
         with (
             patch.object(stream, "close", new_callable=AsyncMock) as mock_close,
-            pytest.raises(APITimeoutError, match="Stream request timed out"),
+            pytest.raises(APITimeoutError, match="Stream timed out before it finished"),
         ):
             await stream.__anext__()
 
@@ -110,7 +110,9 @@ class TestStream:
 
         with (
             patch.object(stream, "close", new_callable=AsyncMock) as mock_close,
-            pytest.raises(APIConnectionError, match="Connection error during streaming"),
+            pytest.raises(
+                APIConnectionError, match="connection failed while streaming the response"
+            ),
         ):
             await stream.__anext__()
 
@@ -404,3 +406,65 @@ class TestChatCompletionChunkUsage:
         assert usage is not None
         assert usage.model_extra is not None
         assert usage.model_extra.get("future_usage_field") == 99
+
+
+class _Resp:
+    def __init__(self, status: int) -> None:
+        self.status = status
+        self.headers: dict[str, str] = {}
+
+
+class TestStreamErrorLogging:
+    """An error handed to the caller is not also logged as a failure."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "body"),
+        [
+            (401, {"error": "Authentication failed"}),
+            (
+                404,
+                {"error": "Specified model not found: nope. Did you mean: model-a, model-b?"},
+            ),
+        ],
+        ids=["401", "404"],
+    )
+    async def test_classified_api_error_is_raised_without_error_log(self, status, body, caplog):
+        import logging
+
+        from venice_ai.exceptions import APIError, _make_status_error
+
+        error = _make_status_error(
+            f"API request failed with status {status}", body=body, response=_Resp(status)
+        )
+        mock_iterator = AsyncMock()
+        mock_iterator.__anext__ = AsyncMock(side_effect=error)
+        stream = Stream(mock_iterator, client=Mock())
+
+        with (
+            caplog.at_level(logging.DEBUG, logger="venice_ai.streaming"),
+            pytest.raises(APIError) as exc_info,
+        ):
+            await stream.__anext__()
+
+        assert exc_info.value is error
+        assert stream._consumed is True
+        loud = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not loud, [r.getMessage() for r in loud]
+        assert not any("Did you mean" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_is_still_logged_at_error(self, caplog):
+        import logging
+
+        mock_iterator = AsyncMock()
+        mock_iterator.__anext__ = AsyncMock(side_effect=ValueError("boom"))
+        stream = Stream(mock_iterator, client=Mock())
+
+        with (
+            caplog.at_level(logging.DEBUG, logger="venice_ai.streaming"),
+            pytest.raises(VeniceError),
+        ):
+            await stream.__anext__()
+
+        assert any(r.levelno >= logging.ERROR for r in caplog.records)

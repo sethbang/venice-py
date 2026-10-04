@@ -38,7 +38,7 @@ fi
 BATCHES=(
   "Metadata — account, keys, billing, models, characters|free|tests/integration/test_account_vcr.py tests/integration/test_api_keys_vcr.py tests/integration/test_billing_vcr.py tests/integration/test_models_vcr.py tests/integration/test_model_selection_vcr.py tests/integration/test_characters_vcr.py"
   "Client & infra — http, scheduler, rate limiting, resilience|free/cheap|tests/integration/test_base_client_vcr.py tests/integration/test_http_client_vcr.py tests/integration/test_observability_vcr.py tests/integration/test_scheduler_vcr.py tests/integration/test_rate_limiter_vcr.py tests/integration/test_resilience_vcr.py tests/integration/test_circuit_breaker_recovery.py tests/integration/test_concurrent_requests.py tests/integration/test_rate_limit_edge_cases.py tests/integration/test_429_handling.py tests/integration/test_shared_state_verification.py"
-  "Text inference — chat, embeddings, responses, augment|cheap|tests/integration/test_chat_completions_vcr.py tests/integration/test_embeddings_vcr.py tests/integration/test_responses_vcr.py tests/integration/test_augment_vcr.py"
+  "Text inference — chat, embeddings, responses, augment, decisions|cheap|tests/integration/test_chat_completions_vcr.py tests/integration/test_embeddings_vcr.py tests/integration/test_responses_vcr.py tests/integration/test_augment_vcr.py tests/integration/test_decisions_vcr.py"
   "Image — generate + upscale|moderate \$|tests/integration/test_image_vcr.py"
   "Audio — TTS/STT|moderate \$|tests/integration/test_audio_resource_vcr.py tests/e2e/test_audio_e2e.py tests/e2e/test_audio_helpers_e2e.py"
   "Music — generation (async jobs)|expensive \$\$|tests/integration/test_music_vcr.py"

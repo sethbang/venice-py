@@ -1,4 +1,4 @@
-"""Unit tests for the MusicJob lifecycle + Music.submit / cancel methods."""
+"""Unit tests for the MusicJob lifecycle + Music.submit / release methods."""
 
 from unittest.mock import AsyncMock, Mock
 
@@ -25,7 +25,7 @@ def mock_client():
     client = Mock()
     client.music = Mock()
     client.music.retrieve = AsyncMock()
-    client.music.cancel = AsyncMock(return_value=MusicCompleteResponse(success=True))
+    client.music.release = AsyncMock(return_value=MusicCompleteResponse(success=True))
     client.fetch_external = AsyncMock(return_value=b"MUSIC_BYTES")
     return client
 
@@ -167,14 +167,15 @@ async def test_download_fetches_url_when_no_inline_bytes(
 
 
 @pytest.mark.asyncio
-async def test_async_context_manager_calls_cancel(job: MusicJob, mock_client) -> None:
+async def test_async_context_manager_releases_a_finished_job(job: MusicJob, mock_client) -> None:
+    mock_client.music.retrieve.return_value = MusicCompletedStatus(status="COMPLETED")
     async with job:
         pass
-    mock_client.music.cancel.assert_awaited_once_with(model=job.model, queue_id=job.queue_id)
+    mock_client.music.release.assert_awaited_once_with(model=job.model, queue_id=job.queue_id)
 
 
 # ---------------------------------------------------------------------------
-# Music.{submit,quote,retrieve,cancel} — direct method tests
+# Music.{submit,quote,retrieve,release} — direct method tests
 # ---------------------------------------------------------------------------
 
 
@@ -219,11 +220,11 @@ async def test_submit_sends_expected_body(music_resource) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_sends_expected_body(music_resource) -> None:
+async def test_release_sends_expected_body(music_resource) -> None:
     resource, client = music_resource
     client.post.return_value = MusicCompleteResponse(success=True)
 
-    result = await resource.cancel(model="elevenlabs-music", queue_id="q1")
+    result = await resource.release(model="elevenlabs-music", queue_id="q1")
 
     assert result.success is True
     args, kwargs = client.post.call_args

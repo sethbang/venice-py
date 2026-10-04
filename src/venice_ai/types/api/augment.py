@@ -46,13 +46,13 @@ class AugmentSearchRequest(BaseModel):
         description="The search query.",
     )
     limit: int | None = Field(
-        None,
+        default=None,
         ge=1,
         le=20,
         description="Maximum number of results to return (default 10, max 20).",
     )
     search_provider: Literal["brave", "google"] | None = Field(
-        None,
+        default=None,
         description=(
             "Search provider. ``brave`` uses Brave Search with Zero Data Retention "
             "(default). ``google`` proxies through Venice for anonymised queries."
@@ -68,7 +68,7 @@ class AugmentSearchResult(BaseModel):
     title: str = Field(..., description="Result title.")
     url: str = Field(..., description="Result URL.")
     content: str = Field(..., description="Snippet or extracted content.")
-    date: str | None = Field(None, description="Publication date if available.")
+    date: str | None = Field(default=None, description="Publication date if available.")
 
 
 class AugmentSearchResponse(VeniceBaseModel):

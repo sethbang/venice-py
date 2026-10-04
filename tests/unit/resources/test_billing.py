@@ -77,15 +77,6 @@ def sample_usage_history_response():
     }
 
 
-@pytest.fixture
-def sample_csv_response():
-    """Sample usage-history response in CSV format."""
-    return (
-        b"timestamp,sku,currency,amount,units,pricePerUnitUsd\n"
-        b"2025-01-15T12:00:00Z,llama-3.2-3b-inference,USD,0.001,100,0.00001\n"
-    )
-
-
 class TestGetUsageHistory:
     """Test get_usage_history() request construction and response parsing."""
 
@@ -106,23 +97,6 @@ class TestGetUsageHistory:
             params={},
             headers={"accept": "application/json"},
             raw_response=False,
-        )
-
-    @pytest.mark.asyncio
-    async def test_csv_format(self, billing_resource, mock_client, sample_csv_response):
-        """CSV format returns raw bytes and sets the text/csv accept header."""
-        mock_client._request.return_value = sample_csv_response
-
-        result = await billing_resource.get_usage_history(format=BillingFormatEnum.CSV)
-
-        assert result == sample_csv_response
-        assert isinstance(result, bytes)
-        mock_client._request.assert_called_once_with(
-            "GET",
-            "billing/usage-history",
-            params={},
-            headers={"accept": "text/csv"},
-            raw_response=True,
         )
 
     @pytest.mark.asyncio
@@ -391,7 +365,7 @@ class TestUsageHistoryErrorHandling:
 
 
 class TestUsageHistoryResponseCasting:
-    """Test response type handling for JSON and CSV formats."""
+    """Test JSON response handling (CSV pages: tests/unit/resources/test_billing_csv.py)."""
 
     @pytest.mark.asyncio
     async def test_json_cast_to_response_model(
@@ -404,15 +378,6 @@ class TestUsageHistoryResponseCasting:
         assert isinstance(result, BillingUsageHistoryResponse)
         assert result.nextCursor is None
         assert len(result.data) == 2
-
-    @pytest.mark.asyncio
-    async def test_csv_cast_to_bytes(self, billing_resource, mock_client, sample_csv_response):
-        mock_client._request.return_value = sample_csv_response
-
-        result = await billing_resource.get_usage_history(format=BillingFormatEnum.CSV)
-
-        assert isinstance(result, bytes)
-        assert result == sample_csv_response
 
     @pytest.mark.asyncio
     async def test_empty_page(self, billing_resource, mock_client):

@@ -214,7 +214,7 @@ The roundtrip is rarely 100% identical — punctuation, capitalization, and homo
 
 ## Cost-quote
 
-The audio resource doesn't expose a `quote()` method — TTS / STT are billed per character (TTS) or per second (STT). Costs are typically small ($0.001-$0.01 per call); use `response.balance_info.usd` to track if precision matters.
+The audio resource doesn't expose a `quote()` method — TTS / STT are billed per character (TTS) or per second (STT). Costs are typically small ($0.001-$0.01 per call); if precision matters, track the drop in `response.balance_info.usd` between consecutive responses (each value is what the key could spend before that request).
 
 ## Common bugs
 

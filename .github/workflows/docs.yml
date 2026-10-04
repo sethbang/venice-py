@@ -44,8 +44,22 @@ jobs:
         with:
           python-version: '3.13'
 
+      # Retried because a PyPI index fetch can come back empty for a moment, and
+      # pip reports that as "No matching distribution found" (not a network
+      # error), so its own --retries never fires. Three attempts, then fail.
       - name: Install pydoc-markdown
-        run: pip install pydoc-markdown==4.8.2
+        run: |
+          for attempt in 1 2 3; do
+            if pip install --retries 5 --timeout 30 pydoc-markdown==4.8.2; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::pip install failed (attempt $attempt of 3); retrying in $((attempt * 20))s"
+              sleep $((attempt * 20))
+            fi
+          done
+          echo "::error::pip install pydoc-markdown failed after 3 attempts"
+          exit 1
 
       - name: Install site dependencies
         working-directory: website

@@ -89,7 +89,7 @@ def mock_client():
     client = Mock()
     client.music = Mock()
     client.music.retrieve = AsyncMock()
-    client.music.cancel = AsyncMock(return_value=MusicCompleteResponse(success=True))
+    client.music.release = AsyncMock(return_value=MusicCompleteResponse(success=True))
     client.fetch_external = AsyncMock(return_value=b"MUSIC_BYTES")
     return client
 
@@ -123,7 +123,8 @@ async def test_aexit_cleanup_failure_no_active_exception_logs_warning(
     job: MusicJob, mock_client, caplog
 ) -> None:
     """Lines 80-82: cleanup raises while no exception is in flight → warn."""
-    mock_client.music.cancel.side_effect = RuntimeError("cleanup boom")
+    mock_client.music.retrieve.return_value = MusicCompletedStatus(status="COMPLETED")
+    mock_client.music.release.side_effect = RuntimeError("cleanup boom")
     with caplog.at_level("WARNING"):
         async with job:
             pass
@@ -132,16 +133,20 @@ async def test_aexit_cleanup_failure_no_active_exception_logs_warning(
 
 
 @pytest.mark.asyncio
-async def test_aexit_cleanup_failure_during_exception_logs_combined_warning(
+async def test_aexit_during_exception_does_not_release_completed_audio(
     job: MusicJob, mock_client, caplog
 ) -> None:
-    """Lines 83-90: cleanup raises while user code already raised → warn with original exc."""
-    mock_client.music.cancel.side_effect = RuntimeError("cleanup boom")
+    """A failed save leaves the paid audio stored, so it can be retried."""
+    mock_client.music.retrieve.return_value = MusicCompletedStatus(status="COMPLETED")
     with caplog.at_level("WARNING"), pytest.raises(ValueError, match="user error"):
         async with job:
+            await job.poll()
             raise ValueError("user error")
-    # The exception-context branch logs the original ValueError name.
-    assert any("ValueError" in r.message and "cleanup boom" in r.message for r in caplog.records)
+    mock_client.music.release.assert_not_awaited()
+    message = " ".join(r.message for r in caplog.records)
+    assert "ValueError" in message
+    assert job.queue_id in message
+    assert "client.music.retrieve(" in message
 
 
 # ---------------------------------------------------------------------------
@@ -321,23 +326,22 @@ async def test_retrieve_invalid_json_raises_after_logging(music_resource, caplog
 
 
 @pytest.mark.asyncio
-async def test_retrieve_invalid_json_with_text_failure_uses_placeholder(
+async def test_retrieve_invalid_json_logs_a_preview_of_the_body_already_read(
     music_resource, caplog
 ) -> None:
-    """Lines 305-308: when both .json() and .text() fail, body_preview is a placeholder."""
+    """A body that is not JSON is previewed from the bytes read once, not read again."""
     resource, client = music_resource
     raw = _make_raw_response(
         "irrelevant", content_type="application/json", raise_on_json=ValueError("nope")
     )
-    raw.text = AsyncMock(side_effect=RuntimeError("text broken"))
+    raw.read = AsyncMock(return_value=b"<html>not json</html>")
+    raw.text = AsyncMock(side_effect=AssertionError("the body must not be read twice"))
     client.post.return_value = raw
 
     with caplog.at_level("ERROR"), pytest.raises(ValueError, match="nope"):
         await resource.retrieve(model="elevenlabs-music", queue_id="q1")
 
-    # The fallback placeholder text appears in the structured log args / message
-    # because logger.error has it in the format string.
-    assert any("unable to read body" in r.message for r in caplog.records)
+    assert any("<html>not json</html>" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

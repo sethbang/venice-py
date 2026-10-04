@@ -437,6 +437,53 @@ class TestThinkingBlocksProperty:
 
 
 # ============================================================================
+# ChatUsage cache accessors
+# ============================================================================
+
+
+class TestChatUsageCacheAccessors:
+    """The three wire shapes Venice sends for prompt-cache counts."""
+
+    @staticmethod
+    def _usage(**fields):
+        return ChatUsage.model_validate(
+            {"prompt_tokens": 3000, "completion_tokens": 5, "total_tokens": 3005, **fields}
+        )
+
+    def test_absent_details_read_as_zero(self):
+        usage = self._usage()
+        assert usage.cached_tokens == 0
+        assert usage.cache_write_tokens == 0
+
+    def test_nested_only(self):
+        usage = self._usage(prompt_tokens_details={"cached_tokens": 1664})
+        assert usage.cached_tokens == 1664
+        assert usage.cache_write_tokens == 0
+
+    def test_nested_with_top_level_mirror_is_not_summed(self):
+        usage = self._usage(
+            prompt_tokens_details={"cached_tokens": 2880, "cache_creation_input_tokens": 87},
+            cache_read_input_tokens=2880,
+            cache_creation_input_tokens=87,
+        )
+        assert usage.cached_tokens == 2880
+        assert usage.cache_write_tokens == 87
+
+    def test_top_level_only(self):
+        usage = self._usage(cache_read_input_tokens=512, cache_creation_input_tokens=64)
+        assert usage.cached_tokens == 512
+        assert usage.cache_write_tokens == 64
+
+    def test_responses_usage_cached_tokens(self):
+        from venice_ai.types.api.responses import ResponsesUsage
+
+        base = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
+        assert ResponsesUsage.model_validate(base).cached_tokens == 0
+        with_details = {**base, "input_tokens_details": {"cached_tokens": 8}}
+        assert ResponsesUsage.model_validate(with_details).cached_tokens == 8
+
+
+# ============================================================================
 # ChatUsage.__str__
 # ============================================================================
 
@@ -461,7 +508,20 @@ class TestChatUsageStr:
             prompt_tokens_details=None,
             cache_read_input_tokens=1100,
         )
-        assert str(u) == "prompt: 1234 (cache: 1100) / completion: 567 / total: 1801"
+        assert str(u) == (
+            "prompt: 1234 (cache read: 1100, write: 0) / completion: 567 / total: 1801"
+        )
+
+    def test_str_reads_nested_details_and_writes(self):
+        u = ChatUsage.model_validate(
+            {
+                "prompt_tokens": 4130,
+                "completion_tokens": 5,
+                "total_tokens": 4135,
+                "prompt_tokens_details": {"cached_tokens": 0, "cache_creation_input_tokens": 4122},
+            }
+        )
+        assert str(u) == "prompt: 4130 (cache read: 0, write: 4122) / completion: 5 / total: 4135"
 
     def test_str_omits_cache_when_zero(self):
         u = ChatUsage(

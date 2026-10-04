@@ -27,20 +27,36 @@ For detailed selection capabilities, see the DynamicModelSelector class.
 """
 
 from .selection import (
+    CheapestMusicResult,
     CheapestVideoResult,
     DynamicModelSelector,
     ModelCache,
+    VideoInputMode,
+    cheapest_model_strategy,
+    cheapest_selector,
+    cheapest_video_params,
     create_model_selector,
     get_chat_model,
     get_cheapest_video_model,
     get_embedding_model,
     get_multiple_models,
     get_video_model,
+    model_price,
+    music_request_params,
+    video_input_mode,
 )
 
 __all__ = [
     "ModelCache",
+    "CheapestMusicResult",
     "CheapestVideoResult",
+    "cheapest_model_strategy",
+    "cheapest_selector",
+    "cheapest_video_params",
+    "model_price",
+    "music_request_params",
+    "video_input_mode",
+    "VideoInputMode",
     "DynamicModelSelector",
     "create_model_selector",
     "get_chat_model",

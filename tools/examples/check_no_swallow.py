@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +53,14 @@ BROAD_NAMES = {"Exception", "BaseException"}
 
 #: Rules that fail CI by default. Rule B is advisory-only (``--strict``).
 HARD_RULES = {"A", "C"}
+
+#: Directory names under an examples tree that never hold examples: the
+#: examples' generated output dir, virtualenvs, installed packages, and caches.
+#: Hidden (dot) directories are skipped too, and so is any directory holding a
+#: ``pyvenv.cfg`` whatever it is called.
+EXCLUDED_DIR_NAMES = frozenset(
+    {"results", "venv", "env", "site-packages", "__pycache__", "node_modules"}
+)
 
 
 @dataclass(frozen=True)
@@ -215,6 +224,28 @@ def find_violations(filename: str, source: str) -> list[Violation]:
     return violations
 
 
+def _is_excluded_dir(path: Path) -> bool:
+    name = path.name
+    return name in EXCLUDED_DIR_NAMES or name.startswith(".") or (path / "pyvenv.cfg").is_file()
+
+
+def discover_example_files(root: Path) -> list[Path]:
+    """Return the example ``.py`` files under ``root``, sorted.
+
+    Walks the filesystem and prunes non-example directories (see
+    ``EXCLUDED_DIR_NAMES``, hidden dirs, and any virtualenv detected by its
+    ``pyvenv.cfg``) before descending into them. Exclusions apply only to
+    directories *below* ``root``, so a checkout that itself lives under a hidden
+    or ``results`` parent is still scanned.
+    """
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        here = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if not _is_excluded_dir(here / d)]
+        found.extend(here / f for f in filenames if f.endswith(".py"))
+    return sorted(found)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -235,9 +266,14 @@ def main(argv: list[str] | None = None) -> int:
     roots = args.paths or [EXAMPLES_ROOT]
     for root in roots:
         if root.is_dir():
-            targets.extend(sorted(root.rglob("*.py")))
+            targets.extend(discover_example_files(root))
         elif root.suffix == ".py":
+            # An explicitly named file is checked even inside an excluded dir.
             targets.append(root)
+
+    if not targets:
+        print(f"❌ no example files found under {', '.join(map(str, roots))}; nothing was checked.")
+        return 1
 
     all_violations: list[Violation] = []
     for path in targets:

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock
 import aiohttp
 import pytest
 
+from tests.fixtures.mock_fixtures import with_request_plumbing
 from venice_ai.exceptions import APIConnectionError, APIError, APITimeoutError
 from venice_ai.resources.audio import REGION_LANGUAGE_MAPPING, Audio
 from venice_ai.types import (
@@ -33,7 +34,7 @@ class TestAudioCreateSpeechResponseHandling:
     @pytest.mark.asyncio
     async def test_create_speech_fallback_bytes_conversion(self, audio_resource):
         """Test fallback bytes conversion for unknown response types (line 343)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         # Mock an unknown response type that can be converted to bytes
         mock_response = b"response as bytes"  # Use bytes directly
         mock_client._request = AsyncMock(return_value=mock_response)
@@ -49,7 +50,7 @@ class TestAudioCreateSpeechResponseHandling:
     @pytest.mark.asyncio
     async def test_create_speech_aiohttp_response_handling(self, audio_resource):
         """Test aiohttp.ClientResponse handling (lines 336-338)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
 
         # Mock ClientResponse
         mock_response = Mock(spec=aiohttp.ClientResponse)
@@ -68,7 +69,7 @@ class TestAudioCreateSpeechResponseHandling:
     @pytest.mark.asyncio
     async def test_create_speech_direct_bytes_response(self, audio_resource):
         """Test direct bytes response handling (lines 339-340)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_client._request = AsyncMock(return_value=b"direct audio bytes")
         audio_resource._client = mock_client
 
@@ -92,7 +93,7 @@ class TestAudioStreamErrorHandling:
     @pytest.mark.asyncio
     async def test_stream_audio_timeout_error(self, audio_resource):
         """Test timeout error handling in streaming (lines 436-439)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_session = AsyncMock()
         mock_session.headers = {"Content-Type": "application/json"}  # Fix headers mock
 
@@ -120,7 +121,7 @@ class TestAudioStreamErrorHandling:
     @pytest.mark.asyncio
     async def test_stream_audio_connection_error(self, audio_resource):
         """Test connection error handling in streaming (lines 440-443)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_session = AsyncMock()
         mock_session.headers = {"Content-Type": "application/json"}  # Fix headers mock
 
@@ -148,7 +149,7 @@ class TestAudioStreamErrorHandling:
     @pytest.mark.asyncio
     async def test_stream_audio_client_error(self, audio_resource):
         """Test general client error handling in streaming (lines 444-449)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_session = AsyncMock()
         mock_session.headers = {"Content-Type": "application/json"}  # Fix headers mock
 
@@ -176,7 +177,7 @@ class TestAudioStreamErrorHandling:
     @pytest.mark.asyncio
     async def test_stream_audio_api_error_json_response(self, audio_resource):
         """Test API error with JSON response (lines 387-399)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_session = AsyncMock()
         mock_session.headers = {"Content-Type": "application/json"}  # Fix headers mock
         mock_session.headers = {"Content-Type": "application/json"}  # Fix headers mock
@@ -209,7 +210,7 @@ class TestAudioStreamErrorHandling:
     @pytest.mark.asyncio
     async def test_stream_audio_api_error_text_response(self, audio_resource):
         """Test API error with text response when JSON parsing fails (lines 389-399)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_session = AsyncMock()
         mock_session.headers = {"Content-Type": "application/json"}  # Fix headers mock
 
@@ -252,7 +253,7 @@ class TestAudioStreamVCRFallback:
     @pytest.mark.asyncio
     async def test_stream_vcr_fallback_with_full_body(self, audio_resource):
         """Test VCR fallback when streaming yields no chunks (lines 414-422)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_session = AsyncMock()
         mock_session.headers = {"Content-Type": "application/json"}  # Fix headers mock
 
@@ -295,7 +296,7 @@ class TestAudioStreamVCRFallback:
     @pytest.mark.asyncio
     async def test_stream_vcr_fallback_with_content_attribute(self, audio_resource):
         """Test VCR fallback using _content attribute (lines 424-431)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_session = AsyncMock()
         mock_session.headers = {"Content-Type": "application/json"}  # Fix headers mock
 
@@ -338,7 +339,7 @@ class TestAudioStreamVCRFallback:
     @pytest.mark.asyncio
     async def test_stream_vcr_fallback_exception_handling(self, audio_resource):
         """Test VCR fallback exception handling (lines 432-434)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_session = AsyncMock()
         mock_session.headers = {"Content-Type": "application/json"}  # Fix headers mock
 
@@ -378,7 +379,7 @@ class TestAudioStreamVCRFallback:
     @pytest.mark.asyncio
     async def test_stream_normal_chunked_streaming(self, audio_resource):
         """Test normal chunked streaming without fallback."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_session = AsyncMock()
         mock_session.headers = {"Content-Type": "application/json"}  # Fix headers mock
 
@@ -465,7 +466,7 @@ class TestAudioGetVoicesFiltering:
     @pytest.mark.asyncio
     async def test_get_voices_model_id_filter(self, audio_resource, mock_voice_models):
         """Test filtering voices by model_id (lines 523-524)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_client.models.list = AsyncMock(return_value=mock_voice_models)
         audio_resource._client = mock_client
 
@@ -479,7 +480,7 @@ class TestAudioGetVoicesFiltering:
     @pytest.mark.asyncio
     async def test_get_voices_gender_filter(self, audio_resource, mock_voice_models):
         """Test filtering voices by gender (lines 525-526)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_client.models.list = AsyncMock(return_value=mock_voice_models)
         audio_resource._client = mock_client
 
@@ -494,7 +495,7 @@ class TestAudioGetVoicesFiltering:
     @pytest.mark.asyncio
     async def test_get_voices_region_code_filter(self, audio_resource, mock_voice_models):
         """Test filtering voices by region_code (lines 527-528)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_client.models.list = AsyncMock(return_value=mock_voice_models)
         audio_resource._client = mock_client
 
@@ -509,7 +510,7 @@ class TestAudioGetVoicesFiltering:
     @pytest.mark.asyncio
     async def test_get_voices_combined_filters(self, audio_resource, mock_voice_models):
         """Test filtering voices with multiple filters combined."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_client.models.list = AsyncMock(return_value=mock_voice_models)
         audio_resource._client = mock_client
 
@@ -531,7 +532,7 @@ class TestAudioGetVoicesFiltering:
     @pytest.mark.asyncio
     async def test_get_voices_no_filters(self, audio_resource, mock_voice_models):
         """Test get_voices without any filters."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_client.models.list = AsyncMock(return_value=mock_voice_models)
         audio_resource._client = mock_client
 
@@ -556,7 +557,7 @@ class TestAudioVoiceParsingLogic:
     @pytest.mark.asyncio
     async def test_voice_parsing_with_underscore(self, audio_resource):
         """Test voice parsing when voice_id contains underscore (lines 489-504)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
 
         # Mock model with voices that have underscores
         mock_model = Mock()
@@ -592,7 +593,7 @@ class TestAudioVoiceParsingLogic:
     @pytest.mark.asyncio
     async def test_voice_parsing_without_underscore(self, audio_resource):
         """Test voice parsing when voice_id has no underscore."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
 
         # Mock model with voices without underscores
         mock_model = Mock()
@@ -617,7 +618,7 @@ class TestAudioVoiceParsingLogic:
     @pytest.mark.asyncio
     async def test_voice_parsing_single_character_prefix(self, audio_resource):
         """Test voice parsing with single character prefix (lines 495-498)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
 
         # Mock model with single character voice IDs
         mock_model = Mock()
@@ -646,7 +647,7 @@ class TestAudioVoiceParsingLogic:
     @pytest.mark.asyncio
     async def test_voice_parsing_model_without_spec(self, audio_resource):
         """Test handling models without model_spec (lines 480-481)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
 
         # Mock model without model_spec
         mock_model = Mock()
@@ -666,7 +667,7 @@ class TestAudioVoiceParsingLogic:
     @pytest.mark.asyncio
     async def test_voice_parsing_spec_without_voices(self, audio_resource):
         """Test handling model_spec without voices (lines 482-483)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
 
         # Mock model with spec but no voices
         mock_model = Mock()
@@ -697,7 +698,7 @@ class TestAudioTimeoutHandling:
     @pytest.mark.asyncio
     async def test_stream_timeout_conversion(self, audio_resource):
         """Test timeout conversion in streaming (lines 374-375)."""
-        mock_client = AsyncMock()
+        mock_client = with_request_plumbing(AsyncMock())
         mock_session = AsyncMock()
         mock_session.headers = {"Content-Type": "application/json"}  # Fix headers mock
 

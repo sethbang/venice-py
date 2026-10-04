@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from venice_ai.exceptions import NoMatchingModelError
 from venice_ai.resources.models import Models
 
 
@@ -280,7 +281,7 @@ class TestResolveVideoUpscale:
         ]
         models_resource.list = AsyncMock(return_value=listing)
 
-        with pytest.raises(ValueError, match="No video-upscaling model available"):
+        with pytest.raises(NoMatchingModelError, match="No video-upscaling model available"):
             await models_resource.resolve_video_upscale()
 
     @pytest.mark.asyncio

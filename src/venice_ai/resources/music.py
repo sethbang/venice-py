@@ -3,7 +3,7 @@ Venice AI Music API resources.
 
 This module provides classes for interacting with the Venice AI Music
 generation API. Music generation uses the same async queue family as video
-(``submit`` / ``retrieve`` / ``cancel``), wired against the
+(``submit`` / ``retrieve`` / ``release``), wired against the
 ``/audio/queue|quote|retrieve|complete`` endpoints. The high-level
 :class:`MusicJob` context manager handles the lifecycle for you.
 
@@ -18,10 +18,17 @@ import asyncio
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import aiohttp
 
 from .._resource import APIResource
-from ..exceptions import MusicGenerationError
+from ..exceptions import (
+    InvalidRequestError,
+    MusicGenerationError,
+    NotFoundError,
+    UnprocessableEntityError,
+)
 from ..helpers import normalize_duration_seconds
 from ..types.api.models import MusicModelSpec
 from ..types.api.music import (
@@ -39,7 +46,10 @@ from ..types.api.requests.music import (
     MusicQuoteRequest,
     MusicRetrieveRequest,
 )
+from ..utils.errors import read_body
 from ..validation.validators import validate_model_id
+from ._inline_audio import read_inline_audio
+from .video import _is_unknown_request_id
 
 if TYPE_CHECKING:
     from .._client import VeniceClient  # noqa: F401
@@ -56,9 +66,11 @@ async def _preflight_validate_music_duration(
 
     Best-effort: if the catalog can't be reached or the model isn't a
     :class:`MusicModelSpec`, we silently fall through and let the server
-    enforce. We only ever raise for the case we *can* prove wrong: a
-    ``duration_options`` enum where the requested value isn't a member,
-    or a ``min_duration`` / ``max_duration`` range violation.
+    enforce. We only ever raise for the cases we *can* prove wrong: a
+    ``duration_options`` enum where the requested value isn't a member, a
+    ``min_duration`` / ``max_duration`` range violation, or a model that
+    declares no duration metadata at all (Venice rejects ``duration_seconds``
+    on those with "This model does not support duration_seconds").
     """
     if duration_seconds is None:
         return
@@ -80,6 +92,11 @@ async def _preflight_validate_music_duration(
                 f"{model_id!r}; allowed: {spec.duration_options}"
             )
         return
+    if spec.min_duration is None and spec.max_duration is None:
+        raise ValueError(
+            f"model {model_id!r} does not take duration_seconds: it declares no "
+            f"duration_options or min/max duration and chooses the clip length itself"
+        )
     if spec.min_duration is not None and numeric < spec.min_duration:
         raise ValueError(
             f"duration_seconds={numeric} is below the minimum {spec.min_duration} "
@@ -156,10 +173,24 @@ async def _preflight_validate_loop(
         )
 
 
+def _log_unsuccessful_release(queue_id: str, model: str) -> None:
+    logger.warning(
+        "Releasing music job queue_id=%s (model %s) did not complete: Venice "
+        "returned success=false. The stored media may remain; retry the release later.",
+        queue_id,
+        model,
+    )
+
+
 class MusicJob:
     """Manages the lifecycle of an async music generation request.
 
-    Use as an async context manager to guarantee server-side cleanup::
+    Venice bills a music job when it is queued and has no way to stop one.
+    Leaving the context without an exception releases the job's stored media
+    once it has finished; a job still generating keeps running and is stored
+    when it completes. If the block raises, nothing is released, so a failed
+    save can be retried (see :meth:`__aexit__`). Use as an async context
+    manager::
 
         async with VeniceClient() as client:
             model = await client.models.resolve_music()
@@ -177,6 +208,12 @@ class MusicJob:
         self.queue_id: str = queue_response.queue_id
         self._client = client
         self._status: MusicRetrieveResponse | None = None
+        # Set when /audio/retrieve rejects the job outright: the job is over
+        # even though no terminal status was seen.
+        self._rejected = False
+        # Set once release() succeeds on a finished job, so exiting the context
+        # does not release it a second time.
+        self._released = False
 
     async def __aenter__(self) -> MusicJob:
         return self
@@ -187,34 +224,91 @@ class MusicJob:
         _exc_val: BaseException | None,
         _exc_tb: object,
     ) -> None:
-        """Release the job's stored media on exit (best effort). Mirrors ``VideoJob``.
+        """Release the job's stored media on a clean exit, once it has finished.
 
-        Calls :meth:`cancel`, which frees server-side storage. It does not stop
-        generation: leaving the block before the job reached a terminal status
-        (for example after a :meth:`wait` timeout) leaves the job running, and
-        billed, on the server. That case is logged at WARNING.
+        The media is released only when the block exits without an exception.
+        If the block raised (a failed download, a disk error, a cancelled
+        task), nothing is released and a WARNING names the ``queue_id``: the
+        job was already billed, and its audio stays stored so the work can be
+        resumed. Resume with ``client.music.retrieve(model=..., queue_id=...)``
+        (or this job's :meth:`wait`), save the audio, then call
+        ``client.music.release(model=..., queue_id=...)`` or :meth:`release`.
+        Call :meth:`release` inside the block to discard the audio on purpose;
+        a finished job already released that way is left alone on exit,
+        whichever way the block exits. A job that failed or was rejected has no audio to
+        keep, so it is released whichever way the block exits.
+
+        On a clean exit, a job that has not reached a terminal status is
+        polled once more. A job that has now finished is released with
+        :meth:`release`. A job that is still generating is left alone:
+        ``/audio/complete`` only deletes media that already exists, so calling
+        it now would release nothing while the finished audio is stored later
+        anyway. That case is logged at WARNING with the ``queue_id``; call
+        :meth:`wait` again (a :class:`TimeoutError` from it leaves the job
+        resumable) and then :meth:`release`. A queue id whose media is already
+        gone (``NotFoundError``) or that Venice never issued (a 400 "Request
+        ID is invalid") has nothing to release. A release that returns
+        ``success: false`` is logged at WARNING.
         """
-        if not isinstance(self._status, (MusicCompletedStatus, MusicFailedStatus)):
+        if self._released:
+            return
+        failed = self._rejected or isinstance(self._status, MusicFailedStatus)
+        if exc_type is not None and not failed:
             logger.warning(
-                "MusicJob queue_id=%s left its context before reaching a terminal "
-                "status (last status: %s). Releasing it frees stored media only; "
-                "generation keeps running on the server and is still billed.",
+                "MusicJob queue_id=%s (model %s) left its context with %s, so its stored "
+                "audio was not released (last status: %s). The job is billed; to keep the "
+                "audio, call client.music.retrieve(model=%r, queue_id=%r) and save it, "
+                "then client.music.release(model=%r, queue_id=%r).",
                 self.queue_id,
+                self.model,
+                exc_type.__name__,
                 self._status.status if self._status is not None else "never polled",
+                self.model,
+                self.queue_id,
+                self.model,
+                self.queue_id,
             )
-        try:
-            await self.cancel()
-        except Exception as e:
-            if exc_type is None:
-                logger.warning("MusicJob cleanup failed for queue_id=%s: %s", self.queue_id, e)
-            else:
-                logger.warning(
-                    "MusicJob cleanup failed during exception handling "
-                    "(queue_id=%s, original=%s): %s",
+            return
+        if not self._is_terminal:
+            try:
+                await self.poll()
+            except NotFoundError as e:
+                logger.debug(
+                    "MusicJob queue_id=%s has no stored media left to release: %s",
                     self.queue_id,
-                    exc_type.__name__,
                     e,
                 )
+                return
+            except (InvalidRequestError, UnprocessableEntityError) as e:
+                if _is_unknown_request_id(e):
+                    logger.debug(
+                        "MusicJob queue_id=%s is unknown to Venice; nothing to release: %s",
+                        self.queue_id,
+                        e,
+                    )
+                    return
+                self._rejected = True
+            except Exception as e:
+                logger.debug("Final poll for music job queue_id=%s failed: %s", self.queue_id, e)
+        if not self._is_terminal:
+            logger.warning(
+                "MusicJob queue_id=%s (model %s) left its context while still generating "
+                "(last status: %s). The job is already billed and keeps running; Venice "
+                "stores the audio when it finishes. Call wait() again, then release(), "
+                "to collect and delete it.",
+                self.queue_id,
+                self.model,
+                self._status.status if self._status is not None else "never polled",
+            )
+            return
+        try:
+            # Music.release() logs a ``success: false`` result itself.
+            await self.release()
+        except Exception as e:
+            # A 400 "Request ID is invalid" means Venice does not know the id
+            # (the job was rejected before it was stored): nothing to release.
+            level = logging.DEBUG if isinstance(e, InvalidRequestError) else logging.WARNING
+            logger.log(level, "MusicJob cleanup failed for queue_id=%s: %s", self.queue_id, e)
 
     @property
     def status(self) -> MusicRetrieveResponse | None:
@@ -235,6 +329,11 @@ class MusicJob:
             otherwise ``False`` (also ``False`` before the first poll).
         """
         return isinstance(self._status, MusicCompletedStatus)
+
+    @property
+    def _is_terminal(self) -> bool:
+        """Whether the job finished (completed, failed, or rejected by the server)."""
+        return self._rejected or isinstance(self._status, (MusicCompletedStatus, MusicFailedStatus))
 
     @property
     def is_failed(self) -> bool:
@@ -303,12 +402,34 @@ class MusicJob:
             The terminal :class:`MusicCompletedStatus`.
 
         Raises:
-            MusicGenerationError: If the server reports generation failure.
+            MusicGenerationError: If the server reports generation failure,
+                including a queued job that ``/audio/retrieve`` rejects
+                outright with a 400 (failed server-side validation) or a 422
+                (refused by the provider). The original
+                :class:`~venice_ai.exceptions.InvalidRequestError` or
+                :class:`~venice_ai.exceptions.UnprocessableEntityError` is
+                chained as ``__cause__`` and the job counts as finished.
             TimeoutError: If ``max_polls`` is exhausted before completion.
-            APIError: For HTTP-level failures while polling.
+            NotFoundError: If the job's stored media is gone: it was released
+                (``release()``, or ``delete_media_on_completion``) or it
+                expired. Venice answers ``"Media could not be found"``.
+            APIError: For other HTTP-level failures while polling, including
+                a 400 "Request ID is invalid" for a ``queue_id`` Venice never
+                issued, 401/403 credential errors and 429.
         """
         for _ in range(max_polls):
-            status = await self.poll()
+            try:
+                status = await self.poll()
+            except (InvalidRequestError, UnprocessableEntityError) as e:
+                if _is_unknown_request_id(e):
+                    raise
+                self._rejected = True
+                raise MusicGenerationError(
+                    f"Music generation failed: {e}",
+                    error_code=e.code,
+                    request=e.request,
+                    response=e.response,
+                ) from e
             if isinstance(status, MusicCompletedStatus):
                 return status
             if isinstance(status, MusicFailedStatus):
@@ -324,7 +445,7 @@ class MusicJob:
     async def download(self, path: str | Path, status: MusicCompletedStatus) -> Path:
         """Download a completed music clip to *path*.
 
-        Does NOT call :meth:`cancel` - use the context manager for that.
+        Does NOT call :meth:`release` - use the context manager for that.
         File I/O is offloaded to a worker thread so the event loop never
         blocks. URL downloads reuse the SDK client's managed HTTP session
         so proxy, SSL, timeout, and retry configuration are honored.
@@ -342,8 +463,10 @@ class MusicJob:
         Raises:
             MusicGenerationError: If the status carries neither inline data
                 nor a ``url``; nothing is written in that case.
-            APIError: If the URL fetch fails (mapped subclasses include
-                ``APIConnectionError``, ``APITimeoutError``).
+            APITimeoutError: If the URL fetch times out.
+            APIConnectionError: If the connection fails during the URL fetch.
+            aiohttp.ClientResponseError: If the URL answers with an error
+                status.
             OSError: If the file cannot be written (permission denied,
                 disk full, etc.).
         """
@@ -361,26 +484,32 @@ class MusicJob:
             await asyncio.to_thread(path.write_bytes, data)
         return path
 
-    async def cancel(self) -> MusicCompleteResponse:
-        """Release this job's server-side storage (best effort).
+    async def release(self) -> MusicCompleteResponse:
+        """Delete this job's stored media and queue entry.
 
-        Wraps ``POST /api/v1/audio/complete``, which deletes the job's stored
-        media and queue entry. It does not stop a generation that is still
-        running: the job continues on the server and is billed. Named
-        ``cancel`` (rather than the wire-format ``complete``) to distinguish
-        it from the :attr:`is_complete` state check - terminal states are
-        polled via :meth:`wait` / :attr:`status`.
+        Wraps ``POST /api/v1/audio/complete``. Call it after the audio has been
+        downloaded. It does not stop or un-bill a job: billing happens when the
+        job is queued, and a job still generating is unaffected and stores its
+        audio when it finishes. Venice returns ``success: true`` for an id that
+        was already released, so a ``True`` result does not mean anything was
+        deleted by this call; ``success: false`` means the cleanup did not
+        complete and can be retried later. Once a release of a finished job
+        succeeds, leaving the ``async with`` block does not release it again.
 
         Returns:
-            :class:`MusicCompleteResponse` confirming the queue entry was
-            released.
+            The :class:`MusicCompleteResponse`.
 
         Raises:
-            APIError: For HTTP-level failures (mapped subclasses include
-                ``AuthenticationError``, ``NotFoundError`` if the queue id
-                no longer exists).
+            APIError: For HTTP-level failures, including a 400 "Request ID is
+                invalid" for an id Venice does not know.
         """
-        return await self._client.music.cancel(model=self.model, queue_id=self.queue_id)
+        result = await self._client.music.release(model=self.model, queue_id=self.queue_id)
+        # Only a job that has finished has stored media to release; a release
+        # sent while it is still generating deletes nothing, and the media it
+        # stores later still needs releasing on exit.
+        if result.success and self._is_terminal:
+            self._released = True
+        return result
 
 
 class Music(APIResource["VeniceClient"]):
@@ -388,7 +517,7 @@ class Music(APIResource["VeniceClient"]):
 
     Mirrors :class:`venice_ai.resources.video.Video`: ``submit`` queues a
     job, ``run`` returns a managed :class:`MusicJob`, ``retrieve`` polls,
-    ``cancel`` releases server-side storage, ``quote`` gives a price
+    ``release`` frees server-side storage, ``quote`` gives a price
     estimate.
 
     Accessed through :attr:`venice_ai.VeniceClient.music`.
@@ -551,11 +680,12 @@ class Music(APIResource["VeniceClient"]):
             payloads are attached to ``MusicCompletedStatus._data``.
 
         Raises:
-            InvalidRequestError: If the model id or queue id fails
-                validation server-side.
+            InvalidRequestError: If the model id fails validation
+                server-side, or the queue id was never issued (400 "Request
+                ID is invalid").
             AuthenticationError: If the API key is missing or invalid.
-            NotFoundError: If the queue id does not exist or has been
-                released.
+            NotFoundError: If the job's stored media is gone because it was
+                released or has expired (404 "Media could not be found").
             ValueError: If the response cannot be parsed into any of the
                 three status shapes.
             APIError: For other HTTP-level failures.
@@ -585,31 +715,20 @@ class Music(APIResource["VeniceClient"]):
         )
 
         if "application/json" not in content_type:
-            logger.info(
-                "music.retrieve returned non-JSON content-type %r — "
-                "reading COMPLETED binary audio (%s bytes declared).",
-                content_type,
-                raw_response.content_length,
-            )
-            audio_bytes = await raw_response.read()
-            raw_response.close()
-            completed = MusicCompletedStatus.model_validate({"status": "COMPLETED", "url": None})
-            completed._set_data(audio_bytes)
-            return completed
+            return await self._completed_from_binary(raw_response, content_type)
 
+        # Read under the transport-error mapping, then parse: a stalled body
+        # is an APITimeoutError, and a body that is not JSON is a parse error.
+        body_bytes = await read_body(raw_response)
         try:
             response_data = await raw_response.json()
-        except Exception as e:
-            try:
-                body_preview = await raw_response.text()
-            except Exception:
-                body_preview = "<unable to read body>"
+        except (aiohttp.ContentTypeError, ValueError) as e:
             logger.error(
                 "Failed to parse JSON from music.retrieve response: %s. "
                 "Content-Type: %r, Body preview: %.500s",
                 e,
                 content_type,
-                body_preview,
+                body_bytes[:500].decode("utf-8", errors="replace"),
             )
             raise
 
@@ -635,43 +754,65 @@ class Music(APIResource["VeniceClient"]):
 
         raise ValueError(f"Unable to parse music retrieve response: {response_data}")
 
-    async def cancel(
+    async def release(
         self,
         *,
         model: str,
         queue_id: str,
     ) -> MusicCompleteResponse:
-        """Release a music job's server-side storage (best-effort cleanup).
+        """Delete a music job's stored media and queue entry.
 
-        Wraps ``POST /api/v1/audio/complete``, which deletes the job's stored
-        media and queue entry. It does not stop a generation that is still
-        running; that job continues on the server and is billed. Named
-        ``cancel`` (rather than the wire-format ``complete``) to distinguish
-        it from :attr:`MusicJob.is_complete` state checks.
+        Wraps ``POST /api/v1/audio/complete``. Call it after the audio has been
+        downloaded. It does not stop or un-bill a job: billing happens when the
+        job is queued, and a job still generating stores its audio when it
+        finishes. Venice returns ``success: true`` for an already released id;
+        ``success: false`` means the cleanup did not complete and can be
+        retried, and is logged at WARNING.
 
         Args:
             model: Music model id used at submit time.
             queue_id: Queue identifier returned by :meth:`submit`.
 
         Returns:
-            :class:`MusicCompleteResponse` confirming the queue entry was
-            released.
+            The :class:`MusicCompleteResponse`.
 
         Raises:
-            InvalidRequestError: If the model id or queue id fails
-                validation server-side.
+            InvalidRequestError: If the model id fails validation, or Venice
+                does not know the queue id (400 "Request ID is invalid").
             AuthenticationError: If the API key is missing or invalid.
-            NotFoundError: If the queue id no longer exists.
             APIError: For other HTTP-level failures.
         """
         validate_model_id(model, "model")
         request = MusicCompleteRequest.model_validate({"model": model, "queue_id": queue_id})
         body = request.model_dump(exclude_none=True)
-        return await self._client.post(
+        response: MusicCompleteResponse = await self._client.post(
             "audio/complete",
             json_data=body,
             cast_to=MusicCompleteResponse,
         )
+        if not response.success:
+            _log_unsuccessful_release(queue_id, model)
+        return response
+
+    async def _completed_from_binary(
+        self, raw_response: Any, content_type: str
+    ) -> MusicCompletedStatus:
+        """Build the completed status for a non-JSON retrieve response.
+
+        Venice delivers finished audio inline with an ``audio/*`` Content-Type.
+        ``application/octet-stream`` is accepted when the bytes are a known
+        audio container. Anything else (an HTML proxy page, plain text, an
+        empty body) is not audio and raises.
+        """
+        media_type, body = await read_inline_audio(
+            raw_response, content_type, operation="music.retrieve"
+        )
+        logger.info("music.retrieve returned COMPLETED %s audio (%d bytes).", media_type, len(body))
+        completed = MusicCompletedStatus.model_validate(
+            {"status": "COMPLETED", "url": None, "content_type": media_type}
+        )
+        completed._set_data(body)
+        return completed
 
     async def run(
         self,
@@ -691,7 +832,7 @@ class Music(APIResource["VeniceClient"]):
 
         Calls :meth:`submit` then wraps the queue response in a
         :class:`MusicJob` async context manager. On exit, the SDK calls
-        :meth:`MusicJob.cancel` to release server-side storage. Accepts the
+        :meth:`MusicJob.release` to release server-side storage. Accepts the
         same parameters as :meth:`submit`.
 
         Wraps ``POST /api/v1/audio/queue`` (the lifecycle context manager

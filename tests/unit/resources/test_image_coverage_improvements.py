@@ -231,8 +231,7 @@ class TestImageGenerateBinaryResponseHandling:
 
         # Mock ClientResponse
         mock_response = Mock(spec=aiohttp.ClientResponse)
-        mock_response.content = Mock()
-        mock_response.content.read = AsyncMock(return_value=b"response content")
+        mock_response.read = AsyncMock(return_value=b"response content")
 
         mock_client._request = AsyncMock(return_value=mock_response)
         image_resource._client = mock_client
@@ -242,105 +241,6 @@ class TestImageGenerateBinaryResponseHandling:
         )
 
         assert result == b"response content"
-
-    @pytest.mark.asyncio
-    async def test_generate_binary_response_empty_content_vcr_fallback(self, image_resource):
-        """Test VCR fallback when content is empty (lines 319-331)."""
-        mock_client = AsyncMock()
-
-        # Mock ClientResponse with empty content
-        mock_response = Mock(spec=aiohttp.ClientResponse)
-        mock_response.content = Mock()
-        mock_response.content.read = AsyncMock(return_value=b"")  # Empty content
-        mock_response.read = AsyncMock(return_value=b"fallback content")
-
-        mock_client._request = AsyncMock(return_value=mock_response)
-        image_resource._client = mock_client
-
-        result = await image_resource.create(
-            model="test-model", prompt="test prompt", return_binary=True
-        )
-
-        assert result == b"fallback content"
-
-    @pytest.mark.asyncio
-    async def test_generate_binary_response_vcr_content_attribute_fallback(self, image_resource):
-        """Test VCR _content attribute fallback (lines 326-330)."""
-        mock_client = AsyncMock()
-
-        # Mock ClientResponse with empty content and read exception
-        mock_response = Mock(spec=aiohttp.ClientResponse)
-        mock_response.content = Mock()
-        mock_response.content.read = AsyncMock(return_value=b"")  # Empty content
-        mock_response.read = AsyncMock(side_effect=Exception("Read failed"))
-        mock_response._content = b"vcr content attribute"
-
-        mock_client._request = AsyncMock(return_value=mock_response)
-        image_resource._client = mock_client
-
-        result = await image_resource.create(
-            model="test-model", prompt="test prompt", return_binary=True
-        )
-
-        assert result == b"vcr content attribute"
-
-    @pytest.mark.asyncio
-    async def test_generate_binary_response_unknown_type_with_content_attr(self, image_resource):
-        """Test unknown response type with content attribute (lines 336-346)."""
-        mock_client = AsyncMock()
-
-        # Mock unknown response type with content attribute
-        mock_response = Mock()
-        mock_response.content = b"content attribute bytes"
-
-        mock_client._request = AsyncMock(return_value=mock_response)
-        image_resource._client = mock_client
-
-        result = await image_resource.create(
-            model="test-model", prompt="test prompt", return_binary=True
-        )
-
-        assert result == b"content attribute bytes"
-
-    @pytest.mark.asyncio
-    async def test_generate_binary_response_unknown_type_with_readable_content(
-        self, image_resource
-    ):
-        """Test unknown response type with readable content attribute (lines 342-346)."""
-        mock_client = AsyncMock()
-
-        # Mock unknown response type with readable content
-        mock_content = Mock()
-        mock_content.read = AsyncMock(return_value=b"readable content")
-
-        mock_response = Mock()
-        mock_response.content = mock_content
-
-        mock_client._request = AsyncMock(return_value=mock_response)
-        image_resource._client = mock_client
-
-        result = await image_resource.create(
-            model="test-model", prompt="test prompt", return_binary=True
-        )
-
-        assert result == b"readable content"
-
-    @pytest.mark.asyncio
-    async def test_generate_binary_response_final_fallback(self, image_resource):
-        """Test final fallback casting for unknown response (lines 347-348)."""
-        mock_client = AsyncMock()
-
-        # Mock unknown response type without content attribute
-        mock_response = "unknown response type"
-
-        mock_client._request = AsyncMock(return_value=mock_response)
-        image_resource._client = mock_client
-
-        result = await image_resource.create(
-            model="test-model", prompt="test prompt", return_binary=True
-        )
-
-        assert result == "unknown response type"
 
     @pytest.mark.asyncio
     async def test_generate_json_response_path(self, image_resource):
@@ -451,22 +351,6 @@ class TestImageUpscaleErrorHandling:
 
                 assert result == b"upscaled image data"
 
-    @pytest.mark.asyncio
-    async def test_upscale_response_with_content_attribute(self, image_resource):
-        """Test upscale when response has content attribute (lines 575-576)."""
-        # Mock preparation and response with content attribute
-        with patch.object(image_resource, "_prepare_image_content") as mock_prepare:
-            mock_prepare.return_value = b"test image data"
-
-            with patch.object(image_resource, "_request_multipart") as mock_request:
-                mock_response = Mock()
-                mock_response.content = b"response with content"
-                mock_request.return_value = mock_response
-
-                result = await image_resource.upscale(image=b"test", scale=2.0)
-
-                assert result == b"response with content"
-
 
 class TestImageEditErrorHandling:
     """Test error handling in the edit method."""
@@ -548,8 +432,7 @@ class TestImageEditErrorHandling:
     async def test_edit_client_response_type_json(self, image_resource):
         """Test edit with ClientResponse type (JSON mode, bytes→base64)."""
         mock_response = Mock(spec=aiohttp.ClientResponse)
-        mock_response.content = Mock()
-        mock_response.content.read = AsyncMock(return_value=b"response content")
+        mock_response.read = AsyncMock(return_value=b"response content")
 
         mock_client = AsyncMock()
         mock_client._request = AsyncMock(return_value=mock_response)
@@ -574,21 +457,6 @@ class TestImageEditErrorHandling:
         mock_client._request.assert_called_once()
         call_kwargs = mock_client._request.call_args[1]
         assert call_kwargs["json_data"]["image"] == "https://example.com/photo.jpg"
-
-    @pytest.mark.asyncio
-    async def test_edit_unknown_response_type(self, image_resource):
-        """Test edit with unknown response type that has content attribute."""
-        # edit() always uses JSON mode; mock _client._request
-        mock_response = Mock()
-        mock_response.content = b"content attribute bytes"
-
-        mock_client = AsyncMock()
-        mock_client._request = AsyncMock(return_value=mock_response)
-        image_resource._client = mock_client
-
-        result = await image_resource.edit(prompt="test edit", image=b"test")
-
-        assert result == b"content attribute bytes"
 
     @pytest.mark.asyncio
     async def test_edit_resolution_forwarded_in_payload(self, image_resource):

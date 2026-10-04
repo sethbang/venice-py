@@ -113,9 +113,9 @@ class TestTierDiscoveryErrorHandling:
         rate_limit_discovery = tier_discovery_with_mock_client
 
         # Mock client session to raise CancelledError
-        mock_session = AsyncMock()
-        mock_session.get.side_effect = asyncio.CancelledError("Fetch cancelled")
-        rate_limit_discovery.client._get_session = AsyncMock(return_value=mock_session)
+        rate_limit_discovery.client.get = AsyncMock(
+            side_effect=asyncio.CancelledError("Fetch cancelled")
+        )
 
         # CancelledError should be re-raised
         with pytest.raises(asyncio.CancelledError):
@@ -127,9 +127,7 @@ class TestTierDiscoveryErrorHandling:
         rate_limit_discovery = tier_discovery_with_mock_client
 
         # Mock client session to raise ValueError
-        mock_session = AsyncMock()
-        mock_session.get.side_effect = ValueError("Invalid JSON")
-        rate_limit_discovery.client._get_session = AsyncMock(return_value=mock_session)
+        rate_limit_discovery.client.get = AsyncMock(side_effect=ValueError("Invalid JSON"))
 
         # Should log exception and return None
         result = await rate_limit_discovery._fetch_rate_limits_simple()
@@ -142,9 +140,7 @@ class TestTierDiscoveryErrorHandling:
         """Test _fetch_rate_limits_simple handles TypeError (lines 193-195)."""
         rate_limit_discovery = tier_discovery_with_mock_client
 
-        mock_session = AsyncMock()
-        mock_session.get.side_effect = TypeError("Type error in response")
-        rate_limit_discovery.client._get_session = AsyncMock(return_value=mock_session)
+        rate_limit_discovery.client.get = AsyncMock(side_effect=TypeError("Type error in response"))
 
         result = await rate_limit_discovery._fetch_rate_limits_simple()
 
@@ -156,9 +152,7 @@ class TestTierDiscoveryErrorHandling:
         """Test _fetch_rate_limits_simple handles AttributeError (lines 193-195)."""
         rate_limit_discovery = tier_discovery_with_mock_client
 
-        mock_session = AsyncMock()
-        mock_session.get.side_effect = AttributeError("Missing attribute")
-        rate_limit_discovery.client._get_session = AsyncMock(return_value=mock_session)
+        rate_limit_discovery.client.get = AsyncMock(side_effect=AttributeError("Missing attribute"))
 
         result = await rate_limit_discovery._fetch_rate_limits_simple()
 
@@ -170,9 +164,7 @@ class TestTierDiscoveryErrorHandling:
         """Test _fetch_rate_limits_simple handles OSError (lines 193-195)."""
         rate_limit_discovery = tier_discovery_with_mock_client
 
-        mock_session = AsyncMock()
-        mock_session.get.side_effect = OSError("Network unavailable")
-        rate_limit_discovery.client._get_session = AsyncMock(return_value=mock_session)
+        rate_limit_discovery.client.get = AsyncMock(side_effect=OSError("Network unavailable"))
 
         result = await rate_limit_discovery._fetch_rate_limits_simple()
 
@@ -274,13 +266,7 @@ class TestTierDiscoveryComplexLogic:
         rate_limit_discovery = tier_discovery_with_mock_client
 
         # Mock response with wrong data type (string instead of dict/list)
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = Mock()
-        mock_response.json = AsyncMock(return_value={"data": "not_a_list_or_dict"})
-
-        mock_session = AsyncMock()
-        mock_session.get = AsyncMock(return_value=mock_response)
-        rate_limit_discovery.client._get_session = AsyncMock(return_value=mock_session)
+        rate_limit_discovery.client.get = AsyncMock(return_value={"data": "not_a_list_or_dict"})
 
         # Should return None for invalid structure
         result = await rate_limit_discovery._fetch_rate_limits_simple()
@@ -292,17 +278,11 @@ class TestTierDiscoveryComplexLogic:
         rate_limit_discovery = tier_discovery_with_mock_client
 
         # Mock response where data is directly a list
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = Mock()
-        mock_response.json = AsyncMock(
+        rate_limit_discovery.client.get = AsyncMock(
             return_value={
                 "data": [{"bucket": "tier-1", "models": ["model1"], "limits": {"rpm": 10}}]
             }
         )
-
-        mock_session = AsyncMock()
-        mock_session.get = AsyncMock(return_value=mock_response)
-        rate_limit_discovery.client._get_session = AsyncMock(return_value=mock_session)
 
         # Should return the list
         result = await rate_limit_discovery._fetch_rate_limits_simple()
@@ -315,9 +295,7 @@ class TestTierDiscoveryComplexLogic:
         rate_limit_discovery = tier_discovery_with_mock_client
 
         # Mock response with nested structure
-        mock_response = AsyncMock()
-        mock_response.raise_for_status = Mock()
-        mock_response.json = AsyncMock(
+        rate_limit_discovery.client.get = AsyncMock(
             return_value={
                 "data": {
                     "rateLimits": [
@@ -330,10 +308,6 @@ class TestTierDiscoveryComplexLogic:
                 }
             }
         )
-
-        mock_session = AsyncMock()
-        mock_session.get = AsyncMock(return_value=mock_response)
-        rate_limit_discovery.client._get_session = AsyncMock(return_value=mock_session)
 
         # Should extract the rateLimits array
         result = await rate_limit_discovery._fetch_rate_limits_simple()

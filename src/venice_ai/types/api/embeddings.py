@@ -23,7 +23,7 @@ class EmbeddingObject(BaseModel):
         description="Vector of floating-point numbers or base64-encoded string representing the embedding",
     )
     encoding_format: Literal["float", "base64"] | None = Field(
-        None, description="Format of the embedding data"
+        default=None, description="Format of the embedding data"
     )
 
 

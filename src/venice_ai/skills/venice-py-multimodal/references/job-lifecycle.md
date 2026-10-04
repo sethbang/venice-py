@@ -11,12 +11,12 @@ client.video.run(...)        client.music.run(...)
          ├── async with job:          ├── async with job:
          │     await job.wait()       │     await job.wait()
          │     await job.download()   │     await job.download()
-         ├── await job.cancel()       ├── await job.cancel()
+         ├── await job.cancel()       ├── await job.release()
          ├── await job.poll()         ├── await job.poll()
          └── job.queue_id             └── job.queue_id
 ```
 
-`VideoJob` and `MusicJob` are different classes but expose the same async-context-manager + lifecycle methods. The patterns below apply to both.
+`VideoJob` and `MusicJob` are different classes but expose the same async-context-manager + lifecycle methods, except that the call releasing stored media is `cancel()` on a `VideoJob` and `release()` on a `MusicJob`. The patterns below apply to both.
 
 ## Canonical pattern: `async with` + `wait()` + `download()`
 
@@ -50,19 +50,21 @@ async def make_clip(prompt: str, out_path: Path) -> Path:
 
 ## `async with job:` is mandatory
 
-The `async with` block guarantees server-side cleanup if your code exits early — exception, timeout, KeyboardInterrupt. Without it, the job continues running on Venice's side until it completes naturally; you keep paying.
+The `async with` block releases the job's stored media when the block finishes cleanly after the job has finished (you have saved the result). A clean exit before the job finished releases nothing and sends no request: releasing a job that is still generating deletes nothing, and its output is stored when it finishes anyway, so a WARNING names the `queue_id` and tells you to call `wait()` again, then `cancel()` / `release()`. If the block raises (a failed download, a disk error, a timeout, a cancelled task), the media is **not** released: the job is already billed, and leaving its output on the server lets you retry the save. A WARNING names the `queue_id` and the calls that resume it. A job that failed or was rejected has nothing to keep and is released either way. Without the block, nothing is ever released.
 
 ```python
-# WRONG — the stored media is never released if wait() raises
+# WRONG — the stored media is never released
 job = await client.video.run(...)
 status = await job.wait()
 await job.download(path, status)
 
 # RIGHT
-async with await client.video.run(...) as job:   # __aexit__ releases stored media
+async with await client.video.run(...) as job:   # released on a clean exit after the job finished
     status = await job.wait()
     await job.download(path, status)
 ```
+
+To resume after an exception, retrieve the job by `model` and `queue_id` (`client.video.retrieve(...)`, `client.music.retrieve(...)`, `client.voice_changer.retrieve(...)`), save the output, then release it (`client.video.cancel(...)`, `client.music.release(...)`, `client.voice_changer.cancel(...)`). For a video job whose queue response carried a `download_url`, keep using the `VideoJob` (`wait()`, `download()`, `cancel()`): the file lives behind that link, and `client.video.cancel(...)` cannot delete it (see below). Call `await job.cancel()` (or `job.release()` for music) inside the block when you want the output discarded even though the block will raise.
 
 ## Watching progress
 
@@ -87,7 +89,7 @@ def on_progress(s) -> None:
 
 ## Timeouts
 
-`wait(max_polls=N)` raises `TimeoutError` once `N` polls (each `poll_interval` seconds apart) elapse without completion. The `async with` block still calls `cancel()` on the way out, but that only releases storage: **a job that has not finished keeps generating on the server and is still billed**. The SDK logs a WARNING when the block exits before a terminal status.
+`wait(max_polls=N)` raises `TimeoutError` once `N` polls (each `poll_interval` seconds apart) elapse without completion. Releasing could not help anyway: **a job that has not finished keeps generating on the server and is still billed**, and releasing it deletes nothing. Because the block exits with an exception, nothing is released, and the SDK logs a WARNING with the `queue_id`.
 
 ```python
 try:
@@ -108,6 +110,8 @@ The server may report a job failure in the polled status. `wait()` raises:
 
 - `VideoGenerationError(error_code=..., message=...)` for video failures
 - `MusicGenerationError(error_code=..., message=...)` for music failures
+
+The same errors are raised when the retrieve endpoint rejects the job outright: a 400 for a job that failed server-side validation, or a 422 for one the provider refused (for example on content policy, with the credits refunded). The original `InvalidRequestError` / `UnprocessableEntityError` is on `e.__cause__`, and the job counts as finished, so leaving the `async with` block logs no "still billed" WARNING. A 400 saying the request ID is invalid, and 401/403/404/429, are not verdicts on the job and propagate as their own `APIError` subclasses.
 
 Inspect `e.error_code` to decide whether to retry. Common codes:
 
@@ -151,18 +155,20 @@ async with await client.video.run(...) as job:
 
 ## Releasing storage with `cancel()`
 
-Despite its name, `await job.cancel()` does **not** stop a generation that is still running: it wraps the `/complete` endpoint, which deletes the job's stored media and queue entry (best effort). The job keeps running and is billed. Call it once you have downloaded the result; the `async with` block does this for you on exit:
+Despite its name, `await job.cancel()` does **not** stop a generation that is still running: it deletes a finished job's stored video (best effort). A job that has not finished keeps running, is billed, and its video is stored when it finishes, so a `cancel()` sent before then deletes nothing. Call it once you have downloaded the result; the `async with` block does this for you on a clean exit after the job finished:
 
 ```python
 job = await client.video.run(...)
-try:
-    status = await job.wait()
-    await job.download(path, status)
-finally:
-    await job.cancel()           # release stored media
+status = await job.wait()
+await job.download(path, status)
+await job.cancel()               # release stored media only after the save succeeded
 ```
 
+For most video models `cancel()` calls `/video/complete`. Some models return a `download_url` with the queue response instead: `retrieve()` then only ever returns JSON status, the file stays behind that link for up to 24 hours, and `/video/complete` answers 400 "Request ID is invalid" for the job whether it is running or finished. For those jobs `job.cancel()` sends `DELETE` to the `download_url` first, without the API key (the link authorizes itself; a 404 means it is already gone), then calls `/video/complete` and accepts that 400. The resource-level `client.video.cancel(model=..., queue_id=...)` cannot see the link and only calls `/video/complete`. The SDK never logs the link: anyone holding it can fetch the video.
+
 The SDK has no call that aborts a queued job, so check the price with `client.video.quote(...)` before submitting.
+
+Music jobs name the call for what it does: `await job.release()` (there is no `MusicJob.cancel()`). Leaving a `MusicJob` block cleanly releases a finished job; a job still generating is left alone with a WARNING, as for video. (A `MusicJob` polls once more on that exit first; a `VideoJob` does not, because a completed retrieve for an inline-video model carries the whole MP4.) Call `wait()` again (a `TimeoutError` leaves the job resumable), download, then `release()`. Once a job's media is released or has expired, `retrieve()` and `wait()` raise `NotFoundError` ("Media could not be found"); a `queue_id` Venice never issued gets a 400 "Request ID is invalid" (`InvalidRequestError`). A completed music status carries `content_type` and `audio_format` (`"flac"`, `"mp3"`, ...) for naming the file.
 
 ## Low-level: `submit()` + `retrieve()`
 
@@ -225,7 +231,7 @@ But because each job already runs server-side asynchronously, the bottleneck is 
 
 ## Common bugs
 
-- **Bare `client.video.run(...)` without `async with`** — leaks server-side resources on early exit.
+- **Bare `client.video.run(...)` without `async with`** — the finished job's stored media is never released.
 - **Calling `download()` without passing `status`** — `download(path, status)` is the signature; the status holds the output URL.
 - **Forgetting that `wait()` defaults to `max_polls=120`** — raise it for long renders, e.g. `wait(max_polls=300, poll_interval=2.0)`.
 - **Retrying `VideoGenerationError` blindly** — check `e.error_code` first; content-policy violations are terminal.

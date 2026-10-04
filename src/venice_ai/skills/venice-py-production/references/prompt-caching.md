@@ -16,18 +16,20 @@ Venice supports prompt caching for chat completions — when a prefix of your pr
 
 ## How Venice exposes caching
 
-Caching is opt-in via Venice's chat-completions parameters. Check the model's `model_spec.capabilities` for cache support — not every model is cache-enabled. Capability filter:
+Caching is automatic: there is no parameter to turn it on. Send prompts whose stable prefix is long enough (about 1,024 tokens on most models, about 4,000 on Claude) and read the cache counts from `usage`. For Claude, which needs explicit cache breakpoints at the protocol level, Venice adds them for the system prompt and the conversation history. Add your own `cache_control: {"type": "ephemeral"}` marker only when you need something else cached from the first turn, such as a long document in a single-turn request.
+
+The catalog has no prompt-caching capability flag. The only signal is a cached-input price, which `require_prompt_caching=True` filters on:
 
 ```python
-# Some models advertise cache support; if you need a guaranteed-cacheable model,
-# query the catalog and inspect capabilities (the SDK's capability filters cover
-# function-calling / vision / reasoning but not caching directly today).
-catalog = await client.models.list(type="chat")
-cache_capable = [m.id for m in catalog.data
-                 if m.model_spec and "prompt_cache" in (m.model_spec.capabilities or [])]
+model = await client.models.resolve_chat(require_prompt_caching=True)
 ```
 
-(Capability key names may vary by Venice's catalog; check current docs.)
+A listed `pricing.cache_input` does not guarantee a hit is served or reported. Some models with a cache price have been observed never to cache, and some are served by several backends that do not share a cache. Measure the hit rate on the model you pick.
+
+Two request parameters influence caching:
+
+- `prompt_cache_key="session-123"` is a routing hint. Requests with the same key are more likely to reach a server that already holds the prefix; it raises the odds of a hit but does not guarantee one.
+- `prompt_cache_retention="default" | "extended" | "24h"` asks for a longer cache lifetime on models that support it.
 
 ## Pattern: stable prefix → cached tokens
 
@@ -46,7 +48,7 @@ Policies (excerpt):
 
 async def answer(question: str) -> str:
     response = await client.chat.completions.create(
-        model=cache_capable_model,
+        model=model,
         messages=[
             SystemMessage(content=SYSTEM_PROMPT),    # same on every call → cached after first
             UserMessage(content=question),            # varies → not cached
@@ -56,22 +58,20 @@ async def answer(question: str) -> str:
     return response.text
 ```
 
-The first call pays full price for `SYSTEM_PROMPT`. Subsequent calls within the cache window pay the reduced cache-hit rate. Cache hit rate is exposed in usage:
+The first call pays full price for `SYSTEM_PROMPT`. Subsequent calls within the cache window pay the reduced cache-hit rate. `usage.cached_tokens` (cache reads) and `usage.cache_write_tokens` (cache writes) read the counts whichever shape the model sends them in, and return `0` when the model reports nothing:
 
 ```python
 if response.usage:
-    print(f"Total: {response.usage.total_tokens}")
-    # Cache stats — keys are model-dependent; check usage.model_extra or specific fields
-    cached = response.usage.cache_read_input_tokens
-    if cached is not None:
-        print(f"Cached: {cached} / {response.usage.prompt_tokens} prompt tokens")
+    usage = response.usage
+    print(f"Cached: {usage.cached_tokens} / {usage.prompt_tokens} prompt tokens")
+    print(f"Written to cache: {usage.cache_write_tokens}")
 ```
 
-(The exact field name for cache hits depends on the model and Venice version. Inspect `response.usage` for cache-related fields.)
+Some models omit `prompt_tokens_details` entirely when nothing was cached; the accessors read that as `0`, not as "this model does not cache".
 
 ## Cache windows
 
-Caches typically expire on a 5-minute (300s) sliding window — if no call uses the prefix in 5 minutes, the cache is dropped. Some Venice tiers may have longer windows (1 hour). Plan your call cadence around this:
+Cache lifetimes depend on the provider: about 5 minutes for Claude, Grok and DeepSeek, 5-10 minutes for OpenAI models and about an hour for Gemini, per Venice's prompt-caching guide. `prompt_cache_retention` can request longer on models that support it. Plan your call cadence around this:
 
 - **High-traffic apps** (request every few seconds): cache stays warm, hit rate near 100%.
 - **Bursty apps** (requests every few minutes): hits and misses interleave.
@@ -110,7 +110,7 @@ Cache and structured output (`response_format=BaseModel`) are independent. The s
 
 ```python
 result = await client.chat.completions.parse(
-    model=cache_capable_model,
+    model=model,
     messages=[
         SystemMessage(content=BIG_STABLE_PROMPT),
         UserMessage(content=user_question),
@@ -125,7 +125,7 @@ result = await client.chat.completions.parse(
 
 ```python
 result = await client.chat.completions.run_with_tools(
-    model=cache_capable_model,
+    model=model,
     messages=[SystemMessage(content=BIG_STABLE_AGENT_PROMPT), UserMessage(content="...")],
     tools=[lookup_order, issue_refund],       # tool schemas part of the prefix
     max_iterations=5,
@@ -136,14 +136,14 @@ The first iteration of the loop pays full price; iterations 2-N benefit from the
 
 ## Measuring the savings
 
-Wrap your calls with a counter that tracks `usage.prompt_tokens` vs `usage.cache_read_input_tokens` (also surfaced as `usage.prompt_tokens_details.cached_tokens`) and log the ratio:
+Wrap your calls with a counter that tracks `usage.prompt_tokens` vs `usage.cached_tokens` and log the ratio:
 
 ```python
 async def traced_with_cache_stats(client, **kwargs):
     response = await client.chat.completions.create(**kwargs)
     if response.usage:
         prompt = response.usage.prompt_tokens
-        cached = response.usage.cache_read_input_tokens or 0
+        cached = response.usage.cached_tokens
         log.info("venice.chat", model=kwargs["model"], prompt_tokens=prompt, cached_tokens=cached,
                  cache_hit_pct=(cached / prompt * 100 if prompt else 0))
     return response
@@ -165,7 +165,9 @@ async with VeniceClient(cost_tracker=tracker) as client:
 ## Common bugs
 
 - **Per-call timestamps in the system prompt** — your "cache" never hits. Strip dynamic content.
-- **Treating `cache_read_input_tokens` as available on every model** — it's `None` unless the server emits cache stats. Null-check.
+- **Reading `cache_read_input_tokens` or `prompt_tokens_details` directly** — models send one, both or neither. Use `usage.cached_tokens` / `usage.cache_write_tokens`.
+- **Treating `require_prompt_caching=True` as a guarantee** — it checks for a listed cache price. Measure hits on the chosen model, and send a cold call before comparing.
+- **Measuring with the Venice system prompt on** — its prefix is shared across traffic and often already cached, so the "cold" call is not cold. Pass `VeniceParameters(include_venice_system_prompt=False)` when you measure.
 - **Caching a 200-token prompt** — overhead exceeds savings. Caches earn back at thousands of tokens.
 - **Recomputing the system prompt per call** (string interpolation, `.format()`, etc.) — even if the result is identical bytes, build it once outside the call loop to keep the code clean.
 - **Cache window assumptions** — don't hardcode "5 minutes." Verify against the model's docs; some tiers have longer windows.

@@ -48,7 +48,10 @@ video     = await client.models.resolve_video()                              # a
 t2v       = await client.models.resolve_video(video_type="text-to-video")    # narrow by type
 music     = await client.models.resolve_music()
 cheapest  = await client.models.resolve_cheapest_video(duration="5s", resolution="1080p")
+direct    = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
 ```
+
+`prefer="cheapest"` ranks in strict price order, and the cheapest chat model often reasons; pass `exclude_reasoning=True` when a small token budget must produce visible content.
 
 Generic resolver: `client.models.resolve(type="chat", require_function_calling=True, require_vision=True, min_context_tokens=8000, exclude_beta=True, preferred_models=[...], exclude_models=[...])` returns the model ID string.
 
@@ -235,7 +238,7 @@ Every response model inherits from `VeniceBaseModel`, which auto-attaches the ra
 |---|---|---|
 | `response.headers` | `dict[str, str] \| None` | raw headers (dict-like) |
 | `response.response_rate_limits` | `RateLimitInfo \| None` | `x-ratelimit-*` parsed |
-| `response.balance_info` | `BalanceInfo \| None` | x402 prepaid USDC balance |
+| `response.balance_info` | `BalanceInfo \| None` | What the calling key can still spend (before this request), not the account balance |
 | `response.deprecation_info` | `DeprecationInfo \| None` | model deprecation warnings |
 | `response.pagination_info` | `PaginationInfo \| None` | `x-pagination-*` parsed |
 
@@ -337,7 +340,7 @@ To catch these patterns automatically in user code, run **`venice-py lint <path>
 - `references/responses-api.md` — alpha `client.responses` (OpenAI-compat)
 - `references/characters-and-augment.md` — `client.characters`, `client.augment.search/scrape/parse_text`
 - `references/response-shapes.md` — where fields actually live (`model_spec` per type, billing balance nesting, augment results, audio response, etc.)
-- `references/billing.md` — `client.billing.*` (`get_balance`, `get_usage_history`, `iter_usage_history`, beta analytics)
+- `references/billing.md` — `client.billing.*` (`get_balance`, `get_usage_history`, `iter_usage_history`, `iter_usage_history_csv`, beta analytics)
 - `references/decisions.md` — beta `client.decisions` (typed `noul` / `choice` / `score` judgments from "System One" models)
 
 ## Scripts

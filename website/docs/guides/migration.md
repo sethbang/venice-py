@@ -260,6 +260,13 @@ async for entry in client.billing.iter_usage_history(
     print(entry.timestamp, entry.amount)
 ```
 
+`format=BillingFormatEnum.CSV` returns a `BillingUsageHistoryCsvPage`, not bare
+`bytes`: the CSV document is in `.content` (`.text` decodes it), the continuation
+token Venice sends in the `x-next-cursor` header is `.nextCursor`, and the
+server-assigned file name is `.filename`. Replace `data = await ...` /
+`data.decode()` with `page = await ...` / `page.content` or `page.text`. To export
+a whole window, `iter_usage_history_csv()` yields one CSV page at a time.
+
 ### `client.get_model_pricing()` removed
 
 Pricing is no longer a dedicated client method — it lives on the model entry that
@@ -387,6 +394,49 @@ attested enclave key, stream the response, and decrypt it locally.
 |---|---|---|
 | `client.image.create` | `enable_web_search` | Optional; supported models pull recent web context. |
 | `client.chat.completions.create` | `store`, `text`, `include`, `metadata`, `prompt_cache_retention` | OpenAI-compat passthroughs + Venice's cache-retention tier. |
+
+---
+
+## Upgrading from 2.5 to 2.6
+
+Most of 2.6 is additive. These changes can need a code change:
+
+- **`Music.cancel()` and `MusicJob.cancel()` are removed.** They were aliases of
+  `release()`, which deletes a finished job's stored media and cancels nothing.
+  Call `client.music.release(model=..., queue_id=...)` or `await job.release()`.
+- **`VeniceClientFactory.create_client()` no longer takes `account_key`.** It was
+  never read. Pass the key as `api_key=` or `config.api_key`.
+- **`RateLimitDiscovery(account_key=...)` is removed.** It was never read either;
+  drop the argument.
+- **Paid requests are no longer retried by default.** Image, video, music, speech
+  and voice generation can be billed before a 5xx, timeout or dropped connection
+  reaches you, so the default policy resends them only when they cannot have been
+  processed. Free and idempotent requests are still retried, and chat, responses
+  and embeddings are retried on errors Venice does not bill. The default is now
+  2 attempts (was 3). `RetryOptions` is frozen (derive variants with
+  `dataclasses.replace()`) and rejects 429, which the rate limiter retries.
+- **Timeouts raise `APITimeoutError` on every path**, including stalled response
+  bodies and calls routed through a rate limiter. It does not subclass
+  `TimeoutError`, so catch `APITimeoutError` where you caught `TimeoutError` or
+  `asyncio.TimeoutError`.
+- **A job block that raises keeps its output.** `MusicJob`, `VideoJob` and
+  `VoiceChangerJob` release stored media only when the `async with` block exits
+  cleanly. A `VideoJob` or `MusicJob` left before it finishes is not released
+  either (a release then deletes nothing); call `wait()` and release it after.
+- **`VideoJob.cancel()` deletes the job's `download_url`** when the model returned
+  one, so the private link stops working once you have saved the video.
+- **Base URLs include the version path everywhere**: `https://api.venice.ai/api/v1`
+  for `VeniceClient(base_url=...)`, `VeniceAIConfig.api_base_url` and
+  `VENICE_API_BASE_URL`. A bare host still works as shorthand.
+- **`VeniceAIConfig.api_key` is read.** The key resolves as explicit `api_key=`,
+  then `config.api_key`, then `VENICE_API_KEY`.
+- **CSV usage history returns a `BillingUsageHistoryCsvPage`**, not `bytes` (see
+  the billing section above).
+- **Resolvers raise `NoMatchingModelError` or `ModelQuotesUnavailableError`.** Both
+  subclass `ValueError`, so existing `except ValueError` handlers still work.
+
+The [CHANGELOG](https://github.com/sethbang/venice-py/blob/main/CHANGELOG.md) lists
+every change.
 
 ---
 

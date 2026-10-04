@@ -448,6 +448,7 @@ class TestHTTPOperations:
         mock_response.ok = True
         mock_response.content_length = 10
         mock_response.headers = {"content-type": "application/json"}
+        mock_response.read = AsyncMock(return_value=b"{}")
         mock_response.json = AsyncMock(return_value={"uploaded": True})
 
         with patch.object(
@@ -597,6 +598,7 @@ class TestClientExpanded:
 
         mock_response = Mock()
         mock_response.headers = {}
+        mock_response.read = AsyncMock(return_value=b"{}")
         mock_response.json = AsyncMock(return_value={"result": "data"})
 
         with patch.object(

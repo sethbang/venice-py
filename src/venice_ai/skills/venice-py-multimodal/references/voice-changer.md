@@ -23,7 +23,7 @@ async with VeniceClient() as client:
         await job.download("converted.mp3", status)
 ```
 
-The context manager releases the provider-held media on exit. Pass `delete_media_on_completion=True` to `retrieve()` instead if you are driving the poll loop yourself.
+The context manager releases the provider-held media when the block exits cleanly. If the block raises, nothing is released and a WARNING names the `queue_id`, so `client.voice_changer.retrieve(model=..., queue_id=...)` can still fetch the converted audio. Pass `delete_media_on_completion=True` to `retrieve()` instead if you are driving the poll loop yourself.
 
 ## Source: file or URL, never both
 
@@ -38,7 +38,7 @@ Passing both, or neither, raises a `ValidationError` before anything is uploaded
 
 - **`duration_seconds` is a bare number.** `quote(duration_seconds=60)` or `"60"`. It is **not** video's `"60s"` form, and `"60s"` is rejected. The two families look alike and this is the easiest thing to get wrong by analogy.
 - **There is no `FAILED` status.** `retrieve()` has exactly two outcomes: a `PROCESSING` JSON body, or the converted audio. A failed conversion raises an `APIError` (404 media gone, 500 inference failed, 504 never reached the provider) — so `wait()` never returns a failure for you to branch on, unlike `MusicJob`/`VideoJob`. Any refund is on the exception's parsed body, `err.body.get("credits_refunded")`, not a typed field.
-- **There is no download URL.** The audio comes back inline as `audio/mpeg`, attached to `status.data`. `VoiceChangerCompletedStatus` has no `url` or `expires_at`; `download()` raises if the bytes are missing rather than trying to fetch.
+- **There is no download URL.** The audio comes back inline (the spec declares `audio/mpeg`), attached to `status.data`, with its media type on `status.content_type` and a file extension on `status.audio_format`; name the output file from `audio_format`. `VoiceChangerCompletedStatus` has no `url` or `expires_at`; `download()` raises if the bytes are missing rather than trying to fetch.
 - **Voice changing is not a model type.** These models report `type="music"` with `voice_changer: true` on `model_spec`. `resolve_music()` will return a music *generator*, which these endpoints reject with `The model \`X\` is not a voice-changer model`. Use `models.resolve_voice_changer()`.
 - **The quote is an estimate.** Pricing is in whole-minute tiers against the length *Venice* measures server-side when the recording is queued, reported as `duration_seconds` on the queue response and on `job.duration_seconds`. Reconcile against that, not against what you asked to be quoted.
 - **`job.progress` is a pacing hint, not real progress.** It is elapsed time over the model's recent average, clamped to 1.0 — a slower-than-average run sits at 100% while still converting.

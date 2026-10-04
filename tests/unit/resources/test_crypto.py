@@ -93,7 +93,8 @@ async def test_rpc_posts_jsonrpc_request_to_network(crypto: Crypto) -> None:
     }
     assert call_args.kwargs["cast_to"] is JsonRpcResponse
     # No idempotency header by default
-    assert call_args.kwargs["headers"] is None
+    key = call_args.kwargs["headers"]["Idempotency-Key"]
+    assert key.startswith("venice-py-")
 
 
 @pytest.mark.asyncio
