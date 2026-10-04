@@ -8,13 +8,13 @@ Utility categories:
     * **Chat helpers**: ``build_model_id``
     * **Form helpers**: ``serialize_form_value``
     * **Parsing helpers**: ``safe_int`` / ``safe_float``
-    * **Error wrapping**: ``wrap_aiohttp_errors``
+    * **Error wrapping**: ``wrap_aiohttp_errors``, ``map_aiohttp_error``, ``read_body``
 
 All public symbols are re-exported here for backward compatibility so that
 ``from venice_ai.utils import <symbol>`` continues to work.
 """
 
-from .errors import wrap_aiohttp_errors
+from .errors import map_aiohttp_error, read_body, wrap_aiohttp_errors
 from .form import serialize_form_value
 from .models import _apply_model_filters, build_model_id, get_filtered_models
 from .parsing import safe_float, safe_int
@@ -30,5 +30,7 @@ __all__ = [
     "build_model_id",
     "safe_int",
     "safe_float",
+    "map_aiohttp_error",
+    "read_body",
     "wrap_aiohttp_errors",
 ]

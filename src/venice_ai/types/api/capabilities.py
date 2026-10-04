@@ -34,7 +34,7 @@ class ChatCapabilities(BaseModel):
 
     type: Literal["chat"] = "chat"
     context_window: int | None = Field(
-        None, description="Max input tokens the model accepts (``None`` if unspecified)."
+        default=None, description="Max input tokens the model accepts (``None`` if unspecified)."
     )
     supports_function_calling: bool
     supports_vision: bool
@@ -55,13 +55,13 @@ class ChatCapabilities(BaseModel):
     # wire model.
     quantization: str
     max_images: int | None = Field(
-        None,
+        default=None,
         description=(
             "Max images per request on multi-image vision models (``None`` if unspecified)."
         ),
     )
     max_videos: int | None = Field(
-        None,
+        default=None,
         description=(
             "Max video attachments per chat request on video-input models "
             "(``None`` if unspecified)."
@@ -70,14 +70,14 @@ class ChatCapabilities(BaseModel):
     # Open str values (not Literals) so a new server-side effort tier never
     # crashes get_capabilities().
     reasoning_effort_options: list[str] | None = Field(
-        None,
+        default=None,
         description=(
             "Accepted ``reasoning_effort`` values (``None`` unless the model "
             "supports reasoning effort)."
         ),
     )
     default_reasoning_effort: str | None = Field(
-        None,
+        default=None,
         description=(
             "``reasoning_effort`` applied when a request omits it (``None`` "
             "unless the model supports reasoning effort)."

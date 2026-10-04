@@ -66,6 +66,7 @@ from .base import (
 from .billing import (
     BillingBalanceResponse,
     BillingUsageEntry,
+    BillingUsageHistoryCsvPage,
     BillingUsageHistoryResponse,
     InferenceDetails,
     UsageAnalyticsByDate,
@@ -131,6 +132,7 @@ from .images import (
 from .models import (
     KNOWN_MODEL_TYPES,
     KNOWN_PRIVACY_MODES,
+    KNOWN_VOICE_CLONING_MODES,
     ASRModelPricing,
     AsrModelSpec,
     AudioModelPricing,
@@ -161,6 +163,7 @@ from .models import (
     TextModelSpec,
     TopPConstraint,
     TtsModelSpec,
+    TtsVoiceCloning,
     UpscaleModelSpec,
     UpscalePricing,
     VideoModelConstraints,
@@ -382,6 +385,8 @@ __all__ = [
     "InpaintModelSpec",
     "MusicModelSpec",
     "TtsModelSpec",
+    "TtsVoiceCloning",
+    "KNOWN_VOICE_CLONING_MODES",
     "AsrModelSpec",
     "EmbeddingModelSpec",
     "UpscaleModelSpec",
@@ -445,6 +450,7 @@ __all__ = [
     # From billing module
     "InferenceDetails",
     "BillingUsageEntry",
+    "BillingUsageHistoryCsvPage",
     "BillingUsageHistoryResponse",
     "BillingBalanceResponse",
     # From billing module - Usage Analytics (Beta)

@@ -3,748 +3,540 @@
 Venice AI SDK - Reasoning and Thinking Examples
 ===============================================
 
-This example demonstrates how to use models with reasoning capabilities that
-support <thinking> blocks for transparent thought processes using VeniceParameters.
+This example demonstrates how to use models with reasoning capabilities and
+how to control their thinking with ``VeniceParameters``.
 
 Learn how to:
-- Select models that support reasoning
-- Use VeniceParameters to control thinking behavior
-- Use strip_thinking_response and disable_thinking properly
-- Parse and display thinking blocks separately from responses
+- Select reasoning models with ``client.models.resolve_chat(require_reasoning=True)``
+  (``prefer="cheapest"`` picks the lowest-priced one)
+- Read the reasoning trace (``response.thinking_blocks`` / ``reasoning_content``)
+- Hide the trace with ``strip_thinking_response`` (the model still reasons)
+- Switch reasoning off with ``disable_thinking``, ``reasoning_effort="none"`` or
+  ``reasoning=ReasoningConfig(enabled=False)``
+- Read typed reasoning-token usage (``completion_tokens_details``)
+
+Reasoning models spend part of ``max_completion_tokens`` on hidden reasoning
+before they write the answer, so the caps here are generous. The requests also
+leave ``temperature`` at the server default: model publishers recommend their
+own sampling settings for thinking mode, and they differ from model to model.
+Every answer is checked: a reply cut off at the cap (``finish_reason ==
+"length"``, or a completion count that reached the cap) or with a wrong final
+answer fails its section, and the script exits non-zero. If the catalog has no
+model a section needs, that section prints ``Section skipped:``; the script
+exits 77 when no reasoning model exists at all.
 """
 
 import asyncio
+import io
+import re
 import sys
+from typing import Literal
 
-from venice_ai import VeniceClient, extract_thinking_blocks
-from venice_ai.types.api import SystemMessage, UserMessage
+from venice_ai import NoMatchingModelError, ReasoningConfig, VeniceClient
+from venice_ai.types.api import ChatCompletionResponse, SystemMessage, TextModelSpec, UserMessage
 from venice_ai.types.api.requests import VeniceParameters
+
+# Room for reasoning plus the visible answer. Small reasoning models vary
+# widely in how long they think, even on easy questions, so the cap leaves
+# several thousand tokens of headroom over a typical run.
+REASONING_CAP = 16384
+
+ANSWER_INSTRUCTION = "Finish with a final line of the form 'ANSWER: {format}'."
+
+
+def answer_line(text: str) -> str:
+    """Return the last ``ANSWER:`` line, lower-cased with whitespace collapsed ('' if none)."""
+    matches = re.findall(r"ANSWER:\s*(.+)", text.replace("*", ""))
+    return re.sub(r"\s+", " ", matches[-1]).strip().lower() if matches else ""
+
+
+def contains_part(answer: str, part: str) -> bool:
+    """True if ``part`` appears in ``answer`` as a whole value.
+
+    Spaces are optional (``"5minutes"`` matches ``"5 minutes"``), but the part
+    may not be glued to a neighbouring letter or digit, so ``"25 minutes"``
+    does not count as ``"5minutes"``.
+    """
+    body = r"\s*".join(re.escape(char) for char in part.lower().replace(" ", ""))
+    return re.search(rf"(?<![a-z0-9]){body}(?![a-z0-9])", answer) is not None
+
+
+def check_response(response: ChatCompletionResponse, expected: list[str]) -> bool:
+    """Print ``finish_reason`` and verify the ``ANSWER:`` line holds every expected part.
+
+    Some models report an answer cut off at the cap as ``finish_reason="stop"``,
+    so the completion-token count is checked against ``REASONING_CAP`` too.
+    """
+    finish_reason = response.choices[0].finish_reason if response.choices else None
+    used = response.usage.completion_tokens if response.usage else None
+    print(f"↳ finish_reason: {finish_reason}")
+    if finish_reason == "length" or used is None or used >= REASONING_CAP:
+        print(f"❌ The answer may be cut off: {used} of {REASONING_CAP} completion tokens used")
+        return False
+    answer = answer_line(response.text or "")
+    if not answer:
+        print("❌ No 'ANSWER:' line in the response")
+        return False
+    missing = [part for part in expected if not contains_part(answer, part)]
+    if missing:
+        print(f"❌ Final answer does not match the expected {expected} (got {answer!r})")
+        return False
+    print(f"✅ Final answer verified: {expected}")
+    return True
+
+
+def reasoning_tokens(response: ChatCompletionResponse) -> int | None:
+    """Reasoning tokens reported in ``usage.completion_tokens_details``, if any."""
+    usage = response.usage
+    if usage is None or usage.completion_tokens_details is None:
+        return None
+    return usage.completion_tokens_details.reasoning_tokens
+
+
+def print_usage(response: ChatCompletionResponse) -> None:
+    """Print token usage including the reasoning share."""
+    if response.usage:
+        usage = response.usage
+        print(
+            f"📊 Token Usage: Input={usage.prompt_tokens}, Output={usage.completion_tokens} "
+            f"(reasoning={reasoning_tokens(response)}), Total={usage.total_tokens}"
+        )
 
 
 def format_thinking_output(thinking_blocks: list[str], message: str, title: str = "Response"):
-    """Format and display thinking blocks and message in a clear way."""
+    """Show the start of the reasoning trace and the full answer."""
     print("\n" + "=" * 70)
 
     if thinking_blocks:
-        print("💭 THINKING PROCESS")
+        print("💭 THINKING PROCESS (first lines)")
         print("-" * 70)
         for i, block in enumerate(thinking_blocks, 1):
             block_lines = block.strip().split("\n")
-            # Show first few lines of thinking
             print(f"  Block {i}:")
-            for _j, line in enumerate(block_lines[:5]):
+            for line in block_lines[:5]:
                 print(f"    {line}")
             if len(block_lines) > 5:
                 print(f"    ... ({len(block_lines) - 5} more lines)")
-            if i < len(thinking_blocks):
-                print()  # Space between blocks
         print("-" * 70)
     else:
-        print("ℹ️ No thinking blocks detected in response")
+        print("ℹ️ No thinking blocks in the response")
         print("-" * 70)
 
     print(f"📝 {title.upper()}")
     print("-" * 70)
-    # Ensure message is not too long for display
-    if len(message) > 1000:
-        print(message[:1000])
-        print(f"... (truncated {len(message) - 1000} characters)")
-    else:
-        print(message if message else "(No message content)")
-    print("-" * 70)
+    print(message if message else "(No message content)")
     print("=" * 70)
 
 
-async def find_reasoning_model(client: VeniceClient) -> str | None:
-    """Find a model that supports reasoning using only dynamic detection."""
-    from venice_ai.types.api import TextModelSpec
-
-    try:
-        # ``capabilities`` only lives on text models; filter the call.
-        all_models = await client.models.list(type="text")
-
-        # Look for models with reasoning support - ONLY dynamic detection
-        for model in all_models.data:
-            spec = model.model_spec
-            if not isinstance(spec, TextModelSpec):
-                continue
-            caps = spec.capabilities
-            if caps is not None and caps.supportsReasoning:
-                return model.id
-
-    except Exception as e:
-        print(f"⚠️ Error finding reasoning model: {e}")
-
-    return None
-
-
-async def basic_reasoning_with_venice_parameters() -> bool:
-    """Demonstrate reasoning using VeniceParameters.
-
-    Returns ``True`` on success, ``False`` if the API call failed.
-    """
+async def basic_reasoning_with_venice_parameters(client: VeniceClient, model: str) -> bool:
+    """Show the reasoning trace alongside the answer (``strip_thinking_response=False``)."""
     print("\n🧠 Basic Reasoning with VeniceParameters")
     print("=" * 70)
+    print(f"📍 Using reasoning model: {model}")
 
-    async with VeniceClient() as client:
-        try:
-            # Find a model that supports reasoning
-            reasoning_model = await find_reasoning_model(client)
+    problem = (
+        "I have a sequence: 2, 6, 12, 20, 30, ...\n"
+        "What are the next three numbers in this sequence? Explain the pattern briefly. "
+        + ANSWER_INSTRUCTION.format(format="<n1>, <n2>, <n3>")
+    )
 
-            if not reasoning_model:
-                print("⚠️ No models with reasoning support found, using standard model")
-                model = await client.models.resolve_chat(require_reasoning=True)
-            else:
-                model = reasoning_model
-                print(f"📍 Using reasoning model: {model}")
+    # Only the fields you set are meaningful; the rest keep their defaults.
+    # Our own system message is all the instruction this needs, so Venice's
+    # system prompt is left out.
+    venice_params = VeniceParameters(
+        strip_thinking_response=False,
+        disable_thinking=False,
+        include_venice_system_prompt=False,
+    )
+    print(
+        "\n🔬 VeniceParameters(strip_thinking_response=False, disable_thinking=False, "
+        "include_venice_system_prompt=False)"
+    )
 
-            # Complex problem that benefits from step-by-step thinking
-            problem = """
-            I have a sequence: 2, 6, 12, 20, 30, ...
-            What are the next three numbers in this sequence?
-            Please think through the pattern step by step.
-            """
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            SystemMessage(content="You are a mathematical problem solver."),
+            UserMessage(content=problem),
+        ],
+        venice_parameters=venice_params,
+        # No temperature override: the server default applies (see the module
+        # docstring).
+        max_completion_tokens=REASONING_CAP,
+    )
 
-            # Create VeniceParameters to keep thinking blocks
-            venice_params = VeniceParameters(
-                character_slug=None,
-                strip_thinking_response=False,  # Keep thinking blocks visible
-                disable_thinking=False,  # Enable thinking (default)
-                enable_web_search="off",
-                enable_web_citations=False,
-                include_search_results_in_stream=False,
-                return_search_results_as_documents=None,
-                include_venice_system_prompt=True,
-            )
+    if response.venice_parameters:
+        print("\n📡 Server echoed:")
+        print(f"   strip_thinking_response: {response.venice_parameters.strip_thinking_response}")
+        print(f"   disable_thinking: {response.venice_parameters.disable_thinking}")
 
-            print("\n🔬 Testing with VeniceParameters(strip_thinking_response=False):")
-            # Print only relevant parameters
-            params_dict = venice_params.model_dump()
-            important_params = {
-                k: v
-                for k, v in params_dict.items()
-                if k in ["strip_thinking_response", "disable_thinking"]
-                or v not in [None, False, "off"]
-            }
-            print(f"   Key parameters: {' '.join(f'{k}={v}' for k, v in important_params.items())}")
+    # thinking_blocks handles both server shapes: a separate reasoning_content
+    # field, or <think> tags inline in the content.
+    thinking_blocks = response.thinking_blocks
+    format_thinking_output(thinking_blocks, (response.text or "").strip(), "FINAL ANSWER")
+    print_usage(response)
 
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    SystemMessage(
-                        content="You are a mathematical problem solver. Show your reasoning process step by step."
-                    ),
-                    UserMessage(content=problem),
-                ],
-                venice_parameters=venice_params,  # Pass VeniceParameters object
-                # A modest cap keeps reasoning + visible output bounded so the
-                # demo finishes quickly. Reasoning models can otherwise burn a
-                # large budget thinking before emitting the final answer.
-                max_completion_tokens=1024,
-                temperature=0.2,
-            )
-
-            msg = response.choices[0].message
-            reasoning = getattr(msg, "reasoning_content", None)
-            content = str(msg.content or "")
-
-            if reasoning:
-                thinking_blocks = [str(reasoning)]
-                clean_response = content
-            else:
-                thinking_blocks, clean_response = extract_thinking_blocks(content)
-
-            # Check if response metadata includes venice_parameters
-            if hasattr(response, "venice_parameters") and response.venice_parameters:
-                print("\n✅ VeniceParameters in response:")
-                print(
-                    f"   strip_thinking_response: {response.venice_parameters.strip_thinking_response}"
-                )
-                print(f"   disable_thinking: {response.venice_parameters.disable_thinking}")
-
-            # Display results
-            format_thinking_output(thinking_blocks, clean_response, "FINAL ANSWER")
-
-            # Token usage
-            if response.usage:
-                usage = response.usage
-                print(
-                    f"📊 Token Usage: Input={usage.prompt_tokens}, Output={usage.completion_tokens}, Total={usage.total_tokens}"
-                )
-        except Exception as e:
-            print(f"❌ Error in basic reasoning: {e}")
-            return False
-
-    return True
+    ok = check_response(response, ["42", "56", "72"])
+    if not thinking_blocks:
+        print("❌ Expected a visible reasoning trace with strip_thinking_response=False")
+        ok = False
+    return ok
 
 
-async def test_strip_thinking_parameter() -> bool:
-    """Test strip_thinking_response parameter using VeniceParameters.
+async def test_strip_thinking_parameter(client: VeniceClient, model: str) -> bool:
+    """Hide the reasoning trace with ``strip_thinking_response=True``.
 
-    Returns ``True`` on success, ``False`` if the API call failed.
+    Stripping only removes the trace from the response. The model still
+    reasons, and those reasoning tokens are still billed. The request also
+    leaves out Venice's own system prompt, so only our system message applies.
     """
     print("\n🎭 Testing strip_thinking_response with VeniceParameters")
     print("=" * 70)
+    print(f"📍 Using reasoning model: {model}")
 
-    async with VeniceClient() as client:
-        try:
-            # Find a model that supports reasoning
-            reasoning_model = await find_reasoning_model(client)
+    # The clues admit exactly one solution: Alice=blue, Bob=green, Charlie=red.
+    puzzle = (
+        "Alice, Bob, and Charlie each have a different favorite color: red, blue, or green.\n"
+        "- Alice doesn't like red or green.\n"
+        "- The person who likes blue is not Charlie.\n"
+        "- Bob's favorite color comes before Charlie's alphabetically.\n"
+        "What is each person's favorite color? "
+        + ANSWER_INSTRUCTION.format(format="Alice=<color>, Bob=<color>, Charlie=<color>")
+    )
 
-            if not reasoning_model:
-                print("⚠️ No models with reasoning support found, using standard model")
-                model = await client.models.resolve_chat(require_reasoning=True)
-            else:
-                model = reasoning_model
-                print(f"📍 Using reasoning model: {model}")
+    venice_params = VeniceParameters(
+        strip_thinking_response=True,  # Clean output for the user
+        disable_thinking=False,  # The model still thinks first
+        include_venice_system_prompt=False,  # Only our own system prompt
+    )
+    print(
+        "\n🔬 VeniceParameters(strip_thinking_response=True, disable_thinking=False, "
+        "include_venice_system_prompt=False)"
+    )
 
-            # Logic puzzle requiring careful reasoning
-            puzzle = """
-            Three friends - Alice, Bob, and Charlie - each have a different favorite color (red, blue, green).
-            - Alice doesn't like red
-            - The person who likes blue is not Charlie
-            - Bob's favorite color comes before Charlie's alphabetically
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            SystemMessage(content="You are a logic puzzle solver."),
+            UserMessage(content=puzzle),
+        ],
+        venice_parameters=venice_params,
+        # No temperature override: the server default applies (see the module
+        # docstring).
+        max_completion_tokens=REASONING_CAP,
+    )
 
-            What is each person's favorite color?
-            """
+    if response.venice_parameters:
+        print("\n📡 Server echoed:")
+        print(f"   strip_thinking_response: {response.venice_parameters.strip_thinking_response}")
+        print(
+            "   include_venice_system_prompt: "
+            f"{response.venice_parameters.include_venice_system_prompt}"
+        )
 
-            # Create VeniceParameters to strip thinking blocks
-            venice_params = VeniceParameters(
-                character_slug=None,
-                strip_thinking_response=True,  # Strip thinking blocks
-                disable_thinking=False,  # Still allow thinking, just strip it
-                enable_web_search="off",
-                enable_web_citations=False,
-                include_search_results_in_stream=False,
-                return_search_results_as_documents=None,
-                include_venice_system_prompt=True,
-            )
+    print("-" * 70)
+    print("📝 SOLUTION")
+    print("-" * 70)
+    print((response.text or "").strip())
+    print("-" * 70)
+    print_usage(response)
 
-            print("\n🔬 Testing with VeniceParameters(strip_thinking_response=True):")
-            # Print parameters in a cleaner format
-            params_dict = venice_params.model_dump()
-            important_params = {
-                k: v
-                for k, v in params_dict.items()
-                if k in ["strip_thinking_response", "disable_thinking"]
-                or v not in [None, False, "off"]
-            }
-            print(f"   Key parameters: {' '.join(f'{k}={v}' for k, v in important_params.items())}")
-
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    SystemMessage(
-                        content="You are a logic puzzle solver. Think through the problem systematically, then provide a clear answer."
-                    ),
-                    UserMessage(content=puzzle),
-                ],
-                venice_parameters=venice_params,  # Pass VeniceParameters object
-                max_completion_tokens=1024,
-                temperature=0.1,
-            )
-
-            msg = response.choices[0].message
-            reasoning = getattr(msg, "reasoning_content", None)
-            content = str(msg.content or "")
-
-            if reasoning:
-                thinking_blocks = [str(reasoning)]
-                clean_response = content
-            else:
-                thinking_blocks, clean_response = extract_thinking_blocks(content)
-
-            # Check response metadata
-            if hasattr(response, "venice_parameters") and response.venice_parameters:
-                if response.venice_parameters.strip_thinking_response:
-                    print("\n✅ Server confirmed: strip_thinking_response=True")
-                    if thinking_blocks:
-                        print("⚠️ But thinking blocks still found in response!")
-                        print(
-                            "   This may indicate the model doesn't fully support this parameter."
-                        )
-                else:
-                    print("\n⚠️ Server returned strip_thinking_response=False")
-
-            # Display results
-            print("=" * 70)
-
-            # Check if response actually contains thinking tags
-            content_str = str(content) if not isinstance(content, str) else content
-            contains_thinking_tags = (
-                "<think" in content_str.lower() or "<thinking" in content_str.lower()
-            )
-
-            if contains_thinking_tags and venice_params.strip_thinking_response:
-                print("❌ ERROR: strip_thinking_response=True but thinking blocks still present!")
-                print("   The server did NOT strip thinking blocks despite the parameter.")
-                print("   This indicates the parameter is not working as expected.\n")
-                # Show the raw content to demonstrate the issue
-                print("📝 RAW RESPONSE (first 500 chars showing <think> tags):")
-                print("-" * 70)
-                if len(content_str) > 500:
-                    print(content_str[:500] + "...")
-                else:
-                    print(content_str)
-                print("-" * 70)
-            elif thinking_blocks:
-                # Thinking blocks were found and extracted
-                if venice_params.strip_thinking_response:
-                    print("⚠️ WARNING: strip_thinking_response=True but thinking blocks detected!")
-                    print("   The API may not fully support this parameter.")
-                format_thinking_output(thinking_blocks, clean_response, "SOLUTION")
-            else:
-                # No thinking blocks found
-                if venice_params.strip_thinking_response and not contains_thinking_tags:
-                    print("✅ Thinking blocks successfully stripped from response")
-                elif not venice_params.strip_thinking_response and not contains_thinking_tags:
-                    print("ℹ️ No thinking blocks in response (model may not have used reasoning)")
-                print("-" * 70)
-                print("📝 SOLUTION")
-                print("-" * 70)
-                print(clean_response)
-
-            # Token usage
-            if response.usage:
-                usage = response.usage
-                print(
-                    f"📊 Token Usage: Input={usage.prompt_tokens}, Output={usage.completion_tokens}, Total={usage.total_tokens}"
-                )
-        except Exception as e:
-            print(f"❌ Error in strip_thinking test: {e}")
-            return False
-
-    return True
+    ok = check_response(response, ["alice=blue", "bob=green", "charlie=red"])
+    if response.thinking_blocks:
+        print("❌ A reasoning trace is still present despite strip_thinking_response=True")
+        ok = False
+    else:
+        print("✅ No reasoning trace in the response")
+    hidden = reasoning_tokens(response)
+    if hidden:
+        print(f"ℹ️ The model still reasoned: {hidden} reasoning tokens were used (and billed).")
+    return ok
 
 
-async def test_disable_thinking_parameter() -> bool:
-    """Test disable_thinking parameter using VeniceParameters.
+async def test_disable_thinking_parameter(client: VeniceClient, model: str) -> bool:
+    """Compare reasoning on vs off, and verify that off really skips reasoning.
 
-    Returns ``True`` on success. A timeout on the ``disable_thinking=True`` call
-    is the *expected, documented* outcome for some reasoning models (they need
-    thinking to respond), so it is reported and still counts as success.
-    Returns ``False`` only on a genuine API error.
+    A hidden trace alone proves nothing: the check is the reported
+    ``reasoning_tokens`` (or, failing that, a large drop in completion tokens).
+    There are three ways to switch reasoning off:
+
+    - ``VeniceParameters(disable_thinking=True)``, Venice's parameter.
+    - ``reasoning_effort="none"``, the OpenAI-style top-level field.
+    - ``reasoning=ReasoningConfig(enabled=False)``, the nested toggle Venice
+      recommends. Venice's API reference says ``enabled`` is ignored when an
+      effort is also given, so this variant sends no effort.
     """
     print("\n🔄 Testing disable_thinking with VeniceParameters")
     print("=" * 70)
+    print(f"📍 Using reasoning model: {model}")
 
-    async with VeniceClient() as client:
-        try:
-            # Find a model that supports reasoning
-            reasoning_model = await find_reasoning_model(client)
+    # A plain question keeps the "thinking on" baseline short: trick questions
+    # can send a small reasoning model round in circles until it hits the cap.
+    question = "How many minutes are in 2.5 hours? " + ANSWER_INSTRUCTION.format(
+        format="<number> minutes"
+    )
+    messages = [UserMessage(content=question)]
 
-            if not reasoning_model:
-                print("⚠️ No models with reasoning support found, using standard model")
-                model = await client.models.resolve_chat(require_reasoning=True)
-            else:
-                model = reasoning_model
-                print(f"📍 Using reasoning model: {model}")
-
-            # Question that benefits from reasoning
-            question = """
-            If it takes 5 machines 5 minutes to make 5 widgets,
-            how long would it take 100 machines to make 100 widgets?
-            """
-
-            # Test 1: With reasoning enabled
-            print("\n📍 Test 1: With thinking enabled (disable_thinking=False)")
-            venice_params_enabled = VeniceParameters(
-                character_slug=None,
-                disable_thinking=False,
-                strip_thinking_response=False,  # Keep thinking visible
-                enable_web_search="off",
-                enable_web_citations=False,
-                include_search_results_in_stream=False,
-                return_search_results_as_documents=None,
-                include_venice_system_prompt=True,
-            )
-
-            response_with = await client.chat.completions.create(
-                model=model,
-                messages=[UserMessage(content=question)],
-                venice_parameters=venice_params_enabled,
-                max_completion_tokens=400,
-                temperature=0.1,
-            )
-
-            msg_with = response_with.choices[0].message
-            reasoning_with = getattr(msg_with, "reasoning_content", None)
-            content_with = msg_with.content or ""
-
-            if reasoning_with:
-                thinking_blocks_with = [str(reasoning_with)]
-                clean_with = content_with
-            else:
-                thinking_blocks_with, clean_with = extract_thinking_blocks(content_with)
-
-            print(f"   Thinking blocks found: {'Yes' if thinking_blocks_with else 'No'}")
-            print(f"   Response length: {len(content_with)} characters")
-            if response_with.usage:
-                print(f"   Tokens used: {response_with.usage.total_tokens}")
-
-            # Test 2: With reasoning disabled
-            print("\n📍 Test 2: With thinking disabled (disable_thinking=True)")
-            print("   ⚠️ Note: Some models may timeout with disable_thinking=True")
-            venice_params_disabled = VeniceParameters(
-                character_slug=None,
-                disable_thinking=True,  # Disable thinking
-                strip_thinking_response=False,  # Shouldn't matter if thinking is disabled
-                enable_web_search="off",
-                enable_web_citations=False,
-                include_search_results_in_stream=False,
-                return_search_results_as_documents=None,
-                include_venice_system_prompt=True,
-            )
-
-            try:
-                # Add timeout to prevent hanging when disable_thinking=True
-                response_without = await asyncio.wait_for(
-                    client.chat.completions.create(
-                        model=model,
-                        messages=[UserMessage(content=question)],
-                        venice_parameters=venice_params_disabled,
-                        max_completion_tokens=400,
-                        temperature=0.1,
-                    ),
-                    timeout=15.0,  # 15 second timeout
+    # Every variant leaves Venice's system prompt out, so the four requests
+    # differ only in the reasoning switch.
+    no_prompt = VeniceParameters(include_venice_system_prompt=False)
+    variants: list[tuple[str, dict]] = [
+        (
+            "thinking on (default)",
+            {
+                "venice_parameters": VeniceParameters(
+                    disable_thinking=False, include_venice_system_prompt=False
                 )
-            except TimeoutError:
-                # This is an EXPECTED outcome for models that require thinking —
-                # it's exactly what this demo is documenting, not a failure.
-                print("\n⚠️ Request timed out with disable_thinking=True")
-                print("   This suggests the model may not support disabling thinking.")
-                print("   Some models require thinking to function properly.")
-                return True
-
-            msg_without = response_without.choices[0].message
-            reasoning_without = getattr(msg_without, "reasoning_content", None)
-            content_without = msg_without.content or ""
-
-            if reasoning_without:
-                thinking_blocks_without = [str(reasoning_without)]
-                clean_without = content_without
-            else:
-                thinking_blocks_without, clean_without = extract_thinking_blocks(content_without)
-
-            print(f"   Thinking blocks found: {'Yes' if thinking_blocks_without else 'No'}")
-            print(f"   Response length: {len(content_without)} characters")
-            if response_without.usage:
-                print(f"   Tokens used: {response_without.usage.total_tokens}")
-
-            # Compare results
-            print("\n📊 Comparison Results:")
-            if response_with.usage and response_without.usage:
-                print(
-                    f"   Token difference: {response_with.usage.total_tokens - response_without.usage.total_tokens}"
+            },
+        ),
+        (
+            "disable_thinking=True",
+            {
+                "venice_parameters": VeniceParameters(
+                    disable_thinking=True, include_venice_system_prompt=False
                 )
-            print(f"   Character difference: {len(content_with) - len(content_without)}")
+            },
+        ),
+        ('reasoning_effort="none"', {"reasoning_effort": "none", "venice_parameters": no_prompt}),
+        (
+            "ReasoningConfig(enabled=False)",
+            {"reasoning": ReasoningConfig(enabled=False), "venice_parameters": no_prompt},
+        ),
+    ]
+    # Only the fields you set are sent, so the request carries {"enabled": false}.
+    wire = ReasoningConfig(enabled=False).model_dump(exclude_none=True)
+    print(f"🔬 reasoning=ReasoningConfig(enabled=False) is sent as: {wire}")
 
-            if thinking_blocks_with and thinking_blocks_without:
-                print("\n⚠️ Both responses contain thinking blocks.")
-                print("   The disable_thinking parameter may not be fully supported by this model.")
-            elif thinking_blocks_with and not thinking_blocks_without:
-                print("\n✅ disable_thinking parameter working correctly!")
-                print("   Reasoning was successfully disabled in the second response.")
-            elif not thinking_blocks_with and not thinking_blocks_without:
-                print("\n⚠️ No thinking blocks in either response.")
-                print("   The model might not be generating visible thinking blocks.")
+    ok = True
+    responses: dict[str, ChatCompletionResponse] = {}
+    for label, extra in variants:
+        print(f"\n📍 {label}")
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_completion_tokens=REASONING_CAP,
+            **extra,
+        )
+        responses[label] = response
+        print(f"   Answer: {(response.text or '').strip()}")
+        print(f"   Visible reasoning trace: {'yes' if response.thinking_blocks else 'no'}")
+        print_usage(response)
+        ok = check_response(response, ["150minutes"]) and ok
 
-            # Show sample of each response
-            print("\n📝 Response Comparison:")
-            print("   With thinking enabled (first 200 chars):")
-            print(f"   {clean_with[:200]}...")
-            print("\n   With thinking disabled (first 200 chars):")
-            print(f"   {clean_without[:200]}...")
-        except Exception as e:
-            print(f"❌ Error in disable_thinking test: {e}")
-            return False
-
-    return True
-
-
-async def combined_venice_parameters_example() -> bool:
-    """Demonstrate using multiple VeniceParameters together and show proper usage.
-
-    Returns ``True`` on success, ``False`` if the API call failed.
-    """
-    print("\n🔧 Combined VeniceParameters Example")
-    print("=" * 70)
-
-    async with VeniceClient() as client:
-        try:
-            # Find a model that supports reasoning
-            reasoning_model = await find_reasoning_model(client)
-
-            if not reasoning_model:
-                print("⚠️ No models with reasoning support found, using standard model")
-                model = await client.models.resolve_chat(require_reasoning=True)
-            else:
-                model = reasoning_model
-                print(f"📍 Using model: {model}")
-
-            # Multi-step problem
-            problem = """
-            A store sells apples for $2 each and oranges for $3 each.
-            Sarah buys some apples and oranges for a total of $23.
-            She buys 9 fruits in total.
-
-            How many apples and oranges did she buy?
-            Show your work step by step.
-            """
-
-            # Create comprehensive VeniceParameters
-            venice_params = VeniceParameters(
-                character_slug=None,
-                strip_thinking_response=True,  # Strip thinking for clean output
-                disable_thinking=False,  # Still allow model to think
-                enable_web_search="off",
-                enable_web_citations=False,
-                include_search_results_in_stream=False,
-                return_search_results_as_documents=None,
-                include_venice_system_prompt=True,
-            )
-
-            print("\n🔬 Using comprehensive VeniceParameters:")
-            print(f"   strip_thinking_response: {venice_params.strip_thinking_response}")
-            print(f"   disable_thinking: {venice_params.disable_thinking}")
-
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    SystemMessage(
-                        content="You are a math tutor. Show your work step by step clearly."
-                    ),
-                    UserMessage(content=problem),
-                ],
-                venice_parameters=venice_params,
-                max_completion_tokens=1024,
-                temperature=0.1,
-            )
-
-            msg = response.choices[0].message
-            reasoning = getattr(msg, "reasoning_content", None)
-            content = str(msg.content or "")
-
-            if reasoning:
-                thinking_blocks = [str(reasoning)]
-                solution = str(content)
-            else:
-                thinking_blocks, solution = extract_thinking_blocks(str(content))
-
-            # Check server response
-            if hasattr(response, "venice_parameters") and response.venice_parameters:
-                print("\n📡 Server Response Metadata:")
-                print(
-                    f"   strip_thinking_response: {response.venice_parameters.strip_thinking_response}"
-                )
-                print(f"   disable_thinking: {response.venice_parameters.disable_thinking}")
-
-            # Display results
-            format_thinking_output(thinking_blocks, solution, "SOLUTION")
-
-            # Token usage
-            if response.usage:
-                usage = response.usage
-                print(
-                    f"📊 Token Usage: Input={usage.prompt_tokens}, Output={usage.completion_tokens}, Total={usage.total_tokens}"
-                )
-        except Exception as e:
-            print(f"❌ Error in combined example: {e}")
-            return False
-
-    return True
+    baseline = responses["thinking on (default)"]
+    base_reasoning = reasoning_tokens(baseline)
+    base_completion = baseline.usage.completion_tokens if baseline.usage else None
+    print("\n📊 Did the 'off' variants actually skip reasoning?")
+    for label, _ in variants[1:]:
+        response = responses[label]
+        off_reasoning = reasoning_tokens(response)
+        off_completion = response.usage.completion_tokens if response.usage else None
+        if off_reasoning is not None:
+            skipped = off_reasoning == 0 and (base_reasoning or 0) > 0
+            evidence = f"reasoning_tokens {base_reasoning} -> {off_reasoning}"
+        elif base_completion and off_completion is not None:
+            skipped = off_completion < base_completion / 2
+            evidence = f"completion_tokens {base_completion} -> {off_completion}"
+        else:
+            skipped, evidence = False, "no usage reported"
+        print(f"   {'✅' if skipped else '❌'} {label}: {evidence}")
+        ok = ok and skipped
+    return ok
 
 
-async def usage_breakdown_with_typed_access() -> bool:
-    """Read the typed ``completion_tokens_details`` + ``cache_read_input_tokens``.
+async def usage_breakdown_with_typed_access(client: VeniceClient) -> bool | None:
+    """Read the typed ``completion_tokens_details`` and the cache accessors.
+
+    Returns ``None`` when the catalog has no model for this section.
 
     Reasoning models populate the ``completion_tokens_details`` object so callers
-    can separate visible output from internal reasoning tokens. Venice also
-    surfaces ``cache_read_input_tokens`` at the top level of ``usage`` to mirror
-    ``prompt_tokens_details.cached_tokens``.
+    can separate visible output from internal reasoning tokens.
+    ``usage.cached_tokens`` and ``usage.cache_write_tokens`` read the prompt
+    cache counts whichever shape the server used (``prompt_tokens_details`` or
+    the top-level ``cache_read_input_tokens`` / ``cache_creation_input_tokens``
+    mirrors), and read ``0`` when the server sent neither.
 
-    Both fields are modelled on :class:`venice_ai.ChatUsage`, so there's no
-    need to drop down to raw dicts anymore.
-
-    Returns ``True`` on success (including a graceful skip when no reasoning
-    model is available), ``False`` if the API call failed.
+    ``reasoning_effort`` values differ per model, so the model is resolved with
+    ``require_reasoning_effort`` set to the value this request sends.
     """
     print("\n🧮 Typed Usage Breakdown (reasoning + cache)")
     print("=" * 70)
 
-    async with VeniceClient() as client:
-        try:
-            reasoning_model = await find_reasoning_model(client)
-            if not reasoning_model:
-                print("⚠️ No reasoning-capable model available; skipping.")
-                return True
+    effort: Literal["low"] = "low"
+    try:
+        model = await client.models.resolve_chat(
+            require_reasoning=True, require_reasoning_effort=effort, prefer="cheapest"
+        )
+    except NoMatchingModelError:
+        print(f"Section skipped: no reasoning model accepts reasoning_effort={effort!r}")
+        return None
+    print(f"📍 Using reasoning model: {model} (reasoning_effort={effort!r})")
 
-            print(f"📍 Using reasoning model: {reasoning_model}")
+    # Venice's system prompt stays on here: it is a long prefix shared by many
+    # requests, so it is often served from the prompt cache and the cache
+    # counts below show a real reading instead of zeros.
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            UserMessage(content="What is 47 * 83? " + ANSWER_INSTRUCTION.format(format="<number>"))
+        ],
+        reasoning_effort=effort,
+        max_completion_tokens=REASONING_CAP,
+    )
+    ok = check_response(response, ["3901"])
 
-            response = await client.chat.completions.create(
-                model=reasoning_model,
-                messages=[UserMessage(content="What is 47 * 83? Think step by step.")],
-                reasoning_effort="medium",
-                max_completion_tokens=1024,
-            )
+    usage = response.usage
+    if not usage:
+        print("❌ No usage info returned")
+        return False
 
-            usage = response.usage
-            if not usage:
-                print("⚠️ No usage info returned.")
-                return True
+    print(
+        "📊 Token Usage: "
+        f"Input={usage.prompt_tokens}, Output={usage.completion_tokens}, "
+        f"Total={usage.total_tokens}"
+    )
 
-            print(
-                "📊 Token Usage: "
-                f"Input={usage.prompt_tokens}, Output={usage.completion_tokens}, "
-                f"Total={usage.total_tokens}"
-            )
+    if usage.completion_tokens_details is not None:
+        details = usage.completion_tokens_details
+        print(
+            "🧠 Completion details: "
+            f"reasoning_tokens={details.reasoning_tokens}, "
+            f"audio_tokens={details.audio_tokens}, "
+            f"image_tokens={details.image_tokens}"
+        )
+    else:
+        print("❌ This model reported no completion_tokens_details")
+        ok = False
 
-            if usage.completion_tokens_details is not None:
-                details = usage.completion_tokens_details
-                print(
-                    "🧠 Completion details: "
-                    f"reasoning_tokens={details.reasoning_tokens}, "
-                    f"audio_tokens={details.audio_tokens}, "
-                    f"image_tokens={details.image_tokens}"
-                )
-            else:
-                print("🧠 Completion details: none reported for this model.")
-
-            if usage.prompt_tokens_details is not None:
-                prompt_details = usage.prompt_tokens_details
-                print(
-                    "📥 Prompt details: "
-                    f"cached_tokens={prompt_details.cached_tokens}, "
-                    f"audio_tokens={prompt_details.audio_tokens}"
-                )
-
-            if usage.cache_read_input_tokens is not None:
-                print(f"💾 cache_read_input_tokens={usage.cache_read_input_tokens}")
-        except Exception as e:
-            print(f"❌ Error in usage breakdown: {e}")
-            return False
-
-    return True
+    print(
+        f"💾 Prompt cache: cached_tokens={usage.cached_tokens}, "
+        f"cache_write_tokens={usage.cache_write_tokens}"
+    )
+    return ok
 
 
-async def model_capability_exploration() -> bool:
-    """Explore and display reasoning capabilities of available models.
-
-    Returns ``True`` on success, ``False`` if the model listing failed.
-    """
+async def model_capability_exploration(client: VeniceClient) -> bool:
+    """List reasoning-capable models and their reasoning controls from the catalog."""
     print("\n🔍 Model Reasoning Capabilities")
     print("=" * 70)
 
-    from venice_ai.types.api import TextModelSpec
+    # ``capabilities`` only exists on text models; restrict the listing.
+    all_models = await client.models.list(type="text")
 
-    async with VeniceClient() as client:
-        try:
-            # ``capabilities`` only exists on text models; restrict the listing.
-            all_models = await client.models.list(type="text")
+    reasoning_models = []
+    for model in all_models.data:
+        spec = model.model_spec
+        if (
+            isinstance(spec, TextModelSpec)
+            and spec.capabilities
+            and spec.capabilities.supportsReasoning
+        ):
+            reasoning_models.append((model.id, spec.capabilities))
 
-            # Find models with reasoning support
-            reasoning_models = []
-            for model in all_models.data:
-                spec = model.model_spec
-                if not isinstance(spec, TextModelSpec):
-                    continue
-                caps = spec.capabilities
-                if caps is not None and caps.supportsReasoning:
-                    reasoning_models.append(model)
+    if not reasoning_models:
+        print("❌ The catalog lists no reasoning-capable text models")
+        return False
 
-            if reasoning_models:
-                print(f"📊 Found {len(reasoning_models)} models with reasoning support:\n")
+    with_effort = [entry for entry in reasoning_models if entry[1].reasoningEffortOptions]
+    switchable = [
+        entry for entry in with_effort if "none" in (entry[1].reasoningEffortOptions or [])
+    ]
+    print(f"📊 {len(reasoning_models)} text models support reasoning")
+    print(f"   {len(with_effort)} accept reasoning_effort")
+    print(f"   {len(switchable)} can switch reasoning off with reasoning_effort='none'")
+    print("   The rest reason at a fixed level the request can't change.\n")
 
-                for model in reasoning_models[:5]:  # Show first 5
-                    print(f"🤖 Model: {model.id}")
-
-                    # Display model capabilities — known TextModelSpec by filter above.
-                    spec = model.model_spec
-                    assert isinstance(spec, TextModelSpec)
-                    caps = spec.capabilities
-                    if caps is not None:
-                        print(f"   ✓ Reasoning: {caps.supportsReasoning}")
-                        print(f"   ✓ Vision: {caps.supportsVision}")
-                        print(f"   ✓ Functions: {caps.supportsFunctionCalling}")
-                        print(f"   ✓ Web Search: {caps.supportsWebSearch}")
-                        print(f"   ✓ Code Optimized: {caps.optimizedForCode}")
-                    print()
-            else:
-                print("⚠️ No models with explicit reasoning support found")
-                print("\n📝 Available text models (can still use prompting techniques):")
-                text_count = 0
-                for model in all_models.data:
-                    if hasattr(model, "type") and model.type == "text":
-                        print(f"   - {model.id}")
-                        text_count += 1
-                        if text_count >= 5:
-                            break
-
-        except Exception as e:
-            print(f"❌ Error exploring models: {e}")
-            return False
-
+    # Models with a reasoning_effort control first, since that is what you tune.
+    fixed = [entry for entry in reasoning_models if not entry[1].reasoningEffortOptions]
+    shown = (with_effort + fixed)[:5]
+    print(f"Showing {len(shown)} of them:\n")
+    for model_id, caps in shown:
+        print(f"🤖 Model: {model_id}")
+        if caps.reasoningEffortOptions:
+            print(
+                f"   ✓ Reasoning effort options: {caps.reasoningEffortOptions} "
+                f"(default {caps.defaultReasoningEffort!r})"
+            )
+        else:
+            print("   ✓ Reasoning effort: fixed (no reasoning_effort control)")
+        print(f"   ✓ Vision: {caps.supportsVision}")
+        print(f"   ✓ Functions: {caps.supportsFunctionCalling}")
+        print(f"   ✓ Web Search: {caps.supportsWebSearch}")
+        print()
     return True
 
 
 async def main() -> int:
-    """Run all reasoning and thinking examples.
-
-    Returns ``0`` only if every demo succeeded, ``1`` otherwise, so a real API
-    failure surfaces as a non-zero process exit instead of being masked by the
-    success banner.
-    """
+    """Run all reasoning and thinking examples; return a process exit code."""
     # Line-buffer stdout so the header printed *before* each (slow) completion
     # survives even if the process is killed mid-request — making it obvious
     # which call was in flight.
-    sys.stdout.reconfigure(line_buffering=True)
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
 
     print("🚀 Venice AI Reasoning & Thinking Examples with VeniceParameters")
     print("=" * 70)
-    print("This example demonstrates the PROPER way to use reasoning control")
-    print("parameters through the VeniceParameters model.\n")
 
-    # Run examples, tracking an honest pass/fail tally.
-    results: list[tuple[str, bool]] = [
-        ("model_capability_exploration", await model_capability_exploration()),
-        ("basic_reasoning_with_venice_parameters", await basic_reasoning_with_venice_parameters()),
-        ("test_strip_thinking_parameter", await test_strip_thinking_parameter()),
-        ("test_disable_thinking_parameter", await test_disable_thinking_parameter()),
-        ("combined_venice_parameters_example", await combined_venice_parameters_example()),
-        ("usage_breakdown_with_typed_access", await usage_breakdown_with_typed_access()),
-    ]
+    async with VeniceClient() as client:
+        try:
+            reasoning_model = await client.models.resolve_chat(
+                require_reasoning=True, prefer="cheapest"
+            )
+        except NoMatchingModelError as e:
+            print(f"SKIPPED: the catalog lists no reasoning model ({e})")
+            return 77
 
-    failed = [name for name, ok in results if not ok]
+        results: list[tuple[str, bool | None]] = [
+            ("model_capability_exploration", await model_capability_exploration(client)),
+            (
+                "basic_reasoning_with_venice_parameters",
+                await basic_reasoning_with_venice_parameters(client, reasoning_model),
+            ),
+            (
+                "test_strip_thinking_parameter",
+                await test_strip_thinking_parameter(client, reasoning_model),
+            ),
+        ]
 
+        # The catalog has no flag for disable_thinking. A model that accepts
+        # reasoning_effort="none" is one whose reasoning can be switched off.
+        try:
+            switchable_model = await client.models.resolve_chat(
+                require_reasoning=True, require_reasoning_effort="none", prefer="cheapest"
+            )
+        except NoMatchingModelError:
+            print("\nSection skipped: no reasoning model can switch reasoning off")
+            results.append(("test_disable_thinking_parameter", None))
+        else:
+            results.append(
+                (
+                    "test_disable_thinking_parameter",
+                    await test_disable_thinking_parameter(client, switchable_model),
+                )
+            )
+        results.append(
+            ("usage_breakdown_with_typed_access", await usage_breakdown_with_typed_access(client))
+        )
+
+    failed = [name for name, ok in results if ok is False]
+    skipped = [name for name, ok in results if ok is None]
     if failed:
-        print(f"\n⚠️ {len(failed)} of {len(results)} demos failed: {', '.join(failed)}")
-    else:
-        print("\n✨ Examples completed!")
+        print(f"\n❌ {len(failed)} of {len(results)} demos failed: {', '.join(failed)}")
+        return 1
+    if skipped:
+        print(f"\nℹ️ {len(skipped)} section(s) skipped: {', '.join(skipped)}")
 
+    print("\n✨ Examples completed!")
     print("\n💡 Key Insights:")
-    print("   - Use VeniceParameters for controlling reasoning behavior")
-    print("   - Pass VeniceParameters object directly to chat.completions.create()")
-    print("   - strip_thinking_response controls visibility of thinking blocks")
-    print("   - disable_thinking controls whether model uses reasoning at all")
-    print("   - Check response.venice_parameters for server confirmation")
-    print("\n📚 Correct Usage:")
-    print("   ```python")
-    print("   venice_params = VeniceParameters(")
-    print("       strip_thinking_response=True,  # Hide thinking blocks")
-    print("       disable_thinking=False,        # Allow thinking")
-    print("       include_venice_system_prompt=True")
-    print("   )")
-    print("   response = await client.chat.completions.create(")
-    print("       model=model,")
-    print("       messages=messages,")
-    print("       venice_parameters=venice_params  # Pass object directly")
-    print("   )")
-    print("   ```")
-    print("\n⚠️ Note: The effectiveness of these parameters depends on")
-    print("   model support. Always check the response metadata to confirm")
-    print("   which parameters were actually applied by the server.")
-
-    return 1 if failed else 0
+    print("   - Pick reasoning models with resolve_chat(require_reasoning=True, prefer='cheapest')")
+    print("   - strip_thinking_response hides the trace; the model still reasons and bills for it")
+    print(
+        "   - disable_thinking, reasoning_effort='none' and ReasoningConfig(enabled=False)"
+        " skip reasoning on models that allow it"
+    )
+    print("   - Check usage.completion_tokens_details.reasoning_tokens to confirm")
+    print("   - Check response.venice_parameters for the settings the server applied")
+    return 0
 
 
 if __name__ == "__main__":
@@ -754,9 +546,5 @@ if __name__ == "__main__":
         print("\n👋 Goodbye!")
         sys.exit(130)
     except Exception as e:
-        print(f"\n❌ Error: {e}", file=sys.stderr)
-        print(
-            "Check that your API key is valid and you have a model that supports reasoning.",
-            file=sys.stderr,
-        )
+        print(f"\n❌ Error: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

@@ -1,167 +1,290 @@
 """
-Advanced retry middleware for aiohttp with intelligent exponential backoff and jitter.
+Billing-aware retry middleware for the Venice AI client's aiohttp session.
 
-This module provides a sophisticated retry mechanism specifically designed for the Venice AI
-client's HTTP communication layer. It integrates seamlessly with aiohttp's middleware system
-to handle transient failures, rate limiting, and network issues with intelligent retry strategies.
+Every request the client sends passes through :func:`create_retry_middleware`.
+The middleware decides whether a failure may be retried from two facts: what
+kind of request it was, and how far the request got before it failed.
 
-## Key Features
+## Why billing matters
 
-- **Exponential Backoff**: Implements exponential backoff with configurable base delay and multiplier
-- **Jitter Support**: Adds randomization to prevent thundering herd problems
-- **Smart Retry Logic**: Differentiates between idempotent and non-idempotent HTTP methods
-- **Rate Limit Awareness**: Respects Retry-After headers from API responses
-- **Configurable Exception Handling**: Customizable set of exceptions that trigger retries
-- **Comprehensive Logging**: Detailed logging for monitoring and debugging retry behavior
+Venice bills generation when a job is queued or an inference runs, and it does
+not accept an ``Idempotency-Key`` on paid endpoints. Resending a request that
+the server already accepted can therefore charge twice: a second video job, a
+second image, a second music clip. A 504, a read timeout or a dropped
+connection can arrive after the work was done and billed. The policy only
+resends a request when it can tell the first attempt was not processed, or
+when processing it twice costs nothing.
 
-## Integration with Venice AI Client
+## Request classes
 
-The retry middleware is automatically integrated into the Venice AI client's HTTP session
-during initialization. It operates transparently at the transport layer, intercepting
-failed requests and applying retry logic before propagating failures to higher-level code.
+:func:`classify_request` assigns each request a :class:`RetryClass` from its
+method, path and headers:
 
-## Retry Strategy
+- ``IDEMPOTENT``: ``GET``/``HEAD``/``OPTIONS``/``PUT``/``DELETE``, free
+  control-plane ``POST`` calls (``*/quote``, ``*/retrieve``, ``*/complete``,
+  ``billing/*``), and any ``POST`` that carries an ``Idempotency-Key`` header.
+- ``INFERENCE``: ``chat/completions``, ``responses`` and ``embeddings``. A 500
+  from these endpoints is not billed, but it can be deterministic (a model
+  that cannot honor the request fails the same way every time).
+- ``PAID``: every other ``POST``, including image, video, music, speech and
+  voice generation, API key creation and x402 top-ups. Unknown paths land here.
 
-The module implements a sophisticated retry strategy that considers:
-1. **HTTP Method Safety**: Only retries idempotent methods (GET, PUT, DELETE, etc.) by default
-2. **Status Code Analysis**: Retries on specific HTTP status codes (5xx errors by default)
-3. **Exception Type Filtering**: Retries on network timeouts and connection errors
-4. **Exponential Backoff**: Increases delay between attempts to reduce server load
-5. **Jitter Application**: Adds randomness to prevent synchronized retry storms
+## What is retried
 
-## Performance Considerations
+=====================================  ==========  =========  ====
+Failure                                IDEMPOTENT  INFERENCE  PAID
+=====================================  ==========  =========  ====
+Connection never established           yes         yes        yes
+(DNS, refused, connect timeout)
+503                                    yes         yes        see below
+502                                    yes         yes        no
+500                                    yes         once       no
+504, read timeout, server disconnect   yes         no         no
+=====================================  ==========  =========  ====
 
-The retry mechanism is designed to be efficient and respectful of server resources:
-- Caps maximum delay to prevent excessive wait times
-- Uses jitter to distribute retry attempts across time
-- Respects server-provided Retry-After headers
-- Logs retry attempts for monitoring and debugging
+A 503 on a ``PAID`` request is retried only when it cannot have followed
+processing: on the generation endpoints Venice documents a 503 for, where it
+means the model is at capacity and the request was turned away (``image/*``,
+``images/generations``, ``audio/speech``, ``audio/queue``, ``audio/voices``),
+or when the response carries a ``Retry-After`` header. Elsewhere (for example
+``video/queue``, ``x402/top-up``, ``api_keys``) a 503 may come from a gateway
+after the work was done, so it is surfaced.
+
+429 is never retried here: the client's rate limiter owns it (see
+:class:`~venice_ai.rate_limiting.SimpleRateLimiter`), and
+:class:`RetryOptions` rejects 429 in ``retry_status_codes``. A
+``Retry-After`` (or ``retry-after-ms``) header sets the delay when it is
+between 0 and :attr:`RetryOptions.max_retry_after` seconds; a longer one means
+the failure is surfaced instead of waited out.
+
+A total request timeout (``aiohttp.ClientTimeout(total=...)``) covers every
+attempt and every backoff sleep, so retries never extend it.
 """
 
 import asyncio
 import contextvars
 import logging
 import random
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from enum import StrEnum
 from typing import Any
 
-from aiohttp import ClientError, ClientResponse, ServerTimeoutError
-from aiohttp.typedefs import Middleware
+from aiohttp import (
+    ClientConnectorError,
+    ClientError,
+    ClientMiddlewareType,
+    ClientResponse,
+    ClientSSLError,
+    ConnectionTimeoutError,
+    ServerTimeoutError,
+)
 
 logger = logging.getLogger(__name__)
 
+#: Header sent on every resent attempt with the number of the retry (1, 2, ...).
+RETRY_COUNT_HEADER = "x-venice-sdk-retry-count"
 
-@dataclass
+
+class RetryClass(StrEnum):
+    """How safe a request is to resend; see the module docstring."""
+
+    IDEMPOTENT = "idempotent"
+    INFERENCE = "inference"
+    PAID = "paid"
+
+
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE"})
+
+# Free POST endpoints: quotes, status reads, media release and billing reads.
+_IDEMPOTENT_POST_PATH = re.compile(
+    r"(?:^|/)(?:"
+    r"(?:video|audio|audio/voice-changer)/(?:quote|retrieve|complete)"
+    r"|billing/[\w./-]+"
+    r")/?$"
+)
+# Paid endpoints whose documented 503 means "the model is at capacity": the
+# request was turned away before any work was done.
+_CAPACITY_503_POST_PATH = re.compile(
+    r"(?:^|/)(?:"
+    r"image/(?:generate|upscale|edit|multi-edit|background-remove)"
+    r"|images/generations"
+    r"|audio/(?:speech|queue|voices)"
+    r")/?$"
+)
+# Token-billed inference endpoints whose 500 responses are not billed.
+_INFERENCE_POST_PATH = re.compile(r"(?:^|/)(?:chat/completions|responses|embeddings)/?$")
+
+
+def _request_path(url: Any) -> str:
+    path = getattr(url, "path", None)
+    if isinstance(path, str):
+        return path
+    text = str(url)
+    text = text.split("?", 1)[0]
+    if "://" in text:
+        text = text.split("://", 1)[1]
+        text = "/" + text.split("/", 1)[1] if "/" in text else "/"
+    return text
+
+
+def classify_request(
+    method: str,
+    path: str,
+    headers: Mapping[str, str],
+    *,
+    idempotent_methods: AbstractSet[str] = _IDEMPOTENT_METHODS,
+) -> RetryClass:
+    """Return the :class:`RetryClass` for a request.
+
+    Args:
+        method: The HTTP method.
+        path: The URL path (``/api/v1/chat/completions``) or a relative path.
+        headers: The request headers. A ``POST`` that carries an
+            ``Idempotency-Key`` is ``IDEMPOTENT``: the server deduplicates it.
+        idempotent_methods: Methods treated as ``IDEMPOTENT`` whatever the path.
+    """
+    verb = method.upper()
+    if verb in idempotent_methods:
+        return RetryClass.IDEMPOTENT
+    if any(str(key).lower() == "idempotency-key" for key in headers):
+        return RetryClass.IDEMPOTENT
+    if _IDEMPOTENT_POST_PATH.search(path):
+        return RetryClass.IDEMPOTENT
+    if _INFERENCE_POST_PATH.search(path):
+        return RetryClass.INFERENCE
+    return RetryClass.PAID
+
+
+def _is_connect_failure(error: BaseException) -> bool:
+    """``True`` when the request never reached the server.
+
+    TLS certificate and handshake errors are excluded: they fail the same way
+    on every attempt.
+    """
+    if isinstance(error, ClientSSLError):
+        return False
+    return isinstance(error, ClientConnectorError | ConnectionTimeoutError)
+
+
+@dataclass(frozen=True)
 class RetryOptions:
     """
-    Comprehensive configuration for retry behavior and exponential backoff strategies.
+    Retry configuration for the client's HTTP session.
 
-    This class provides fine-grained control over how the retry middleware handles
-    failed requests, including timing strategies, condition filtering, and monitoring hooks.
+    The defaults follow the billing-aware policy in
+    :mod:`venice_ai.middleware.retry`: a request is resent only when the first
+    attempt was not processed or when processing it twice is free.
+
+    Instances are frozen, and their collections are stored immutably, so a
+    policy cannot change after it is validated. Derive a variant with
+    ``dataclasses.replace(options, max_attempts=...)``, which validates the
+    result again.
 
     Attributes:
-        max_attempts: Maximum number of retry attempts (excluding the initial request).
-            For example, max_attempts=3 means up to 4 total attempts (1 initial + 3 retries).
-            Higher values increase resilience but may delay error propagation.
-
-        retry_status_codes: Set of HTTP status codes that should trigger a retry attempt.
-            Default includes server errors (5xx). Rate limiting (429) is intentionally excluded
-            because SimpleRateLimiter handles 429 retries with per-model state tracking,
-            exponential backoff, and Retry-After header support. Common additions might
-            include 408 (Request Timeout) or 413 (Payload Too Large) depending on use case.
-
-        retry_exceptions: List of exception types that should trigger retry attempts.
-            Focuses on transient network issues and timeouts that are likely to resolve
-            on subsequent attempts. Does not include programming errors or authentication failures.
-
-        base_delay: Base delay in seconds for exponential backoff calculation.
-            This is the starting delay for the first retry attempt. Subsequent attempts
-            use exponential_base^attempt * base_delay. Lower values provide faster retries
-            but may overwhelm struggling servers.
-
-        max_delay: Maximum delay in seconds to cap exponential growth.
-            Prevents exponential backoff from creating excessively long delays.
-            Helps maintain reasonable response times even after multiple failures.
-
-        exponential_base: Base multiplier for exponential backoff calculation.
-            Determines how quickly delays increase. 2.0 doubles delay each attempt,
-            while 1.5 provides more gradual increases. Higher values back off more aggressively.
-
-        jitter_factor: Randomization factor (0.0 to 1.0) to prevent thundering herd problems.
-            Adds random variation to delays to prevent multiple clients from retrying
-            simultaneously. 0.1 means ±10% random variation. Higher values increase
-            randomization but may make retry timing less predictable.
-
-        respect_retry_after: Whether to honor Retry-After headers from server responses.
-            When True, server-provided retry delays override calculated exponential backoff.
-            Recommended for APIs that provide intelligent rate limiting guidance.
-
-        max_retry_after: Maximum seconds to wait for server-provided Retry-After values.
-            Prevents malicious or misconfigured servers from forcing excessive delays.
-            Acts as a safety cap on server-directed retry timing.
-
-        idempotent_methods: Set of HTTP methods considered safe to retry automatically.
-            These methods should not have side effects when repeated. POST is notably
-            excluded by default since it typically creates or modifies resources.
-
-        retry_non_idempotent: Whether to retry non-idempotent methods like POST.
-            Default is True because Venice API endpoints (chat completions, embeddings,
-            image generation) are effectively idempotent and safe to retry on transient
-            errors. Set to False if your use case involves non-idempotent operations.
-
-        on_retry: Optional callback function for monitoring or logging retry attempts.
-            Called with (attempt_number, delay_seconds, exception_or_none) for each retry.
-            Useful for metrics collection, alerting, or debugging retry behavior.
+        max_attempts: Retries after the initial request (``2`` means up to three
+            attempts). ``0`` disables retries.
+        retry_status_codes: Statuses that can be retried, subject to the
+            request's class (see the module docstring). Statuses added here
+            beyond 500/502/503/504 (for example 408) are retried for
+            ``IDEMPOTENT`` requests only. Takes a set (``set`` or
+            ``frozenset``) and stores a ``frozenset``; any other type raises
+            ``TypeError``. 429 is
+            rejected with ``ValueError``: the client's rate limiter retries
+            it (``SimpleRateLimiter(max_retries=...)``, or
+            ``RateLimiterConfig.max_retries`` for a factory-built client), and
+            retrying it here as well would resend each request twice over.
+        retry_exceptions: Exception types that can be retried, as a sequence
+            (stored as a ``tuple``). A failure to connect is retried for every
+            class; any other listed exception (read timeout, server
+            disconnect) only for ``IDEMPOTENT`` requests.
+        base_delay: Delay before the first retry, in seconds.
+        max_delay: Upper bound on any computed backoff delay, in seconds.
+        exponential_base: Multiplier applied per retry (``2.0`` doubles).
+        jitter_factor: Fraction (0.0-1.0) by which each delay is randomly
+            shortened, so clients that failed together do not retry together.
+        respect_retry_after: Use a server ``Retry-After`` / ``retry-after-ms``
+            value as the delay.
+        max_retry_after: Longest server-requested delay the client waits, in
+            seconds. A longer ``Retry-After`` surfaces the failure instead.
+        max_inference_500_retries: How many times a 500 from an ``INFERENCE``
+            request (chat completions, responses, embeddings) is retried.
+            These 500s are not billed but can be deterministic.
+        retry_non_idempotent: When ``False``, a ``POST`` that is not
+            ``IDEMPOTENT`` is never retried, not even after a connection
+            failure.
+        classifier: Replaces :func:`classify_request`. Receives
+            ``(method, path, headers)`` and returns a :class:`RetryClass`, for
+            callers who know an endpoint is safer (or riskier) to resend than
+            the default classification assumes.
+        on_retry: Called with ``(retry_index, delay_seconds, exception_or_none)``
+            before each retry sleep.
+        idempotent_methods: HTTP methods treated as ``IDEMPOTENT``, as a set
+            (stored as a ``frozenset``).
     """
 
-    # Maximum number of retry attempts (not including the initial request)
-    max_attempts: int = 3
+    max_attempts: int = 2
 
-    # HTTP status codes that should trigger a retry
-    retry_status_codes: set[int] = field(default_factory=lambda: {500, 502, 503, 504})
+    retry_status_codes: AbstractSet[int] = field(
+        default_factory=lambda: frozenset({500, 502, 503, 504})
+    )
 
-    # Exception types that should trigger a retry
-    retry_exceptions: list[type[Exception]] = field(
-        default_factory=lambda: [
+    retry_exceptions: Sequence[type[Exception]] = field(
+        default_factory=lambda: (
             TimeoutError,
             ServerTimeoutError,
             ClientError,
-        ]
+        )
     )
 
-    # Base delay in seconds for exponential backoff
-    base_delay: float = 1.0
+    base_delay: float = 0.5
 
-    # Maximum delay in seconds (caps exponential growth)
-    max_delay: float = 60.0
+    max_delay: float = 8.0
 
-    # Exponential base for backoff calculation
     exponential_base: float = 2.0
 
-    # Jitter factor (0.0 to 1.0) - adds randomness to prevent thundering herd
-    jitter_factor: float = 0.1  # Using 0.1 for backward compatibility with existing configs
+    jitter_factor: float = 0.25
 
-    # Whether to respect Retry-After headers
     respect_retry_after: bool = True
 
-    # Maximum seconds to wait for Retry-After (to prevent abuse)
-    max_retry_after: float = 120.0
+    max_retry_after: float = 60.0
 
-    # HTTP methods that are considered idempotent and safe to retry
-    idempotent_methods: set[str] = field(
-        default_factory=lambda: {"GET", "PUT", "DELETE", "HEAD", "OPTIONS", "TRACE"}
-    )
+    max_inference_500_retries: int = 1
 
-    # Whether to retry non-idempotent methods (like POST)
-    # Default True because Venice API endpoints (chat completions, embeddings,
-    # image generation) are effectively idempotent and safe to retry on transient errors.
+    idempotent_methods: AbstractSet[str] = field(default_factory=lambda: _IDEMPOTENT_METHODS)
+
     retry_non_idempotent: bool = True
 
-    # Callback for logging or monitoring retries
+    classifier: Callable[[str, str, Mapping[str, str]], RetryClass] | None = None
+
     on_retry: Callable[[int, float, Exception | None], None] | None = None
+
+    def __post_init__(self) -> None:
+        for name, expected, kind in (
+            ("retry_status_codes", AbstractSet, "a set of status codes, such as {500, 503}"),
+            ("idempotent_methods", AbstractSet, 'a set of HTTP methods, such as {"GET"}'),
+            ("retry_exceptions", Sequence, "a sequence of exception types"),
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, expected) or isinstance(value, str):
+                raise TypeError(f"RetryOptions.{name} must be {kind}, not {type(value).__name__}")
+        if 429 in self.retry_status_codes:
+            raise ValueError(
+                "RetryOptions.retry_status_codes cannot contain 429. Rate-limit "
+                "responses are retried by the client's rate limiter, which "
+                "honors Retry-After and the rate-limit headers: use "
+                "VeniceClient(rate_limiter=SimpleRateLimiter(max_retries=...)), or "
+                "RateLimiterConfig(max_retries=...) with VeniceClientFactory."
+            )
+        # Immutable collections: a copy (``client.retry_options``,
+        # ``dataclasses.replace``) shares them with the policy it came from.
+        object.__setattr__(self, "retry_status_codes", frozenset(self.retry_status_codes))
+        object.__setattr__(self, "idempotent_methods", frozenset(self.idempotent_methods))
+        object.__setattr__(self, "retry_exceptions", tuple(self.retry_exceptions))
 
 
 # Per-task scope override for the active RetryOptions. Set by
@@ -232,105 +355,66 @@ def calculate_backoff_delay(
     jitter_factor: float,
 ) -> float:
     """
-    Calculate intelligent retry delay using exponential backoff with jitter.
+    Return the delay before retry number ``attempt + 1``.
 
-    This function implements a sophisticated backoff strategy that balances quick recovery
-    from transient issues with respectful behavior toward struggling servers. The algorithm
-    combines exponential backoff (to reduce load on failing services) with jitter
-    (to prevent thundering herd problems when multiple clients retry simultaneously).
-
-    The calculation process:
-    1. Compute exponential delay: base_delay * (exponential_base ^ attempt)
-    2. Cap the result at max_delay to prevent excessive waits
-    3. Apply jitter as random variation: ±(jitter_factor * delay)
-    4. Ensure the final delay is never negative
+    The delay is ``base_delay * exponential_base ** attempt``, capped at
+    ``max_delay``, then shortened by a random fraction of up to
+    ``jitter_factor``. Jitter only ever shortens the delay, so ``max_delay``
+    stays a true upper bound.
 
     Args:
-        attempt: The current attempt number (0-based indexing).
-            attempt=0 for first retry, attempt=1 for second retry, etc.
-        base_delay: Base delay in seconds for the exponential calculation.
-            This is the delay used for the first retry attempt before exponential growth.
-        exponential_base: Multiplicative base for exponential backoff.
-            Common values are 2.0 (doubling) or 1.5 (50% increase per attempt).
-        max_delay: Maximum delay in seconds to cap exponential growth.
-            Prevents extremely long delays that could impact user experience.
-        jitter_factor: Randomization factor between 0.0 and 1.0.
-            0.0 = no randomness, 1.0 = up to 100% variation in either direction.
+        attempt: Zero-based retry index (``0`` before the first retry).
+        base_delay: Delay before the first retry, in seconds.
+        exponential_base: Multiplier applied per retry.
+        max_delay: Upper bound on the delay, in seconds.
+        jitter_factor: Largest fraction (0.0-1.0) removed at random.
 
     Returns:
-        Calculated delay in seconds before the next retry attempt.
-        Always returns a non-negative value, even with maximum jitter applied.
+        A delay in seconds, never negative.
 
     Example:
-        >>> calculate_backoff_delay(0, 1.0, 2.0, 60.0, 0.1)
-        # First retry: ~1.0 seconds ± 10% jitter
-        >>> calculate_backoff_delay(2, 1.0, 2.0, 60.0, 0.1)
-        # Third retry: ~4.0 seconds ± 10% jitter
+        >>> calculate_backoff_delay(0, 0.5, 2.0, 8.0, 0.0)
+        0.5
+        >>> calculate_backoff_delay(10, 0.5, 2.0, 8.0, 0.0)
+        8.0
     """
-    # Calculate exponential backoff
-    exponential_delay = base_delay * (exponential_base**attempt)
-
-    # Cap at maximum delay
-    capped_delay = min(exponential_delay, max_delay)
-
-    # Add jitter to prevent thundering herd problem
-    # Jitter adds randomness in the range [-jitter_factor * delay, +jitter_factor * delay]
+    capped_delay = min(base_delay * (exponential_base**attempt), max_delay)
     if jitter_factor > 0:
-        jitter_range = capped_delay * jitter_factor
-        jitter = random.uniform(-jitter_range, jitter_range)  # nosec B311
-        final_delay = max(0, capped_delay + jitter)
-    else:
-        final_delay = capped_delay
-
-    return final_delay
+        capped_delay *= 1.0 - random.uniform(0.0, min(jitter_factor, 1.0))  # nosec B311
+    return max(0.0, capped_delay)
 
 
 def parse_retry_after_header(response: ClientResponse) -> float | None:
     """
-    Parse the Retry-After header from an HTTP response to determine server-suggested delay.
+    Return the server-requested retry delay in seconds, or ``None``.
 
-    The Retry-After header is commonly used by APIs to indicate when a client should
-    retry a request, particularly for rate limiting (429) and temporary service
-    unavailability (503) responses. This function handles both formats specified
-    in RFC 7231.
-
-    The header can contain either:
-    - An integer number of seconds to wait (e.g., "Retry-After: 120")
-    - An HTTP-date timestamp indicating when to retry (e.g., "Retry-After: Wed, 21 Oct 2015 07:28:00 GMT")
+    Reads ``retry-after-ms`` (milliseconds) first, then ``Retry-After`` as
+    either a number of seconds or an HTTP date (RFC 9110). Unparseable values
+    return ``None``; a date in the past returns ``0.0``.
 
     Args:
-        response: The aiohttp ClientResponse object containing the HTTP headers.
-            Must be a valid response object with accessible headers.
-
-    Returns:
-        Number of seconds to wait before retrying, or None if:
-        - The Retry-After header is not present in the response
-        - The header value cannot be parsed as a valid delay
-        - The header contains an unrecognized date format
-
-    Note:
-        HTTP-date parsing uses email.utils.parsedate_to_datetime() which follows
-        RFC 2822 and RFC 5322 date formats commonly used in HTTP headers.
+        response: The response whose headers are read.
     """
-    retry_after = response.headers.get("Retry-After")
-    if not retry_after:
+    headers = response.headers
+    retry_after_ms = headers.get("retry-after-ms")
+    if isinstance(retry_after_ms, str) and retry_after_ms:
+        try:
+            return float(retry_after_ms) / 1000.0
+        except ValueError:
+            logger.warning("Could not parse retry-after-ms header %r", retry_after_ms)
+
+    retry_after = headers.get("Retry-After")
+    if not isinstance(retry_after, str) or not retry_after:
         return None
 
     try:
-        # First, try to parse as integer seconds
         return float(retry_after)
     except ValueError:
-        # If that fails, try to parse as HTTP date
         try:
             retry_date = parsedate_to_datetime(retry_after)
-            # Calculate seconds until the retry date
-            now = datetime.now(UTC)
-            # Ensure retry_date is timezone-aware
             if retry_date.tzinfo is None:
                 retry_date = retry_date.replace(tzinfo=UTC)
-            delay = (retry_date - now).total_seconds()
-            # Return delay only if it's positive (in the future)
-            return max(0.0, delay)
+            return max(0.0, (retry_date - datetime.now(UTC)).total_seconds())
         except (ValueError, TypeError, OverflowError) as e:
             logger.warning(
                 f"Could not parse Retry-After header '{retry_after}' as seconds or HTTP date: {e}"
@@ -338,189 +422,183 @@ def parse_retry_after_header(response: ClientResponse) -> float | None:
             return None
 
 
-def create_retry_middleware(options: RetryOptions | None = None) -> Middleware:
+def _status_is_retryable(
+    options: RetryOptions,
+    request_class: RetryClass,
+    status: int,
+    inference_500_retries: int,
+    *,
+    path: str = "",
+    has_retry_after: bool = False,
+) -> bool:
+    """Apply the status column of the policy table to one response."""
+    if status not in options.retry_status_codes:
+        return False
+    if status == 503 and request_class is RetryClass.PAID:
+        return has_retry_after or bool(_CAPACITY_503_POST_PATH.search(path))
+    if status == 503:
+        return True
+    if request_class is RetryClass.IDEMPOTENT:
+        return True
+    if request_class is RetryClass.INFERENCE:
+        if status == 502:
+            return True
+        if status == 500:
+            return inference_500_retries < options.max_inference_500_retries
+    return False
+
+
+def _exception_is_retryable(
+    options: RetryOptions, request_class: RetryClass, error: BaseException
+) -> bool:
+    """Apply the exception rows of the policy table to one failure."""
+    if not any(isinstance(error, exc_type) for exc_type in options.retry_exceptions):
+        return False
+    return _is_connect_failure(error) or request_class is RetryClass.IDEMPOTENT
+
+
+def create_retry_middleware(options: RetryOptions | None = None) -> ClientMiddlewareType:
     """
-    Create an intelligent aiohttp middleware that implements advanced retry logic.
+    Create the aiohttp middleware that applies the client's retry policy.
 
-    This function returns a middleware component that integrates into aiohttp's request
-    pipeline to automatically handle transient failures with sophisticated retry strategies.
-    The middleware operates transparently, intercepting failed requests and applying
-    configurable retry logic before either succeeding or propagating the final failure.
+    The policy is described in the module docstring: each request is
+    classified with :func:`classify_request` (or ``options.classifier``) and a
+    failure is retried only when that class allows it. Paid generation
+    requests are never resent once the server may have received them.
 
-    The middleware implements several layers of intelligence:
-
-    **Request Analysis**: Determines whether a request is safe to retry based on:
-    - HTTP method idempotency (GET, PUT, DELETE are safe; POST typically isn't)
-    - Configuration settings for non-idempotent method handling
-
-    **Failure Detection**: Identifies retryable failures through:
-    - HTTP status code analysis (rate limiting, server errors)
-    - Exception type filtering (timeouts, network errors)
-    - Exclusion of permanent failures (authentication, client errors)
-
-    **Retry Strategy**: Applies intelligent backoff using:
-    - Exponential backoff to reduce load on struggling servers
-    - Jitter to prevent thundering herd problems
-    - Server-provided Retry-After header respect
-    - Configurable maximum delays and attempt limits
-
-    **Monitoring Integration**: Provides visibility through:
-    - Detailed logging of retry attempts and decisions
-    - Optional callback hooks for metrics collection
-    - Exception preservation for proper error propagation
+    Before each retry the failed response is released back to the connection
+    pool, ``options.on_retry`` is called, and the next attempt carries the
+    ``x-venice-sdk-retry-count`` header.
 
     Args:
-        options: Optional RetryOptions instance for customizing retry behavior.
-            If None, uses default retry configuration suitable for most API interactions.
-            Default behavior retries up to 3 times with exponential backoff starting
-            at 1 second, only for idempotent methods and common transient failures.
+        options: The construction-time policy. ``None`` uses
+            :class:`RetryOptions` defaults. A ``client.with_retries(...)`` block
+            overrides it for the requests made inside the block.
 
     Returns:
-        An aiohttp middleware function that can be added to ClientSession middleware list.
-        The middleware function signature matches aiohttp's middleware protocol:
-        async def middleware(request, handler) -> response
+        An aiohttp client middleware.
 
     Example:
-        >>> retry_middleware = create_retry_middleware(
-        ...     RetryOptions(max_attempts=5, base_delay=0.5)
-        ... )
+        >>> retry_middleware = create_retry_middleware(RetryOptions(max_attempts=1))
         >>> session = ClientSession(middlewares=[retry_middleware])
-
-    Note:
-        The middleware preserves the original request semantics - successful requests
-        pass through unchanged, and final failures raise the original exception with
-        full context about retry attempts logged.
     """
     default_options = options if options is not None else RetryOptions()
 
     async def retry_middleware(request: Any, handler: Any) -> Any:
-        """
-        Middleware implementation that wraps requests with retry logic.
-
-        Each request resolves its effective :class:`RetryOptions` at entry,
-        consulting :data:`_active_retry_options` first (set by a
-        ``with_retries()`` context manager on the client) and falling back
-        to the construction-time *default_options* otherwise.
-        """
-        # Resolve effective options for this request. ContextVar.get()
-        # honors per-task scoping established by client.with_retries().
         active_override = _active_retry_options.get()
         options = active_override if active_override is not None else default_options
 
         method = request.method.upper()
+        raw_headers = getattr(request, "headers", None)
+        headers: Mapping[str, str] = raw_headers if isinstance(raw_headers, Mapping) else {}
+        path = _request_path(request.url)
+        if options.classifier is not None:
+            request_class = options.classifier(method, path, headers)
+        else:
+            request_class = classify_request(
+                method, path, headers, idempotent_methods=options.idempotent_methods
+            )
 
-        # Check if we should retry this method
-        if not options.retry_non_idempotent and method not in options.idempotent_methods:
-            # Non-idempotent method and we're not configured to retry them
+        if request_class is not RetryClass.IDEMPOTENT and not options.retry_non_idempotent:
             return await handler(request)
 
-        last_exception = None
-
-        for attempt in range(options.max_attempts + 1):  # +1 for the initial attempt
-            # aiohttp replays the same request object, so a wallet-authenticated
-            # retry would resend a nonce the server has already seen. Re-signing
-            # here — after the backoff sleep — keeps the envelope fresh at the
-            # moment it is actually sent. No-op for every other request.
+        inference_500_retries = 0
+        attempt = 0
+        while True:
             if attempt:
                 _resign_siwe_header(request)
+                if isinstance(raw_headers, Mapping):
+                    request.headers[RETRY_COUNT_HEADER] = str(attempt)
 
             try:
-                # Make the request
                 response = await handler(request)
+            except asyncio.CancelledError:
+                raise
+            except (ClientError, ServerTimeoutError, ValueError, OSError, TypeError) as e:
+                if attempt >= options.max_attempts or not _exception_is_retryable(
+                    options, request_class, e
+                ):
+                    raise
+                delay = calculate_backoff_delay(
+                    attempt,
+                    options.base_delay,
+                    options.exponential_base,
+                    options.max_delay,
+                    options.jitter_factor,
+                )
+                logger.info(
+                    f"Retrying {request_class.value} request {method} {request.url} "
+                    f"(attempt {attempt + 2}/{options.max_attempts + 1}) "
+                    f"after {delay:.2f}s due to {type(e).__name__}: {e}"
+                )
+                if options.on_retry:
+                    options.on_retry(attempt, delay, e)
+                await asyncio.sleep(delay)
+                attempt += 1
+                continue
 
-                # Check if we should retry based on status code
-                if response.status in options.retry_status_codes and attempt < options.max_attempts:
-                    # Calculate delay
-                    delay = calculate_backoff_delay(
-                        attempt,
-                        options.base_delay,
-                        options.exponential_base,
-                        options.max_delay,
-                        options.jitter_factor,
-                    )
-
-                    # Check for Retry-After header
-                    if options.respect_retry_after:
-                        retry_after = parse_retry_after_header(response)
-                        if retry_after is not None:
-                            # Use Retry-After delay, but cap it at max_retry_after
-                            delay = min(retry_after, options.max_retry_after)
-
-                    logger.info(
-                        f"Retrying request {method} {request.url} "
-                        f"(attempt {attempt + 1}/{options.max_attempts + 1}) "
-                        f"after {delay:.2f}s due to status {response.status}"
-                    )
-
-                    # Call the retry callback if provided
-                    if options.on_retry:
-                        options.on_retry(attempt, delay, None)
-
-                    # Wait before retrying
-                    await asyncio.sleep(delay)
-                    continue
-
-                # Success or non-retryable status code
+            if attempt >= options.max_attempts or response.status not in (
+                options.retry_status_codes
+            ):
+                return response
+            retry_after = (
+                parse_retry_after_header(response) if options.respect_retry_after else None
+            )
+            if not _status_is_retryable(
+                options,
+                request_class,
+                response.status,
+                inference_500_retries,
+                path=path,
+                has_retry_after=retry_after is not None,
+            ):
                 return response
 
-            except asyncio.CancelledError:
-                raise  # Always re-raise for graceful shutdown
-            except (
-                ClientError,
-                ServerTimeoutError,
-                ValueError,
-                OSError,
-                TypeError,
-            ) as e:
-                last_exception = e
-
-                # Check if this exception type should trigger a retry
-                should_retry = any(isinstance(e, exc_type) for exc_type in options.retry_exceptions)
-
-                if should_retry and attempt < options.max_attempts:
-                    # Calculate delay
-                    delay = calculate_backoff_delay(
-                        attempt,
-                        options.base_delay,
-                        options.exponential_base,
-                        options.max_delay,
-                        options.jitter_factor,
-                    )
-
+            delay = calculate_backoff_delay(
+                attempt,
+                options.base_delay,
+                options.exponential_base,
+                options.max_delay,
+                options.jitter_factor,
+            )
+            if retry_after is not None:
+                if retry_after > options.max_retry_after:
                     logger.info(
-                        f"Retrying request {method} {request.url} "
-                        f"(attempt {attempt + 1}/{options.max_attempts + 1}) "
-                        f"after {delay:.2f}s due to {type(e).__name__}: {e}"
+                        f"Not retrying {method} {request.url}: status {response.status} "
+                        f"asked for a {retry_after:.0f}s wait, above max_retry_after="
+                        f"{options.max_retry_after:.0f}s"
                     )
+                    return response
+                if retry_after > 0:
+                    delay = retry_after
 
-                    # Call the retry callback if provided
-                    if options.on_retry:
-                        options.on_retry(attempt, delay, e)
-
-                    # Wait before retrying
-                    await asyncio.sleep(delay)
-                    continue
-
-                # Non-retryable exception or max attempts reached
-                raise
-
-        # If we get here, we've exhausted all retries
-        if last_exception:
-            raise last_exception
-
-        # This shouldn't happen, but just in case
-        raise RuntimeError(
-            f"Max retries ({options.max_attempts}) exceeded for {method} {request.url}"
-        )
+            if response.status == 500:
+                inference_500_retries += 1
+            logger.info(
+                f"Retrying {request_class.value} request {method} {request.url} "
+                f"(attempt {attempt + 2}/{options.max_attempts + 1}) "
+                f"after {delay:.2f}s due to status {response.status}"
+            )
+            release = getattr(response, "release", None)
+            if callable(release):
+                release()
+            if options.on_retry:
+                options.on_retry(attempt, delay, None)
+            await asyncio.sleep(delay)
+            attempt += 1
 
     return retry_middleware
 
 
 # Export the main components
 __all__ = [
+    "RETRY_COUNT_HEADER",
+    "RetryClass",
     "RetryOptions",
+    "classify_request",
     "create_retry_middleware",
     "calculate_backoff_delay",
+    "parse_retry_after_header",
     "_active_retry_options",
     "_active_siwe_resigner",
     "_SIWE_HEADER",

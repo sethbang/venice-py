@@ -5,370 +5,330 @@ Venice AI SDK - Voice Options Demonstration
 
 This example demonstrates the various voice options available in the Venice AI SDK.
 Learn how to use different voices, discover available voices, and customize speech characteristics.
+
+Voices are taken from the model's catalog entry, never from a fixed list.
+``client.audio.get_voices()`` adds language, accent and gender metadata for
+voice IDs that follow the ``<region><gender>_<name>`` convention, and this
+example picks a TTS model whose voices carry that metadata. Every voice is
+given text in its own language: a Japanese voice reading English text does
+not produce accented English, it produces garbled speech.
 """
 
 import asyncio
+import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 from venice_ai import VeniceClient
-from venice_ai.types.audio import ResponseFormat, Voice
+from venice_ai.exceptions import VeniceError
+from venice_ai.types.api.audio import VoiceDetail
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _helpers import tts_default_format, tts_spec  # noqa: E402
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/audio/).
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
+#: Sample text in each voice language. Voices in other languages are skipped.
+NATIVE_TEXT: dict[str, str] = {
+    "English": "Hello! I'm demonstrating the different voices available in Venice AI.",
+    "Spanish": "¡Hola! Estoy mostrando las diferentes voces disponibles en Venice AI.",
+    "French": "Bonjour ! Je présente les différentes voix disponibles dans Venice AI.",
+    "Italian": "Ciao! Sto mostrando le diverse voci disponibili in Venice AI.",
+    "Portuguese": "Olá! Estou demonstrando as diferentes vozes disponíveis no Venice AI.",
+    "German": "Hallo! Ich stelle die verschiedenen Stimmen von Venice AI vor.",
+    "Japanese": "こんにちは。ベニスAIで使えるさまざまな声をご紹介します。",
+    "Mandarin Chinese": "你好！我正在为你展示这里提供的各种声音。",
+    "Hindi": "नमस्ते! यह Venice AI की अलग-अलग आवाज़ों का प्रदर्शन है।",
+}
 
-async def demonstrate_voice_variety():
-    """Demonstrate different voice options with the same text."""
-    print("🎭 Voice Variety Demonstration")
+#: Languages whose clips are transcribed back and compared with the text.
+#: The others are generated but not checked automatically: listen to them.
+CHECKED_LANGUAGES: dict[str, str] = {
+    "English": "en",
+    "Spanish": "es",
+    "French": "fr",
+    "Italian": "it",
+    "Portuguese": "pt",
+    "German": "de",
+}
+
+#: Minimum share of the spoken words a transcript must contain.
+MIN_OVERLAP = 0.6
+
+GENDER_ICONS = {"female": "♀️", "male": "♂️"}
+
+#: Paths written by this run, listed at the end on success.
+WRITTEN: list[Path] = []
+
+#: Clips in languages that are not transcribed back, listed at the end.
+UNCHECKED: list[Path] = []
+
+#: Languages whose clips were transcribed back during this run.
+TRANSCRIBED: set[str] = set()
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"\w+", text.lower())
+
+
+def word_overlap(expected: str, actual: str) -> float:
+    want = _words(expected)
+    got = set(_words(actual))
+    return sum(w in got for w in want) / len(want) if want else 0.0
+
+
+class VoiceDemo:
+    """Shared state: the client, the chosen TTS model and its voices."""
+
+    def __init__(
+        self,
+        client: VeniceClient,
+        model_id: str,
+        fmt: str,
+        voices: list[VoiceDetail],
+        asr_model: str,
+    ):
+        self.client = client
+        self.model_id = model_id
+        self.fmt = fmt
+        self.voices = voices
+        self.asr_model = asr_model
+
+    def by_language(self) -> dict[str, list[VoiceDetail]]:
+        groups: dict[str, list[VoiceDetail]] = defaultdict(list)
+        for voice in self.voices:
+            if voice.language:
+                groups[voice.language].append(voice)
+        return groups
+
+    async def speak(self, voice: VoiceDetail, text: str, stem: str) -> bool:
+        """Generate one clip and, for checked languages, transcribe it back.
+
+        A clip in an unchecked language is not counted as verified: it fails
+        only if it is empty, and is listed at the end for you to listen to.
+        """
+        try:
+            response = await self.client.audio.create_speech(
+                model=self.model_id,
+                input=text,
+                voice=voice.id,
+                response_format=self.fmt,
+                speed=1.0,
+            )
+        except VeniceError as e:
+            print(f"   ❌ {voice.id}: {e}")
+            return False
+        path = response.save(RESULTS_DIR / f"{stem}.{self.fmt}", overwrite=True)
+        WRITTEN.append(path)
+        line = f"   {GENDER_ICONS.get(voice.gender or '', '❓')} {voice.id:<14} → {path.name} ({len(response.content)} bytes)"
+
+        code = CHECKED_LANGUAGES.get(voice.language or "")
+        if code is None:
+            print(f"{line}  [not transcribed: listen to check]")
+            UNCHECKED.append(path)
+            return bool(response.content)
+        try:
+            transcript = await self.client.audio.transcribe(
+                file=path, model=self.asr_model, language=code
+            )
+        except VeniceError as e:
+            print(f"{line}\n      ❌ transcription failed: {e}")
+            return False
+        TRANSCRIBED.add(voice.language or "")
+        overlap = word_overlap(text, transcript.text)
+        mark = "✅" if overlap >= MIN_OVERLAP else "❌"
+        print(f"{line}  {mark} transcript matches {overlap:.0%}")
+        if overlap < MIN_OVERLAP:
+            print(f"      heard: {transcript.text}")
+        return overlap >= MIN_OVERLAP
+
+
+async def choose_model(client: VeniceClient) -> tuple[str, str, list[VoiceDetail]]:
+    """Pick a TTS model whose voices carry language and gender metadata.
+
+    ``resolve_tts(prefer="cheapest")`` is used when its model qualifies;
+    otherwise the catalog model with the most tagged voices.
+    """
+    catalog = await client.models.list(type="tts")
+    all_voices = (await client.audio.get_voices()).data
+    tagged: dict[str, list[VoiceDetail]] = defaultdict(list)
+    for voice in all_voices:
+        if voice.language and voice.gender in GENDER_ICONS:
+            tagged[voice.model_id].append(voice)
+    if not tagged:
+        raise RuntimeError("No TTS model in the catalog lists voices with language metadata")
+
+    resolved = await client.models.resolve_tts(prefer="cheapest")
+    model_id = resolved if resolved in tagged else max(tagged, key=lambda m: len(tagged[m]))
+    spec = tts_spec(next(m.model_spec for m in catalog.data if m.id == model_id), model_id)
+    return model_id, tts_default_format(spec, model_id), tagged[model_id]
+
+
+async def list_available_voices(demo: VoiceDemo) -> bool:
+    """List voices per model, then the chosen model's voices by language."""
+    print("📋 Available Voice Discovery")
     print("-" * 40)
 
-    text = "Hello! I'm demonstrating different voice characteristics available in Venice AI."
+    try:
+        everything = (await demo.client.audio.get_voices()).data
+        female = (await demo.client.audio.get_voices(model_id=demo.model_id, gender="female")).data
+        male = (await demo.client.audio.get_voices(model_id=demo.model_id, gender="male")).data
+    except VeniceError as e:
+        print(f"❌ Error listing voices: {e}")
+        return False
 
-    # Different voice samples from various categories
-    voice_samples = [
-        (Voice.AF_ALLOY, "American Female - Alloy"),
-        (Voice.AM_ADAM, "American Male - Adam"),
-        (Voice.BF_ALICE, "British Female - Alice"),
-        (Voice.BM_GEORGE, "British Male - George"),
-        (Voice.ZF_XIAONI, "Chinese Female - Xiaoni"),
-        (Voice.ZM_YUNXI, "Chinese Male - Yunxi"),
-        (Voice.JF_ALPHA, "Japanese Female - Alpha"),
-        (Voice.JM_KUMO, "Japanese Male - Kumo"),
-    ]
+    per_model: dict[str, int] = defaultdict(int)
+    for voice in everything:
+        per_model[voice.model_id] += 1
+    print(f"📊 {len(everything)} voices across {len(per_model)} TTS models:")
+    for model_id, count in sorted(per_model.items(), key=lambda kv: -kv[1]):
+        print(f"   🎤 {model_id:<28} {count} voices")
 
-    async with VeniceClient() as client:
-        try:
-            # Get available audio model dynamically
-            audio_model = await client.models.resolve_tts()
+    print(f"\n🌍 {demo.model_id} voices by language:")
+    for language, voices in sorted(demo.by_language().items()):
+        accents = sorted({v.accent for v in voices if v.accent})
+        print(f"   {language} ({', '.join(accents)}): {len(voices)}")
+        for voice in voices[:4]:
+            print(f"      {GENDER_ICONS.get(voice.gender or '', '❓')} {voice.id}")
+        if len(voices) > 4:
+            print(f"      ... and {len(voices) - 4} more")
 
-            print(f"📍 Using audio model: {audio_model}")
-            print(f"📝 Text: {text}")
-
-            for voice, description in voice_samples:
-                print(f"\n🎤 Generating with {description}...")
-
-                try:
-                    response = await client.audio.create_speech(
-                        model=audio_model,
-                        input=text,
-                        voice=voice,
-                        response_format=ResponseFormat.MP3,
-                        speed=1.0,
-                    )
-
-                    # Create descriptive filename
-                    voice_name = voice.value.replace("_", "-")
-                    filename = RESULTS_DIR / f"voice_{voice_name}.mp3"
-                    response.save(filename, overwrite=True)
-
-                    print(f"✅ Generated: {filename} ({len(response.content)} bytes)")
-
-                except Exception as e:
-                    print(f"❌ Failed to generate {description}: {e}")
-
-        except Exception as e:
-            print(f"❌ Error in voice demonstration: {e}")
+    print("\n🔍 Filter example: get_voices(model_id=..., gender=...)")
+    print(f"   Female voices: {len(female)}")
+    print(f"   Male voices: {len(male)}")
+    return bool(demo.voices)
 
 
-async def list_available_voices():
-    """List and categorize available voices."""
-    print("\n📋 Available Voice Discovery")
+async def voice_variety_by_language(demo: VoiceDemo) -> bool:
+    """One female and one male voice per language, each speaking its own language."""
+    print("\n🎭 Voice Variety by Language (female and male)")
     print("-" * 40)
 
-    async with VeniceClient() as client:
-        try:
-            # First try to get TTS models directly
-            try:
-                tts_models = await client.models.list(type="tts")
-                print(f"📊 Found {len(tts_models.data)} TTS models:")
-                for model in tts_models.data:
-                    print(f"   🎤 {model.id}")
-            except Exception as e:
-                print(f"⚠️ Could not fetch TTS models directly: {e}")
-
-            # Try the audio.get_voices() method
-            try:
-                voice_list = await client.audio.get_voices()
-                print(f"📊 Found {len(voice_list.data)} available voices via get_voices()")
-
-                if voice_list.data:
-                    # Categorize voices by language/region
-                    categories = {}
-                    for voice in voice_list.data:
-                        language = voice.language or "Unknown"
-                        if language not in categories:
-                            categories[language] = []
-                        categories[language].append(voice)
-
-                    # Display voices by category
-                    for language, voices in categories.items():
-                        print(f"\n🌍 {language} Voices:")
-                        for voice in voices[:5]:  # Show first 5 per category
-                            gender_icon = (
-                                "♀️"
-                                if voice.gender == "female"
-                                else "♂️"
-                                if voice.gender == "male"
-                                else "❓"
-                            )
-                            accent_info = f" ({voice.accent})" if voice.accent else ""
-                            print(f"   {gender_icon} {voice.id}{accent_info}")
-
-                        if len(voices) > 5:
-                            print(f"   ... and {len(voices) - 5} more")
-
-                    # Show filter examples
-                    print("\n🔍 Filter Examples:")
-
-                    # Filter by gender
-                    female_voices = await client.audio.get_voices(gender="female")
-                    male_voices = await client.audio.get_voices(gender="male")
-
-                    print(f"   Female voices: {len(female_voices.data)}")
-                    print(f"   Male voices: {len(male_voices.data)}")
-                else:
-                    print("   ℹ️ No voices returned by get_voices() method")
-                    print("   💡 This might mean the TTS models use a different voice system")
-
-            except Exception as e:
-                print(f"⚠️ Error with get_voices() method: {e}")
-
-            # Show available voice enum options as fallback
-            print("\n🎭 Available Voice Enum Options (from SDK):")
-            from venice_ai.types.audio import Voice
-
-            voice_options = list(Voice)
-            print(f"   📊 Found {len(voice_options)} predefined voice options:")
-            for voice in voice_options[:10]:  # Show first 10
-                print(f"   🎤 {voice.value}")
-            if len(voice_options) > 10:
-                print(f"   ... and {len(voice_options) - 10} more")
-
-        except Exception as e:
-            print(f"❌ Error in voice discovery: {e}")
-            print("💡 Note: Voice listing requires appropriate API access")
+    ok = True
+    for language, voices in sorted(demo.by_language().items()):
+        text = NATIVE_TEXT.get(language)
+        if text is None:
+            print(f"\n⏭️ {language}: no sample text in this example, skipped")
+            continue
+        print(f"\n🌍 {language}: {text}")
+        for gender in ("female", "male"):
+            voice = next((v for v in voices if v.gender == gender), None)
+            if voice is None:
+                print(f"   ℹ️ no {gender} {language} voice")
+                continue
+            ok = await demo.speak(voice, text, f"voice_{voice.id}") and ok
+    return ok
 
 
-async def regional_accent_showcase():
-    """Showcase voices from different regions with the same text."""
-    print("\n🌏 Regional Accent Showcase")
+async def english_accent_showcase(demo: VoiceDemo) -> bool:
+    """The same English sentence in each English accent the model offers."""
+    print("\n🌏 English Accent Showcase")
     print("-" * 40)
 
-    text = "This text demonstrates regional accent variations."
+    text = "This sentence demonstrates regional accent variations in English."
+    english = demo.by_language().get("English", [])
+    accents: dict[str, VoiceDetail] = {}
+    for voice in english:
+        accents.setdefault(voice.accent or "Unknown", voice)
+    if len(accents) < 2:
+        print(
+            f"Section skipped: accent showcase: {demo.model_id} offers fewer than two English accents"
+        )
+        return True
 
-    # Regional voice variations
-    regional_voices = [
-        (Voice.AF_ALLOY, "American English"),
-        (Voice.BF_ALICE, "British English"),
-        (Voice.ZF_XIAONI, "Mandarin Chinese"),
-        (Voice.JF_ALPHA, "Japanese"),
-        (Voice.FF_SIWIS, "French"),
-        (Voice.IF_SARA, "Italian"),
-        (Voice.PF_DORA, "Portuguese"),
-        (Voice.EF_DORA, "Spanish"),
-    ]
-
-    async with VeniceClient() as client:
-        try:
-            # Get available audio model dynamically
-            audio_model = await client.models.resolve_tts()
-
-            print(f"📍 Using audio model: {audio_model}")
-            print(f"📝 Text: {text}")
-
-            for voice, region in regional_voices:
-                print(f"\n🗣️ Generating {region} accent...")
-
-                try:
-                    response = await client.audio.create_speech(
-                        model=audio_model,
-                        input=text,
-                        voice=voice,
-                        response_format=ResponseFormat.MP3,
-                        speed=1.0,
-                    )
-
-                    # Create descriptive filename
-                    region_name = region.lower().replace(" ", "_")
-                    filename = RESULTS_DIR / f"accent_{region_name}.mp3"
-                    response.save(filename, overwrite=True)
-
-                    print(f"✅ Generated {region}: {filename} ({len(response.content)} bytes)")
-
-                except Exception as e:
-                    print(f"❌ Failed to generate {region}: {e}")
-
-        except Exception as e:
-            print(f"❌ Error in regional showcase: {e}")
+    print(f"📝 Text: {text}")
+    ok = True
+    for accent, voice in accents.items():
+        print(f"\n🗣️ {accent} English")
+        ok = await demo.speak(voice, text, f"accent_{accent.lower().replace(' ', '_')}") and ok
+    return ok
 
 
-async def gender_voice_comparison():
-    """Compare male and female voices for the same content."""
-    print("\n⚧️ Gender Voice Comparison")
-    print("-" * 40)
-
-    text = "This demonstrates the difference between male and female voice characteristics."
-
-    # Male and female voice pairs
-    voice_pairs = [
-        ("American", Voice.AF_ALLOY, Voice.AM_ADAM),
-        ("British", Voice.BF_ALICE, Voice.BM_GEORGE),
-        ("Chinese", Voice.ZF_XIAONI, Voice.ZM_YUNXI),
-        ("Japanese", Voice.JF_ALPHA, Voice.JM_KUMO),
-    ]
-
-    async with VeniceClient() as client:
-        try:
-            # Get available audio model dynamically
-            audio_model = await client.models.resolve_tts()
-
-            print(f"📍 Using audio model: {audio_model}")
-            print(f"📝 Text: {text}")
-
-            for region, female_voice, male_voice in voice_pairs:
-                print(f"\n🌍 {region} Voice Comparison:")
-
-                # Generate female voice
-                try:
-                    response = await client.audio.create_speech(
-                        model=audio_model,
-                        input=text,
-                        voice=female_voice,
-                        response_format=ResponseFormat.MP3,
-                        speed=1.0,
-                    )
-
-                    filename = RESULTS_DIR / f"gender_{region.lower()}_female.mp3"
-                    response.save(filename, overwrite=True)
-
-                    print(f"  ♀️ Female: {filename} ({len(response.content)} bytes)")
-
-                except Exception as e:
-                    print(f"  ❌ Failed female voice: {e}")
-
-                # Generate male voice
-                try:
-                    response = await client.audio.create_speech(
-                        model=audio_model,
-                        input=text,
-                        voice=male_voice,
-                        response_format=ResponseFormat.MP3,
-                        speed=1.0,
-                    )
-
-                    filename = RESULTS_DIR / f"gender_{region.lower()}_male.mp3"
-                    response.save(filename, overwrite=True)
-
-                    print(f"  ♂️ Male: {filename} ({len(response.content)} bytes)")
-
-                except Exception as e:
-                    print(f"  ❌ Failed male voice: {e}")
-
-        except Exception as e:
-            print(f"❌ Error in gender comparison: {e}")
-
-
-async def voice_personality_showcase():
-    """Showcase different voice personalities and characteristics."""
+async def voice_personality_showcase(demo: VoiceDemo) -> bool:
+    """Different English voices reading lines written for different tones."""
     print("\n✨ Voice Personality Showcase")
     print("-" * 40)
 
-    # Different texts that highlight voice characteristics
     personality_tests = [
         (
             "Warm & Friendly",
             "Hello! I'm so excited to help you today. How can I make your day better?",
-            Voice.AF_NOVA,
         ),
         (
             "Professional",
             "Good morning. I'll be assisting you with your inquiries in a professional manner.",
-            Voice.AM_ADAM,
         ),
-        (
-            "Energetic",
-            "Hey there! Ready for an amazing adventure? Let's dive right in!",
-            Voice.AF_SKY,
-        ),
-        (
-            "Calm & Soothing",
-            "Take a deep breath and relax. Everything will be just fine.",
-            Voice.BF_ALICE,
-        ),
-        (
-            "Authoritative",
-            "Please follow these instructions carefully and precisely.",
-            Voice.AM_ONYX,
-        ),
+        ("Energetic", "Hey there! Ready for an amazing adventure? Let's dive right in!"),
+        ("Calm & Soothing", "Take a deep breath and relax. Everything will be just fine."),
+        ("Authoritative", "Please follow these instructions carefully and precisely."),
     ]
+    english = demo.by_language().get("English", [])
+    if not english:
+        print(f"Section skipped: personality showcase: {demo.model_id} has no English voices")
+        return True
 
-    async with VeniceClient() as client:
-        try:
-            # Get available audio model dynamically
-            audio_model = await client.models.resolve_tts()
-
-            print(f"📍 Using audio model: {audio_model}")
-
-            for personality, text, voice in personality_tests:
-                print(f"\n🎭 {personality} Personality:")
-                print(f"   Text: {text}")
-
-                try:
-                    response = await client.audio.create_speech(
-                        model=audio_model,
-                        input=text,
-                        voice=voice,
-                        response_format=ResponseFormat.MP3,
-                        speed=1.0,
-                    )
-
-                    personality_filename = personality.lower().replace(" & ", "_").replace(" ", "_")
-                    filename = RESULTS_DIR / f"personality_{personality_filename}.mp3"
-                    response.save(filename, overwrite=True)
-
-                    print(f"   ✅ Generated: {filename} ({len(response.content)} bytes)")
-
-                except Exception as e:
-                    print(f"   ❌ Failed to generate {personality}: {e}")
-
-        except Exception as e:
-            print(f"❌ Error in personality showcase: {e}")
+    ok = True
+    # Spread the picks across the list so each line gets a different voice.
+    stride = max(1, len(english) // len(personality_tests))
+    picks = [english[(i * stride) % len(english)] for i in range(len(personality_tests))]
+    for (personality, text), voice in zip(personality_tests, picks):
+        print(f"\n🎭 {personality}: {text}")
+        stem = "personality_" + personality.lower().replace(" & ", "_").replace(" ", "_")
+        ok = await demo.speak(voice, text, stem) and ok
+    return ok
 
 
-async def main():
-    """Run all voice option examples."""
+async def main() -> int:
+    """Run all voice option examples. Returns ``0`` only if every demo succeeded."""
     print("🚀 Venice AI Voice Options Examples")
     print("=" * 60)
 
-    await demonstrate_voice_variety()
-    await list_available_voices()
-    await regional_accent_showcase()
-    await gender_voice_comparison()
-    await voice_personality_showcase()
+    async with VeniceClient() as client:
+        model_id, fmt, voices = await choose_model(client)
+        asr_model = await client.models.resolve_asr(prefer="cheapest")
+        print(f"📍 TTS model: {model_id} ({len(voices)} voices with language metadata, {fmt})")
+        print(f"🎤 ASR model for checking clips: {asr_model}\n")
+        demo = VoiceDemo(client, model_id, fmt, voices, asr_model)
+
+        results: list[tuple[str, bool]] = [
+            ("list_available_voices", await list_available_voices(demo)),
+            ("voice_variety_by_language", await voice_variety_by_language(demo)),
+            ("english_accent_showcase", await english_accent_showcase(demo)),
+            ("voice_personality_showcase", await voice_personality_showcase(demo)),
+        ]
+
+    failed = [name for name, ok in results if not ok]
+    if failed:
+        print(f"\n⚠️ {len(failed)} of {len(results)} demos failed: {', '.join(failed)}")
+        return 1
 
     print("\n✨ Voice options examples completed!")
     print("\n💡 Key concepts demonstrated:")
-    print("   - Voice variety and characteristics")
-    print("   - Available voice discovery and filtering")
-    print("   - Regional accent variations")
-    print("   - Male vs female voice comparisons")
+    print("   - Voice discovery with get_voices() and its model/gender filters")
+    print("   - Female and male voices per language, each given native text")
+    print("   - English accent variations")
     print("   - Voice personality and tone")
-    print("   - Dynamic model selection")
-    print("   - Comprehensive voice catalog usage")
+    checked = ", ".join(sorted(lang for lang in TRANSCRIBED if lang))
+    if checked:
+        print(f"   - Transcription round-trip for {checked} clips")
+    if UNCHECKED:
+        print(f"\n🎧 {len(UNCHECKED)} clips were not transcribed; listen to check them:")
+        for path in UNCHECKED:
+            print(f"   - {path.relative_to(RESULTS_DIR.parent.parent)}")
 
-    print("\n📁 Generated files in examples/results/:")
-    print("   - voice_*.mp3 (various voice samples)")
-    print("   - accent_*.mp3 (regional accents)")
-    print("   - gender_*.mp3 (male/female comparisons)")
-    print("   - personality_*.mp3 (personality variations)")
+    print("\n📁 Files written by this run:")
+    for path in WRITTEN:
+        print(f"   - {path.relative_to(RESULTS_DIR.parent.parent)}")
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
         print("\n👋 Goodbye!")
         sys.exit(130)

@@ -42,6 +42,18 @@ client = VeniceClient(config=config, api_key="your-key")
 > `create_production_config()` and the other presets in `venice_ai.presets` set a
 > sensible `RateLimiterConfig` for you.
 
+**Where the API key comes from:** every entry point (`VeniceClient`,
+`SyncVeniceClient`, `VeniceClientFactory`) resolves it in one order: an explicit
+`api_key=`, then `config.api_key`, then the `VENICE_API_KEY` environment
+variable. An explicit `api_key=""` means "no key", for wallet (SIWE) auth.
+
+**Bringing your own `aiohttp.ClientSession`:** pass it as `http_client=`. The
+SDK never modifies it and attaches the `Authorization` header (or a signed
+`X-Sign-In-With-X` envelope) to each API request itself, with absolute URLs, so
+the session needs neither credentials nor a `base_url`. Closing it stays your
+job. The SDK installs no retry middleware on a session you supply, so the retry
+policy below does not apply to it (`client.retry_options` is `None`).
+
 **Monitor rate limits:**
 
 ```python
@@ -148,20 +160,46 @@ The adaptive backend receives `redis_url`, `max_connections` and `cluster_mode`
 
 ### Retry Strategy
 
-```python
-from venice_ai.middleware.retry import RetryOptions, create_retry_middleware
+The client retries a failed request only when doing so cannot bill twice.
+Venice bills generation when it accepts a job and offers no
+`Idempotency-Key` on paid endpoints, so each request is classified by
+endpoint:
 
-retry_options = RetryOptions(
-    max_attempts=3,
-    base_delay=1.0,
-    retry_status_codes={500, 502, 503, 504},  # matches the RetryOptions default
-)
-retry_middleware = create_retry_middleware(retry_options)
+| Failure | Idempotent (GET, quotes, retrieve, billing) | Chat, responses, embeddings | Paid generation and other POSTs |
+| --- | --- | --- | --- |
+| Connection never established | retried | retried | retried |
+| 503 | retried | retried | only where Venice documents it as "model at capacity" (image, speech, music queue, voices) or with `Retry-After` |
+| 502 | retried | retried | not retried |
+| 500 | retried | retried once | not retried |
+| 504, read timeout, server disconnect | retried | not retried | not retried |
+
+The defaults are two retries, a 0.5 s first delay doubling to an 8 s cap, and
+jitter that only shortens a delay. A `Retry-After` header longer than
+`max_retry_after` (60 s) surfaces the error instead. Tune the policy per client
+or per block:
+
+```python
+from venice_ai import RetryOptions, VeniceClient
+
+client = VeniceClient(retry_options=RetryOptions(max_attempts=3, base_delay=1.0))
+print(client.retry_options)   # the resolved policy
+
+async with client.with_retries(RetryOptions(max_attempts=0)):
+    ...                       # no retries inside this block
 ```
 
-> Note: `429` is intentionally omitted from `retry_status_codes`. Rate-limit
-> (429) retries are handled separately by `SimpleRateLimiter`, which honors the
-> `Retry-After` header with its own backoff; adding 429 here would double-retry.
+`RetryOptions(classifier=...)` replaces the endpoint classification when you
+know an endpoint is safer (or riskier) to resend than the default assumes.
+`RetryOptions` is frozen: derive a variant with
+`dataclasses.replace(options, max_attempts=...)` rather than assigning a field.
+
+> Note: `RetryOptions` rejects `429` in `retry_status_codes` with a
+> `ValueError`. Rate-limit (429) retries belong to the rate limiter, which honors
+> `Retry-After` and the rate-limit headers with its own backoff: set the count
+> with `VeniceClient(rate_limiter=SimpleRateLimiter(max_retries=...))`, or
+> `RateLimiterConfig(max_retries=...)` for a client built by
+> `VeniceClientFactory`. A client with no rate limiter raises `RateLimitError`
+> on the first 429.
 
 ## Monitoring & Observability
 
@@ -209,9 +247,11 @@ if response.response_rate_limits:
 if response.deprecation_info and response.deprecation_info.is_deprecated:
     print(f"Warning: {response.deprecation_info.warning}")
 
-# Account balance
+# What this API key could still spend before the request: the lesser of
+# the account balance and the key's remaining consumption limit. For the
+# account balance itself, call client.billing.get_balance().
 if response.balance_info:
-    print(f"Balance: {response.balance_info.usd} USD")
+    print(f"Key can spend: {response.balance_info.usd} USD")
 ```
 
 [**-> Full example: `examples/headers/header_access_example.py`**](https://github.com/sethbang/venice-py/blob/main/examples/headers/header_access_example.py)

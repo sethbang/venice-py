@@ -69,7 +69,6 @@ class RateLimitDiscovery:
         self,
         client: VeniceClient | None = None,
         account_id: str | None = None,
-        account_key: str | None = None,
         cache_duration: int = 300,  # 5 minutes
     ) -> None:
         """
@@ -78,12 +77,10 @@ class RateLimitDiscovery:
         Args:
             client: Venice client for API calls
             account_id: Account identifier
-            account_key: Account API key
             cache_duration: Cache duration in seconds
         """
         self.client = client
         self.account_id = account_id
-        self.account_key = account_key
         self.cache_duration = cache_duration
 
         self.tiers: dict[str, RateLimitBucket] = {}
@@ -226,10 +223,12 @@ class RateLimitDiscovery:
             return None
 
         try:
-            session = await self.client._get_session()
-            response = await session.get("api_keys/rate_limits")
-            response.raise_for_status()
-            data = await response.json()
+            # A direct client request: it carries the client's authentication
+            # and absolute API URL whichever session the client sends through,
+            # and it bypasses the rate limiter this discovery feeds.
+            data = await self.client.get("api_keys/rate_limits", force_direct=True)
+            if not isinstance(data, dict):
+                return None
 
             # Extract rate limits
             rate_limits_data = data.get("data", {})

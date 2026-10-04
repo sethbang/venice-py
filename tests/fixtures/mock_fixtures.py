@@ -13,6 +13,23 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 
 
+def with_request_plumbing(client: Any) -> Any:
+    """Give a mocked client the request-header plumbing resources call.
+
+    ``_request_headers`` merges the session defaults with the per-call headers
+    (no credentials: a mocked client has none to add), and ``_siwe_resigning``
+    is a no-op scope. Returns ``client`` for chaining.
+    """
+    from contextlib import nullcontext
+
+    def request_headers(session: Any, headers: Any = None, siwe_auth: Any = None) -> dict:
+        return {**dict(session.headers), **dict(headers or {})}
+
+    client._request_headers = Mock(side_effect=request_headers)
+    client._siwe_resigning = Mock(side_effect=lambda *a, **k: nullcontext())
+    return client
+
+
 def fake_event_loop() -> MagicMock:
     """
     A stand-in for the running event loop, for tests that patch

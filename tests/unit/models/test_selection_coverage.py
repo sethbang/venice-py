@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from venice_ai.exceptions import NoMatchingModelError
 from venice_ai.models.selection import (
     DynamicModelSelector,
     ModelCache,
@@ -485,7 +486,7 @@ class TestChatModelFallbackSelection:
         }
         selector._cache.last_updated = datetime.now(UTC)
 
-        with pytest.raises(ValueError, match="No available chat models found"):
+        with pytest.raises(NoMatchingModelError, match="No available chat models found"):
             await selector.select_chat_model()
 
 
@@ -504,7 +505,7 @@ class TestFunctionCallingModelSelection:
         }
         selector._cache.last_updated = datetime.now(UTC)
 
-        with pytest.raises(ValueError, match="No available chat models found"):
+        with pytest.raises(NoMatchingModelError, match="No available chat models found"):
             await selector.select_function_calling_model()
 
     @pytest.mark.asyncio
@@ -528,7 +529,7 @@ class TestFunctionCallingModelSelection:
         }
         selector._cache.last_updated = datetime.now(UTC)
 
-        with pytest.raises(ValueError, match="No function calling capable models found"):
+        with pytest.raises(NoMatchingModelError, match="No function calling capable models found"):
             await selector.select_function_calling_model()
 
     @pytest.mark.asyncio
@@ -567,7 +568,7 @@ class TestEmbeddingModelSelection:
         }
         selector._cache.last_updated = datetime.now(UTC)
 
-        with pytest.raises(ValueError, match="No available embedding models found"):
+        with pytest.raises(NoMatchingModelError, match="No available embedding models found"):
             await selector.select_embedding_model()
 
     @pytest.mark.asyncio
@@ -623,7 +624,7 @@ class TestImageModelSelection:
         }
         selector._cache.last_updated = datetime.now(UTC)
 
-        with pytest.raises(ValueError, match="No available image models found"):
+        with pytest.raises(NoMatchingModelError, match="No available image models found"):
             await selector.select_image_model()
 
     @pytest.mark.asyncio
@@ -697,8 +698,24 @@ class TestAudioModelSelection:
         }
         selector._cache.last_updated = datetime.now(UTC)
 
-        with pytest.raises(ValueError, match="No available audio models found"):
+        with pytest.raises(
+            NoMatchingModelError, match=r"No available text-to-speech \(tts\) models found"
+        ) as excinfo:
             await selector.select_audio_model()
+        assert excinfo.value.resource_type == "tts"
+
+    @pytest.mark.asyncio
+    async def test_asr_no_models_names_speech_to_text(self):
+        """The ASR no-match message names the resource kind, not a generic label."""
+        selector = DynamicModelSelector(client=AsyncMock())
+        selector._cache.models = {"text-model": {"id": "text-model", "type": "text"}}
+        selector._cache.last_updated = datetime.now(UTC)
+
+        with pytest.raises(
+            NoMatchingModelError, match=r"No available speech-to-text \(asr\) models found"
+        ) as excinfo:
+            await selector.select_asr_model()
+        assert excinfo.value.resource_type == "asr"
 
     @pytest.mark.asyncio
     async def test_audio_with_custom_selector(self):
@@ -791,7 +808,7 @@ class TestConcurrencyModelSelection:
         }
         selector._cache.last_updated = datetime.now(UTC)
 
-        with pytest.raises(ValueError, match="Need 3 models but only 1 available"):
+        with pytest.raises(NoMatchingModelError, match="Need 3 models but only 1 available"):
             await selector.select_models_for_concurrency_test(count=3)
 
     @pytest.mark.asyncio

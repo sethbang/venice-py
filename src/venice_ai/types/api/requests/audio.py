@@ -17,17 +17,17 @@ class AudioSpeechRequest(BaseModel):
     input: str = Field(..., min_length=1, max_length=4096, description="Text to generate audio for")
 
     # Model and voice
-    model: ModelId | None = Field("tts-kokoro", description="TTS model to use")
-    voice: str | None = Field("af_sky", description="Voice to use for generation")
+    model: ModelId | None = Field(default="tts-kokoro", description="TTS model to use")
+    voice: str | None = Field(default="af_sky", description="Voice to use for generation")
 
     # Audio parameters
-    response_format: str | None = Field("mp3", description="Audio format")
-    speed: float | None = Field(1.0, ge=0.25, le=4.0, description="Playback speed")
-    streaming: bool | None = Field(False, description="Stream audio sentence by sentence")
+    response_format: str | None = Field(default="mp3", description="Audio format")
+    speed: float | None = Field(default=1.0, ge=0.25, le=4.0, description="Playback speed")
+    streaming: bool | None = Field(default=False, description="Stream audio sentence by sentence")
 
     # Model-specific style / sampling controls (ignored by models that don't advertise support)
     language: str | None = Field(
-        None,
+        default=None,
         description=(
             "Optional language hint. Accepted values are model-specific: Qwen 3 "
             "accepts full names (English, Chinese, ...); xAI/ElevenLabs accept "
@@ -36,7 +36,7 @@ class AudioSpeechRequest(BaseModel):
         ),
     )
     prompt: str | None = Field(
-        None,
+        default=None,
         max_length=500,
         description=(
             "Style prompt controlling emotion and delivery. Supported by models "
@@ -44,7 +44,7 @@ class AudioSpeechRequest(BaseModel):
         ),
     )
     temperature: float | None = Field(
-        None,
+        default=None,
         ge=0,
         le=2,
         description=(
@@ -53,7 +53,7 @@ class AudioSpeechRequest(BaseModel):
         ),
     )
     top_p: float | None = Field(
-        None,
+        default=None,
         ge=0,
         le=1,
         description=(

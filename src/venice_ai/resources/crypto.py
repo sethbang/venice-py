@@ -12,15 +12,18 @@ rate-limit detail lives in the endpoint docs. This resource is a thin pass-throu
 — ``params`` and ``result`` are forwarded to / from the upstream chain unchanged.
 
 Idempotency:
-    Pass ``idempotency_key`` on ``rpc()`` / ``batch_rpc()`` to enable safe retries.
-    Replaying within 24h with the same key + same body returns the cached response
-    with the ``Idempotent-Replayed: true`` header. Same key + different body
-    returns 400.
+    Every ``rpc()`` / ``batch_rpc()`` call carries an ``Idempotency-Key``: the
+    caller's ``idempotency_key``, or a fresh random key when none is given. The
+    key stays the same across the client's automatic retries, so a retried call
+    is deduplicated by the proxy instead of billed twice. Replaying within 24h
+    with the same key + same body returns the cached response with the
+    ``Idempotent-Replayed: true`` header. Same key + different body returns 400.
 """
 
 from __future__ import annotations
 
 import re
+import uuid
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +36,7 @@ from ..types.api.crypto import (
     JsonRpcRequest,
     JsonRpcResponse,
 )
+from ..utils.errors import read_body
 
 if TYPE_CHECKING:
     from .._client import VeniceClient  # noqa: F401
@@ -43,14 +47,14 @@ _IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,255}$")
 _MAX_BATCH_SIZE = 100
 
 
-def _idempotency_headers(idempotency_key: str | None) -> dict[str, str] | None:
-    """Build the optional ``Idempotency-Key`` header.
+def _idempotency_headers(idempotency_key: str | None) -> dict[str, str]:
+    """Build the ``Idempotency-Key`` header, generating a key when none is given.
 
     The proxy enforces ``[A-Za-z0-9_-]{1,255}``; we mirror that client-side so
     a 400 surfaces as a ``ValueError`` at the call site instead of an HTTP error.
     """
     if idempotency_key is None:
-        return None
+        return {"Idempotency-Key": f"venice-py-{uuid.uuid4().hex}"}
     if not _IDEMPOTENCY_KEY_PATTERN.match(idempotency_key):
         raise ValueError(
             "idempotency_key must match [A-Za-z0-9_-]{1,255} (Venice proxy constraint)"
@@ -121,9 +125,11 @@ class Crypto(APIResource["VeniceClient"]):
         :param id: Caller-supplied request ID echoed back in the response.
             Defaults to ``1``.
         :type id: int | str | None
-        :param idempotency_key: Optional idempotency key for safe retries
-            (``[A-Za-z0-9_-]{1,255}``). Same key + same body within 24h replays
-            the cached response.
+        :param idempotency_key: Idempotency key (``[A-Za-z0-9_-]{1,255}``).
+            Same key + same body within 24h replays the cached response. When
+            omitted, a random key is generated for this call, so the client's
+            automatic retries are deduplicated; pass your own to deduplicate
+            across separate calls.
         :type idempotency_key: str | None
 
         :return: :class:`JsonRpcResponse`. On per-request failure, ``error`` is
@@ -211,6 +217,7 @@ class Crypto(APIResource["VeniceClient"]):
                 f"Expected aiohttp.ClientResponse for batch RPC, got {type(response).__name__}"
             )
         try:
+            await read_body(response)
             raw = await response.json()
         finally:
             response.release()

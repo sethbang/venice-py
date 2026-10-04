@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from pydantic import ValidationError
 
+from venice_ai.exceptions import NoMatchingModelError
 from venice_ai.resources.voice_changer import VoiceChanger, VoiceChangerJob
 from venice_ai.types.api.requests.voice_changer import (
     QueueVoiceChangerRequest,
@@ -135,6 +136,51 @@ class TestRetrieveHasTwoArms:
         assert isinstance(result, VoiceChangerCompletedStatus)
         assert result.data == AUDIO
         assert result.status == "COMPLETED"
+        assert result.content_type == "audio/mpeg"
+        assert result.audio_format == "mp3"
+
+    @pytest.mark.asyncio
+    async def test_content_type_parameters_are_stripped(self, client):
+        client.post.return_value = _make_raw_response(
+            b"RIFF\x00\x00\x00\x00WAVEfmt ", content_type="audio/wav; charset=binary"
+        )
+        result = await VoiceChanger(client).retrieve(model=MODEL, queue_id="q-vc-1")
+        assert result.content_type == "audio/wav"
+        assert result.audio_format == "wav"
+
+    @pytest.mark.asyncio
+    async def test_octet_stream_audio_is_identified_by_its_bytes(self, client):
+        flac = b"fLaC\x00\x00\x00\x22rest"
+        client.post.return_value = _make_raw_response(flac, content_type="application/octet-stream")
+        result = await VoiceChanger(client).retrieve(model=MODEL, queue_id="q-vc-1")
+        assert result.content_type == "audio/flac"
+        assert result.audio_format == "flac"
+        assert result.data == flac
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("body", "content_type"),
+        [
+            (b"<html>gateway error</html>", "text/html"),
+            (b"", "audio/mpeg"),
+            (b"not audio at all", "application/octet-stream"),
+        ],
+    )
+    async def test_a_non_audio_body_is_not_reported_as_completed(self, client, body, content_type):
+        from venice_ai.exceptions import APIResponseProcessingError
+
+        client.post.return_value = _make_raw_response(body, content_type=content_type)
+        with pytest.raises(APIResponseProcessingError, match="voice_changer.retrieve"):
+            await VoiceChanger(client).retrieve(model=MODEL, queue_id="q-vc-1")
+
+    def test_audio_format_matches_music(self):
+        from venice_ai.types.api.music import MusicCompletedStatus
+
+        for media_type in ("audio/mpeg", "audio/flac", "audio/wav", "audio/mp4", "audio/x-unknown"):
+            vc = VoiceChangerCompletedStatus(content_type=media_type)
+            music = MusicCompletedStatus(status="COMPLETED", content_type=media_type)
+            assert vc.audio_format == music.audio_format
+        assert VoiceChangerCompletedStatus().audio_format is None
 
     def test_the_union_has_no_failed_arm(self):
         """The spec declares no FAILED status; inventing one models a state
@@ -290,6 +336,21 @@ class TestVoiceChangerJob:
         client.voice_changer.cancel.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_context_manager_keeps_media_when_the_block_raises(
+        self, client, queue_response, caplog
+    ):
+        client.voice_changer.cancel = AsyncMock(
+            return_value=VoiceChangerCompleteResponse(success=True)
+        )
+        with caplog.at_level("WARNING"), pytest.raises(OSError, match="disk full"):
+            async with VoiceChangerJob(client, queue_response):
+                raise OSError("disk full")
+        client.voice_changer.cancel.assert_not_awaited()
+        message = " ".join(r.getMessage() for r in caplog.records)
+        assert "q-vc-1" in message
+        assert "client.voice_changer.retrieve(" in message
+
+    @pytest.mark.asyncio
     async def test_progress_is_none_once_complete(self, client, queue_response):
         completed = VoiceChangerCompletedStatus()
         client.voice_changer.retrieve = AsyncMock(return_value=completed)
@@ -396,7 +457,7 @@ class TestResolveVoiceChanger:
     async def test_raises_clearly_when_none_exist(self):
         """The live catalog has none today, so this is the common path."""
         models = self._models(self._catalog(("music-gen", {"name": "Generator"})))
-        with pytest.raises(ValueError, match="No available voice-changer models found"):
+        with pytest.raises(NoMatchingModelError, match="No available voice-changer models found"):
             await models.resolve_voice_changer()
 
     @pytest.mark.asyncio

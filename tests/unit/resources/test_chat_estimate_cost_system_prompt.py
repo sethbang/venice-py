@@ -86,7 +86,8 @@ class TestDefaultIncludesVeniceSystemPrompt:
             "ChatCostEstimate should expose the injected-system-prompt allowance "
             f"as venice_system_prompt_tokens; got {allowance!r}"
         )
-        assert estimate.prompt_tokens == allowance + 2  # 2 words * 1.3 -> 2 tokens
+        # 2 words * 1.3 -> 2 tokens, plus the chat-template allowance
+        assert estimate.prompt_tokens == allowance + 2 + estimate.template_overhead_tokens
 
     @pytest.mark.asyncio
     async def test_allowance_priced_at_cache_input_when_published(self):
@@ -97,7 +98,7 @@ class TestDefaultIncludesVeniceSystemPrompt:
         allowance = getattr(estimate, "venice_system_prompt_tokens", 0)
         assert allowance > 0, "no injected-system-prompt allowance in the estimate"
         expected_prompt_cost = Decimal(allowance) / _MILLION * Decimal("0.26") + Decimal(
-            2
+            2 + estimate.template_overhead_tokens
         ) / _MILLION * Decimal("1.40")
         assert estimate.prompt_cost_usd == expected_prompt_cost
 
@@ -119,7 +120,7 @@ class TestOptOut:
             expected_completion_tokens=20,
             venice_parameters=venice_parameters,
         )
-        assert estimate.prompt_tokens == 2
+        assert estimate.prompt_tokens - estimate.template_overhead_tokens == 2
 
     @pytest.mark.asyncio
     async def test_venice_parameters_model_is_accepted(self):
@@ -132,7 +133,7 @@ class TestOptOut:
             expected_completion_tokens=20,
             venice_parameters=VeniceParameters(include_venice_system_prompt=False),
         )
-        assert estimate.prompt_tokens == 2
+        assert estimate.prompt_tokens - estimate.template_overhead_tokens == 2
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

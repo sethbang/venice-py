@@ -4,17 +4,17 @@ Venice AI SDK - Redis Backend Configuration
 ============================================
 
 Demonstrates the *correct* wiring for a Redis-backed Venice client and
-self-verifies that Redis is actually contacted on the wire.
+self-verifies that the SDK's rate limiter state really lives in Redis.
 
 Key correctness note
 --------------------
 ``BackendConfig(backend_type=BackendType.REDIS, ...)`` alone is **not** enough
 to make the SDK use Redis at runtime: it also requires
 ``RateLimiterConfig(mode=RateLimiterMode.ADAPTIVE, redis_url=...)``. Without
-ADAPTIVE mode the SDK falls back to the in-memory SimpleRateLimiter and Redis
-is never contacted. The config validator now flags this misuse as an ERROR
-(see ``venice_ai.validation.config_validator``); the production preset
-already wires both pieces correctly and is the canonical entrypoint.
+ADAPTIVE mode the SDK uses the in-memory SimpleRateLimiter and Redis is never
+contacted. The config validator flags that combination as an error (see
+``venice_ai.validation.config_validator``); the production preset wires both
+pieces and is the canonical entrypoint.
 
 Run
 ---
@@ -25,34 +25,78 @@ Start Redis (any reachable instance works; localhost shown for demo)::
 Then::
 
     poetry run python examples/advanced/redis_backend.py
+
+The Redis URL comes from the first of ``VENICE_BACKEND__REDIS__REDIS_URL``
+(the variable ``VeniceAIConfig`` itself reads), ``VENICE_REDIS_URL`` and
+``REDIS_URL`` that is set, falling back to ``redis://localhost:6379``.
+
+Exit codes: 0 when the limiter state was verified in Redis, 1 on a failure,
+and 77 (with a ``SKIPPED:`` line) when a prerequisite is missing: the
+``redis`` or ``adaptive-rate-limiter`` package (``pip install "venice-py[adaptive]"``)
+or a reachable Redis.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import importlib.util
 import os
 import sys
-from typing import Any, cast
+from typing import cast
 
-import redis
-from redis.exceptions import RedisError
+# Exit code for "a prerequisite is missing", so a test runner can tell a skip
+# from a failure.
+EXIT_SKIPPED = 77
+
+try:
+    import redis
+    from redis.exceptions import RedisError
+except ImportError:
+    print('SKIPPED: the redis package is not installed (pip install "venice-py[adaptive]")')
+    sys.exit(EXIT_SKIPPED)
+# ADAPTIVE mode also needs the adaptive-rate-limiter package from the same extra.
+if importlib.util.find_spec("adaptive_rate_limiter") is None:
+    print(
+        "SKIPPED: the adaptive-rate-limiter package is not installed "
+        '(pip install "venice-py[adaptive]")'
+    )
+    sys.exit(EXIT_SKIPPED)
 
 # Line-buffer stdout so our prints show up in chronological order with any
 # stderr output the package may emit (rather than appearing in a chunk at
 # the end after stderr already flushed).
 sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
 
+from venice_ai.exceptions import NoMatchingModelError  # noqa: E402
 from venice_ai.factory import VeniceClientFactory  # noqa: E402
 from venice_ai.presets import create_production_config  # noqa: E402
-from venice_ai.types.api import UserMessage  # noqa: E402
+from venice_ai.types.api import UserMessage, VeniceParameters  # noqa: E402
 from venice_ai.validation.config_validator import validate_config  # noqa: E402
+
+REDIS_URL_ENV_VARS = ("VENICE_BACKEND__REDIS__REDIS_URL", "VENICE_REDIS_URL", "REDIS_URL")
+DEFAULT_REDIS_URL = "redis://localhost:6379"
+
+# The adaptive limiter scopes its Redis keys by account id.
+ACCOUNT_ID = "redis-example"
+
+
+def resolve_redis_url() -> str:
+    """Return the Redis URL from the environment, naming where it came from."""
+    for name in REDIS_URL_ENV_VARS:
+        value = os.getenv(name)
+        if value:
+            print(f"Redis URL from {name}")
+            return value
+    print(f"Redis URL: none of {', '.join(REDIS_URL_ENV_VARS)} is set; using the default")
+    return DEFAULT_REDIS_URL
 
 
 def assert_redis_reachable(redis_url: str) -> redis.Redis:
-    """Ping Redis up-front; exit with a clear message if unreachable.
+    """Ping Redis up-front; exit with a SKIPPED message if it is unreachable.
 
-    Returns a sync ``redis.Redis`` client we'll later use to verify the SDK
-    actually wrote keys.
+    Returns a sync ``redis.Redis`` client used later to inspect the keys the
+    SDK wrote.
     """
     print(f"Checking Redis connectivity at {redis_url} ...")
     client = redis.Redis.from_url(redis_url, socket_connect_timeout=2.0)
@@ -60,51 +104,37 @@ def assert_redis_reachable(redis_url: str) -> redis.Redis:
         client.ping()
     except RedisError as exc:
         print(
-            f"\nERROR: cannot reach Redis at {redis_url}: {exc}\n"
+            f"\nSKIPPED: cannot reach Redis at {redis_url}: {exc}\n"
             "\nStart a local Redis (Docker):\n"
             "    docker run -d --name venice-redis -p 6379:6379 redis:7-alpine\n"
-            "\nOr point VENICE_REDIS_URL / REDIS_URL at a reachable instance.",
-            file=sys.stderr,
+            f"\nOr point one of {', '.join(REDIS_URL_ENV_VARS)} at a reachable instance."
         )
-        sys.exit(1)
-    print(f"   Redis reachable. Initial DBSIZE = {cast(int, client.dbsize())}")
+        sys.exit(EXIT_SKIPPED)
+    print("   Redis reachable.")
     return client
 
 
-def _redis_command_total(verifier: redis.Redis) -> int:
-    """Sum non-INFO/PING commands processed by the server.
-
-    DBSIZE doesn't catch the case where Redis was contacted heavily
-    (HGETALL, EVAL, SCRIPT LOAD, ...) but no keys persisted (e.g. a
-    failed HSET). ``INFO commandstats`` counts every command the server
-    has executed and is the ground truth for "did anyone talk to Redis".
-    """
-    stats = cast(dict[str, Any], verifier.info("commandstats"))
-    total = 0
-    for cmd, info in stats.items():
-        # We don't want to count our own ping/info/dbsize/scan probes
-        # against the SDK; skip the commands the verifier itself uses.
-        bare = cmd.replace("cmdstat_", "")
-        if bare in {"info", "ping", "dbsize", "scan", "client|setinfo", "client"}:
-            continue
-        total += int(info.get("calls", 0))
-    return total
+def _b64(value: str) -> str:
+    """Encode a key component the way the adaptive limiter does."""
+    return base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
 
 
-async def run_redis_backed_request(redis_url: str) -> None:
-    """Build a Redis-backed config, issue one request, then verify the SDK
-    actually contacted Redis."""
+def model_state_key(model: str) -> str:
+    """The Redis hash holding the adaptive limiter's state for one model."""
+    return f"rl:{{{_b64(ACCOUNT_ID)}|{_b64(model)}}}:state"
+
+
+async def run_redis_backed_request(redis_url: str, verifier: redis.Redis) -> bool:
+    """Build a Redis-backed config, issue one request, then verify the limiter
+    state for this account and model was written to Redis."""
 
     print("\nBuilding production config (BackendType.REDIS + RateLimiterMode.ADAPTIVE)")
     # The production preset is the canonical way to get this right. It wires:
     #   BackendConfig(backend_type=BackendType.REDIS, redis=RedisBackendConfig(...))
     # AND
     #   RateLimiterConfig(mode=RateLimiterMode.ADAPTIVE, redis_url=redis_url)
-    # Both are required: the validator now errors if BackendType.REDIS is set
-    # without ADAPTIVE rate limiting.
     config = create_production_config(
         redis_url=redis_url,
-        redis_key_prefix="venice:example:",
         max_concurrent_executions=10,
         max_queue_size=100,
         # Localhost is fine for a local demo but rejected by default in
@@ -112,107 +142,95 @@ async def run_redis_backed_request(redis_url: str) -> None:
         _allow_localhost_for_testing=True,
     )
 
-    # Run the explicit config validator. With BOTH pieces wired we expect zero
-    # errors. The validator rejects configs that set BackendType.REDIS without
-    # RateLimiterMode.ADAPTIVE, since that combination silently falls back to the
-    # in-memory rate limiter (Redis is never contacted).
+    # With both pieces wired the validator reports no errors.
     validation = validate_config(config)
     print(
         f"   Config validation: errors={len(validation.errors)} warnings={len(validation.warnings)}"
     )
+    for warning in validation.warnings:
+        print(f"   WARNING: {warning}")
     if validation.errors:
         for err in validation.errors:
             print(f"   ERROR: {err}", file=sys.stderr)
-        sys.exit(1)
+        return False
 
-    # Snapshot Redis state BEFORE we exercise the SDK so we can diff after.
-    verifier = redis.Redis.from_url(redis_url)
-    pre_dbsize = cast(int, verifier.dbsize())
-    pre_cmds = _redis_command_total(verifier)
-    print(f"   Pre-request:  DBSIZE={pre_dbsize}, total SDK commands={pre_cmds}")
-
-    # Build the SDK client. account_id matters for ADAPTIVE mode key scoping.
     client = VeniceClientFactory.create_client(
         config=config,
         api_key=os.environ["VENICE_API_KEY"],
-        account_id="redis-example",
+        account_id=ACCOUNT_ID,
     )
 
-    chat_response_text: str | None = None
     async with client:
-        chat_model = await client.models.resolve_chat()
+        chat_model = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
+        state_key = model_state_key(chat_model)
+        # Start from a clean slate so the check below only sees this run's writes.
+        verifier.delete(state_key)
+
         print(f"\nIssuing chat completion via {chat_model} ...")
         response = await client.chat.completions.create(
             model=chat_model,
             messages=[UserMessage(content="Reply with exactly one word: OK")],
-            max_completion_tokens=10,
+            max_completion_tokens=16,
+            # Only this prompt is billed, not Venice's own system prompt.
+            venice_parameters=VeniceParameters(include_venice_system_prompt=False),
         )
-        raw_content = response.text
-        chat_response_text = raw_content if isinstance(raw_content, str) else None
-        print(f"   Response: {chat_response_text!r}")
+        finish = response.choices[0].finish_reason
+        text = (response.text or "").strip()
+        print(f"   Response: {text!r} (finish_reason={finish})")
+        if finish == "length" or not text:
+            print("FAIL: the reply was truncated or empty.", file=sys.stderr)
+            return False
 
-    # Verification: did the SDK actually talk to Redis?
-    post_dbsize = cast(int, verifier.dbsize())
-    post_cmds = _redis_command_total(verifier)
-    dbsize_delta = post_dbsize - pre_dbsize
-    cmd_delta = post_cmds - pre_cmds
-    print(
-        f"\nPost-request: DBSIZE={post_dbsize} (delta {dbsize_delta:+d}), "
-        f"SDK commands delta={cmd_delta:+d}"
-    )
+    # Verification: the limiter state for this account and model is in Redis.
+    state = {
+        k.decode(): v.decode()
+        for k, v in cast(dict[bytes, bytes], verifier.hgetall(state_key)).items()
+    }
+    keys = sorted(k.decode() for k in verifier.scan_iter(match=f"rl:{{{_b64(ACCOUNT_ID)}|*"))
+    print(f"\nRedis keys for account {ACCOUNT_ID!r}:")
+    for key in keys:
+        print(f"   - {key}")
 
-    # Sample up to 10 keys for visibility.
-    sample_keys = sorted({k.decode() for k in verifier.scan_iter(count=100)})[:10]
-    if sample_keys:
-        print("   Sample keys in Redis:")
-        for key in sample_keys:
-            print(f"     - {key}")
-    else:
-        print("   (no keys present in Redis)")
-
-    # Acceptance: prefer DBSIZE > 0 (most explicit), but accept "command
-    # delta > 0" as proof Redis was contacted, since some SDK paths may
-    # only read existing keys or fail to persist.
-    if dbsize_delta > 0:
-        print(f"\nSUCCESS: Redis was contacted (DBSIZE +{dbsize_delta}, commands +{cmd_delta}).")
-        return
-    if cmd_delta > 0:
+    if not state:
         print(
-            f"\nPARTIAL SUCCESS: Redis was contacted ({cmd_delta} commands "
-            "executed by the SDK), but no keys persisted. This usually means "
-            "the adaptive rate limiter's state writes failed; the wiring is "
-            "correct (BackendType.REDIS + RateLimiterMode.ADAPTIVE)."
+            f"\nFAIL: {state_key} was not written.\n"
+            "      The client is not keeping its rate limiter state in Redis; check\n"
+            "      that the config uses BackendType.REDIS with RateLimiterMode.ADAPTIVE.",
+            file=sys.stderr,
         )
-        return
+        return False
 
-    print(
-        "\nFAIL: Redis received zero commands from the SDK during the run.\n"
-        "      The configuration is not actually using Redis — the same\n"
-        "      silent fallback that BackendType.REDIS without\n"
-        "      RateLimiterMode.ADAPTIVE produces. Confirm both are\n"
-        "      set in your VeniceAIConfig.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+    print(f"\nState in {state_key}:")
+    for field in ("lim_req", "rem_req", "lim_tok", "rem_tok", "vrf_req", "vrf_tok"):
+        print(f"   {field} = {state.get(field, '(not set)')}")
+    if state.get("vrf_req") != "1":
+        print(
+            "\nFAIL: the request limit was not verified from response headers (vrf_req != 1).",
+            file=sys.stderr,
+        )
+        return False
+
+    print("\nSUCCESS: the adaptive limiter stored header-verified state in Redis.")
+    return True
 
 
-async def main() -> None:
+async def main() -> int:
     print("=" * 60)
     print("Venice AI SDK - Redis Backend Example")
     print("=" * 60)
 
-    redis_url = os.getenv("VENICE_REDIS_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+    redis_url = resolve_redis_url()
 
-    # 1. Defensive: confirm Redis is actually reachable before we configure
-    #    the SDK against it. Otherwise failures get buried in async stacks.
-    assert_redis_reachable(redis_url)
+    # Confirm Redis is reachable before configuring the SDK against it;
+    # otherwise failures get buried in async stacks.
+    verifier = assert_redis_reachable(redis_url)
 
-    # 2. Demonstrate the correct config + verify Redis is touched on the wire.
-    await run_redis_backed_request(redis_url)
+    ok = await run_redis_backed_request(redis_url, verifier)
 
     print("\n" + "=" * 60)
-    print("Done.")
+    print("Done." if ok else "Failed.")
     print("=" * 60)
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
@@ -223,10 +241,14 @@ if __name__ == "__main__":
         )
         sys.exit(1)
     try:
-        asyncio.run(main())
+        sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
         print("\nInterrupted.")
         sys.exit(130)
+    except NoMatchingModelError as exc:
+        # The catalog has no model of the kind this example needs.
+        print(f"SKIPPED: {exc}")
+        sys.exit(EXIT_SKIPPED)
     except Exception as exc:
         print(f"\nERROR: {exc}", file=sys.stderr)
         sys.exit(1)

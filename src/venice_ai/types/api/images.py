@@ -26,7 +26,7 @@ class ImageGenerationResponse(VeniceBaseModel):
     id: str = Field(..., description="The ID of the request")
     images: list[str] = Field(..., description="Base64 encoded image data")
     request: dict[str, Any] | None = Field(
-        None, description="The original request data sent to the API"
+        default=None, description="The original request data sent to the API"
     )
     timing: TimingInfo = Field(..., description="Performance timing information")
 
@@ -156,8 +156,8 @@ class SimpleImageData(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    b64_json: str | None = Field(None, description="Base64-encoded image data")
-    url: str | None = Field(None, description="Data URL of the generated image")
+    b64_json: str | None = Field(default=None, description="Base64-encoded image data")
+    url: str | None = Field(default=None, description="Data URL of the generated image")
 
 
 class SimpleImageGenerationResponse(VeniceBaseModel):

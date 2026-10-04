@@ -37,14 +37,14 @@ class JsonRpcRequest(BaseModel):
     )
     jsonrpc: Literal["2.0"] = Field(default="2.0", description="JSON-RPC protocol version.")
     params: list[Any] | dict[str, Any] | None = Field(
-        None,
+        default=None,
         description=(
             "Method parameters. Shape is method-dependent — passed through to "
             "the upstream chain unchanged."
         ),
     )
     id: int | str | None = Field(
-        None,
+        default=None,
         description="Caller-supplied request ID echoed back. Required to correlate batch items.",
     )
 
@@ -60,7 +60,9 @@ class JsonRpcError(BaseModel):
 
     code: int = Field(..., description="JSON-RPC error code (e.g. -32602 for invalid params).")
     message: str = Field(..., description="Human-readable error message.")
-    data: Any | None = Field(None, description="Optional error payload from the upstream chain.")
+    data: Any | None = Field(
+        default=None, description="Optional error payload from the upstream chain."
+    )
 
 
 def _rpc_credits(model: VeniceBaseModel) -> int | None:
@@ -110,10 +112,12 @@ class JsonRpcResponse(VeniceBaseModel):
 
     jsonrpc: str = Field(..., description="JSON-RPC protocol version.")
     id: int | str | None = Field(
-        None, description="Echoed request ID. ``None`` only for malformed requests."
+        default=None, description="Echoed request ID. ``None`` only for malformed requests."
     )
-    result: Any | None = Field(None, description="Method result on success.")
-    error: JsonRpcError | None = Field(None, description="Error object on per-request failure.")
+    result: Any | None = Field(default=None, description="Method result on success.")
+    error: JsonRpcError | None = Field(
+        default=None, description="Error object on per-request failure."
+    )
 
     @property
     def rpc_credits(self) -> int | None:

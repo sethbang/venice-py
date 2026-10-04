@@ -1,6 +1,6 @@
 # Venice AI CLI Reference
 
-Command-line interface for Venice AI. Chat with AI models, generate images, create audio and video, manage embeddings, and more — all from your terminal.
+Command-line interface for Venice AI. Chat with AI models, generate images, create audio and video, manage embeddings, ask decision models typed questions, and more — all from your terminal.
 
 The command is **`venice-py`**. It ships with this unofficial, community-maintained
 Python SDK and is a different program from Venice's official CLI, which is written in
@@ -87,6 +87,11 @@ venice --config /path/to/config.yaml models
 
 `--config <path>` is resolved for **all** subcommands: the chosen file's
 `api.key` and `api.base_url` are applied to every client the CLI constructs.
+`api.base_url` is the API root, version path included
+(`https://api.venice.ai/api/v1`), the same form `VeniceClient(base_url=...)`
+and `VENICE_API_BASE_URL` take; a bare host gets `/api/v1` appended, and any
+other path is used as given. A gateway that serves the API at its host root
+cannot be addressed: serve it under a path and pass that path.
 The `VENICE_API_KEY` environment variable still takes precedence over
 `api.key` in the file. `venice-py configure` reads from and writes back to the
 same `--config` path, so `venice --config ./team.yaml configure` edits that
@@ -926,6 +931,74 @@ venice-py embeddings "Search query" --dimensions 256
 
 ---
 
+## Decisions
+
+Ask a decision ("System One") model typed questions about a piece of state. Instead of generating text, the model returns one calibrated answer per question: a probability for a yes/no question, an option with its full probability distribution for a choice, or a position on an ordered rubric for a score. Every question is evaluated independently against the same state in one request. The `/decisions` endpoint is beta.
+
+```bash
+venice-py decisions [STATE] [OPTIONS]
+```
+
+`STATE` is the text to evaluate. Omit it to read the state from stdin.
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--noul ID QUESTION` | | | Add a yes/no question, answered as a probability (repeatable) |
+| `--choice ID QUESTION OPTIONS` | | | Add a pick-one question; `OPTIONS` is a comma-separated list (repeatable) |
+| `--score ID QUESTION LEVELS` | | | Add a rubric question; `LEVELS` is comma-separated, lowest first (repeatable) |
+| `--questions` | `-q` | | JSON file mapping question ids to questions in the API shape (`-` reads stdin) |
+| `--state-json` | | `false` | Parse `STATE` as JSON and send it as structured state (object or array) |
+| `--model` | `-m` | runtime * | Decision model to use |
+| `--json` | | `false` | Output the full response as JSON |
+
+> \* No static default — resolved at runtime: `--model` wins, else a matching `defaults.decision_model` in your config if set, else the live API-recommended decision model.
+
+At least one question is required, and each question id must be unique across the flags and the file. The table shows each answer with its confidence and its three most likely options or levels. A score can land between levels, so it is printed with the label of the nearest level.
+
+```bash
+# Route a support ticket with all three question types
+venice-py decisions "My payouts have failed for three days and nobody replies" \
+  --noul urgent "Does this message convey urgency?" \
+  --choice team "Which team should handle this?" "billing,technical,account" \
+  --score mood "How frustrated is the customer?" "Calm,Frustrated,Very angry"
+
+# Evaluate structured state
+venice-py decisions --state-json '{"plan": "free", "failed_payments": 3}' \
+  --noul at_risk "Is this account at risk of churning?"
+
+# Pipe the state in, and print the raw answers for scripting
+cat ticket.txt | venice-py decisions --noul urgent "Is this urgent?" --json | jq '.answers.urgent.noul'
+```
+
+The inline flags cover the common cases. To describe each choice option, label what a yes and a no mean, or use option or level text that contains commas, pass the questions as JSON with `--questions`. The file uses the API's question shape:
+
+```json
+{
+  "team": {
+    "type": "choice",
+    "instructions": "Which team should handle this ticket?",
+    "criteria": {
+      "billing": "Payments, payouts, invoices and refunds",
+      "technical": "Bugs, outages and API integrations",
+      "account": null
+    }
+  },
+  "safe": {
+    "type": "noul",
+    "instructions": "Is this message safe to auto-reply to?",
+    "criteria": {"true": "Routine request", "false": "Needs a human"}
+  }
+}
+```
+
+```bash
+venice-py decisions "Please refund my last invoice" --questions questions.json
+```
+
+Inline flags and `--questions` can be combined. A malformed file or flag exits with code 2 before any request is sent; an API error exits with code 1.
+
+---
+
 ## Models
 
 List, filter, compare, and inspect available AI models. The `models` command supports extensive filtering by type, capabilities, price, and status.
@@ -1037,15 +1110,32 @@ venice-py models --verbose
 ### `venice-py models resolve`
 
 Auto-pick a model by type and capabilities. Wraps
-`Models.resolve()` and the ten typed `resolve_*()` helpers
+`Models.resolve()` and the typed `resolve_*()` helpers
 (`resolve_chat`, `resolve_image`, `resolve_embedding`, etc.). Useful in
-scripts when you want "the cheapest model that supports vision + function
-calling" without hardcoding a specific model ID.
+scripts when you want "a model that supports vision + function calling"
+without hardcoding a specific model ID. Add `--prefer cheapest` to get the
+lowest-priced match instead of the catalog's default pick; it skips beta
+models unless `--include-beta` is passed and end-to-end encrypted models
+unless `--e2ee` is passed.
 
 ```bash
 venice-py models resolve --type chat --function-calling
-venice-py models resolve --type image
+venice-py models resolve --type chat --function-calling --prefer cheapest
+venice-py models resolve --type embedding --prefer cheapest
+venice-py models resolve --type image --prefer cheapest --quality low
 venice-py models resolve --type chat --vision --min-context-tokens 32000
+venice-py models resolve --type chat --prompt-caching
+venice-py models resolve --type music --music-only --force-instrumental
+```
+
+`--type cheapest-video` quotes every candidate (free `POST /video/quote`
+calls) at its own shortest duration and lowest resolution, silent where
+audio is configurable, and prints the winner with the parameters it was
+quoted with. `--duration` and `--resolution` pin a value instead.
+
+```bash
+venice-py models resolve --type cheapest-video --video-type text-to-video
+venice-py models resolve --type cheapest-video --duration 5s --json
 ```
 
 ### `venice-py models get`
@@ -1423,6 +1513,9 @@ venice-py characters list --json | jq '.[].slug'
 
 # Get API keys as JSON
 venice-py api-keys list --json
+
+# Get a decision answer as JSON
+venice-py decisions "Ship it today or we cancel" --noul urgent "Is this urgent?" --json | jq '.answers.urgent.noul'
 
 # Chat with JSON response
 venice-py chat start --no-stream --json-output "What is 2+2?"

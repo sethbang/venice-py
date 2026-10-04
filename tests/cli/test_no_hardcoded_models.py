@@ -14,6 +14,7 @@ def test_default_config_has_no_model_keys():
         "tts_model",
         "stt_model",
         "embedding_model",
+        "decision_model",
         "video_t2v_model",
         "video_i2v_model",
     }

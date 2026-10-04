@@ -134,6 +134,20 @@ prev_sleep = sleep
 
 For most production workloads, **full jitter is enough**. Don't optimize for decorrelated jitter unless benchmarks show it matters.
 
+## What the SDK already retries
+
+The client's HTTP layer retries before your code sees an exception, and only when a resend cannot bill twice. Each request is classified by endpoint (`venice_ai.classify_request(method, path, headers)` returns its `RetryClass`):
+
+| Failure | Idempotent (GET, quotes, retrieve, billing, keyed POSTs) | Chat, responses, embeddings | Paid generation and other POSTs |
+|---|---|---|---|
+| Connection never established | retried | retried | retried |
+| 503 | retried | retried | only on documented capacity 503s (image, speech, music queue, voices) or with `Retry-After` |
+| 502 | retried | retried | not retried |
+| 500 | retried | once | not retried |
+| 504, read timeout, server disconnect | retried | not retried | not retried |
+
+Defaults: two retries, 0.5 s doubling to 8 s, jitter that only shortens a delay. 429 is left to the rate limiter (`SimpleRateLimiter(max_retries=...)`); `RetryOptions` rejects 429 in `retry_status_codes`. An HTTP request timeout surfaces as `APITimeoutError`, with or without a rate limiter, for streamed calls and for a response body that stalls after its status arrived (a job's `wait(max_polls=...)` running out of polls is a plain `TimeoutError`). `APITimeoutError` does not subclass `TimeoutError`, so `except TimeoutError` does not catch a request timeout. `RetryOptions` is frozen; derive variants with `dataclasses.replace()`. So an `InternalServerError` from a chat call has already been retried once, and an `APITimeoutError` from an image or video call was never resent: the job may have been processed and billed. `client.retry_options` shows the policy in effect.
+
 ## Idempotency considerations
 
 Retrying a `client.chat.completions.create(...)` call when the original may have succeeded server-side BUT the client never saw the response: harmless (you pay twice but the conversation is the same). Retrying:
@@ -159,7 +173,7 @@ async with client.with_retries(RetryOptions(
     response = await client.chat.completions.create(...)
 ```
 
-The policy is per-call inside the block. Useful when you want a different retry posture for one specific operation without re-configuring the client.
+The policy is per-call inside the block. Useful when you want a different retry posture for one specific operation without re-configuring the client. The billing-aware classification still applies inside the block: raising `max_attempts` never makes the SDK resend a paid generation request after it may have been received.
 
 This is at the `aiohttp` middleware layer — orthogonal to (and stackable with) your own application-level retry wrapper above. You typically don't need both; pick one.
 

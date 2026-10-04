@@ -100,73 +100,24 @@ from ..types.api import (
     StyleReference,
 )
 from ..types.api.requests.common import validate_anon_user_id
+from ..utils.errors import read_body
 from ..validation.validators import validate_model_id
 
 logger = logging.getLogger(__name__)
 
 
-async def _read_binary_response(response: Any, *, endpoint: str) -> bytes:
-    """Read raw image bytes from a binary HTTP response, with fallbacks.
+async def _read_binary_response(response: Any) -> bytes:
+    """Read the image bytes of a binary response.
 
-    aiohttp's ``content.read()`` occasionally returns empty bytes on the first
-    call — under proxies, certain aiohttp versions, or non-standard servers —
-    even though the body is present. This shared reader lets every binary image
-    endpoint (generate / edit / upscale / multi-edit) recover the bytes instead
-    of silently returning ``b""``.
-
-    Args:
-        response: The raw response object returned with ``raw_response=True``
-            (an ``aiohttp.ClientResponse``), already-read ``bytes``, or a
-            mock-like object exposing ``.content``.
-        endpoint: API path used for the fallback metric label.
-
-    Returns:
-        The response body as ``bytes``.
+    ``response.read()`` returns the whole body (or the body aiohttp already
+    holds), and :func:`~venice_ai.utils.errors.read_body` maps a stalled or
+    dropped transfer to :class:`~venice_ai.exceptions.APITimeoutError` /
+    :class:`~venice_ai.exceptions.APIConnectionError`. Already-read ``bytes``
+    (the multipart path) are returned as they are.
     """
     if isinstance(response, bytes):
         return response
-
-    if isinstance(response, aiohttp.ClientResponse):
-        content = await response.content.read()
-        if not content:
-            logger.warning(
-                "Image %s response: content.read() returned empty, trying fallback methods",
-                endpoint,
-            )
-            # Track fallback metrics
-            try:
-                from ..observability.metrics import get_enhanced_metrics
-
-                metrics = get_enhanced_metrics()
-                if metrics._enabled:
-                    metrics.streaming_fallback_total.labels(
-                        endpoint=endpoint, reason="empty_content_read"
-                    ).inc()
-            except Exception:
-                pass  # nosec B110
-
-            try:
-                # Try reading from the response directly.
-                content = await response.read()
-                logger.debug("response.read() fallback returned: %d bytes", len(content))
-            except Exception as e:
-                logger.debug("response.read() fallback failed: %s", e)
-                # Some HTTP client implementations buffer the body elsewhere.
-                content_attr = getattr(response, "_content", None)
-                if content_attr:
-                    content = content_attr
-                    logger.debug("Internal _content attribute fallback: %d bytes", len(content))
-        return content
-
-    # Mock-like or already-materialized responses.
-    if hasattr(response, "content"):
-        content_attr = response.content
-        if isinstance(content_attr, bytes):
-            return content_attr
-        if hasattr(content_attr, "read"):
-            return cast(bytes, await content_attr.read())
-
-    return cast(bytes, response)
+    return await read_body(response)
 
 
 if TYPE_CHECKING:
@@ -381,6 +332,7 @@ class Image(APIResource["VeniceClient"]):
         style_preset: str | None = None,
         width: int | None = None,
         anon_user_id: str | None = None,
+        timeout: float | aiohttp.ClientTimeout | None = None,
     ) -> ImageGenerationResponse: ...
 
     @overload
@@ -410,7 +362,38 @@ class Image(APIResource["VeniceClient"]):
         style_preset: str | None = None,
         width: int | None = None,
         anon_user_id: str | None = None,
+        timeout: float | aiohttp.ClientTimeout | None = None,
     ) -> bytes: ...
+
+    @overload
+    async def create(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        aspect_ratio: str | None = None,
+        cfg_scale: float | None = None,
+        embed_exif_metadata: bool | None = None,
+        enable_web_search: bool | None = None,
+        format: Literal["jpeg", "png", "webp"] | None = None,
+        height: int | None = None,
+        hide_watermark: bool | None = None,
+        lora_strength: int | None = None,
+        num_images: int | None = None,
+        quality: Literal["low", "medium", "high"] | None = None,
+        enhance_prompt: bool | None = None,
+        disable_prompt_optimization_thinking: bool | None = None,
+        style_references: list[StyleReference | dict] | None = None,
+        resolution: str | None = None,
+        return_binary: bool | None,
+        safe_mode: bool | None = None,
+        seed: int | None = None,
+        steps: int | None = None,
+        style_preset: str | None = None,
+        width: int | None = None,
+        anon_user_id: str | None = None,
+        timeout: float | aiohttp.ClientTimeout | None = None,
+    ) -> ImageGenerationResponse | bytes: ...
 
     async def create(
         self,
@@ -570,7 +553,7 @@ class Image(APIResource["VeniceClient"]):
             logger.debug(f"Response type: {type(response)}")
             logger.debug(f"Response: {response!r}")
 
-            return await _read_binary_response(response, endpoint="image/generate")
+            return await _read_binary_response(response)
         else:
             response = await self._client.post(
                 "image/generate",
@@ -781,9 +764,8 @@ class Image(APIResource["VeniceClient"]):
             timeout=timeout,
         )
 
-        # The multipart helper returns already-read bytes in the normal case; the
-        # shared reader also recovers the body when the first read comes back empty.
-        return await _read_binary_response(response_content, endpoint="image/upscale")
+        # The multipart helper reads the body under the same error mapping.
+        return await _read_binary_response(response_content)
 
     async def list_styles(self) -> ImageStylesResponse:
         """
@@ -958,7 +940,7 @@ class Image(APIResource["VeniceClient"]):
             timeout=timeout,
         )
 
-        return await _read_binary_response(response, endpoint="image/edit")
+        return await _read_binary_response(response)
 
     def _is_url(self, value: str) -> bool:
         """Check if a string value is an HTTP/HTTPS URL."""
@@ -1118,13 +1100,7 @@ class Image(APIResource["VeniceClient"]):
         else:
             raise ValueError("Either 'image' or 'image_url' must be provided")
 
-        if isinstance(response, bytes):
-            return response
-        elif isinstance(response, aiohttp.ClientResponse):
-            return await response.content.read()
-        if hasattr(response, "content"):
-            return cast(bytes, response.content)  # pyright: ignore[reportAttributeAccessIssue]  # hasattr narrowing not propagated
-        return cast(bytes, response)
+        return await _read_binary_response(response)
 
     async def multi_edit(
         self,
@@ -1273,7 +1249,7 @@ class Image(APIResource["VeniceClient"]):
             raw_response=True,
         )
 
-        return await _read_binary_response(response, endpoint="image/multi-edit")
+        return await _read_binary_response(response)
 
     async def simple_generate(
         self,

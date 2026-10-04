@@ -49,17 +49,19 @@ class HttpClientConfig(BaseModel):
 
     # Retry configuration
     max_retries: int = Field(
-        default=3,
+        default=2,
         ge=0,
         description="Retries after the first attempt for a retryable failure "
-        "(``0`` disables retries).",
+        "(``0`` disables retries). Which failures are retryable depends on the "
+        "request; see :mod:`venice_ai.middleware.retry`.",
     )
 
     retry_backoff_factor: float = Field(
         default=2.0,
         ge=1.0,
         description="Exponential base of the retry backoff: the delay before the k-th "
-        "retry (counting from 0) is ``1s * retry_backoff_factor ** k``, capped and jittered.",
+        "retry (counting from 0) is ``0.5s * retry_backoff_factor ** k``, capped at 8s "
+        "and jittered.",
     )
 
     # Headers

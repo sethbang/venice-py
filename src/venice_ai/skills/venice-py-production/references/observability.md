@@ -33,7 +33,7 @@ Six fields: model, three token counts, balance, request_id. With those, you can 
 |---|---|---|
 | `model` | `kwargs["model"]` (or `response.model`) | Per-model spend / latency aggregation |
 | `prompt_tokens` / `completion_tokens` / `total_tokens` | `response.usage.*` | Token-budget tracking, cost attribution |
-| `balance_usd` | `response.balance_info.usd` | Real-time prepaid-ledger monitoring |
+| `balance_usd` | `response.balance_info.usd` | What the key can still spend (before this call): the lesser of the account balance and the key's remaining consumption limit |
 | `request_id` | `response.headers["x-request-id"]` | Correlate with Venice's server logs |
 | `deprecated` | `response.deprecation_info.is_deprecated` | Alert on model retirement |
 | `latency_ms` | wrap with timing | SLO / dashboard input |
@@ -143,17 +143,17 @@ Pair with `client.models.resolve_*()` so the migration is automatic — when the
 
 ## Balance / spend monitoring
 
-For prepaid (x402) accounts:
+`response.balance_info.usd` is what the calling key can still spend: the lesser of the account balance and what remains under the key's consumption limit, read before the request was processed. Alert on it to catch either running out:
 
 ```python
 if response.balance_info and response.balance_info.usd is not None:
     if response.balance_info.usd < CRITICAL_BALANCE_USD:
-        alert.page(f"Venice prepaid balance critical: ${response.balance_info.usd}")
+        alert.page(f"Venice key can spend only ${response.balance_info.usd}")
     elif response.balance_info.usd < WARN_BALANCE_USD:
         log.warning("venice.balance_low", balance_usd=response.balance_info.usd)
 ```
 
-For API-key (postpaid) accounts: `balance_info` is typically `None`. Use `CostTracker` + `BudgetManager` instead (see `cost-tracking.md`).
+A low value can mean the key's limit is nearly used up while the account still has funds; check `client.billing.get_balance()` for the account itself. For per-call spend and budgets, use `CostTracker` + `BudgetManager` (see `cost-tracking.md`).
 
 ## Request-ID correlation
 

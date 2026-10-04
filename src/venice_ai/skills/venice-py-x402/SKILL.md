@@ -94,7 +94,7 @@ That's the entire mode-2 chat flow on SDK ≥ 2.0.0. The SDK signs a fresh SIWE 
 
 Things to know:
 - The wallet must have non-zero prepaid balance — see Mode 3 for `client.x402.top_up_with(...)`.
-- Each chat / image / etc. call debits the ledger at Venice's posted rates. Monitor with `client.x402.balance(auth=auth)` or `response.balance_info.usd`.
+- Each chat / image / etc. call debits the ledger at Venice's posted rates. Monitor with `client.x402.balance(auth=auth)` or `response.x402_balance_remaining` (the `X-Balance-Remaining` header Venice sends on wallet-authenticated requests).
 - When both `api_key=` and `auth=` are passed to `VeniceClient`, the API key wins for default Bearer auth; the auth instance is retained for explicit per-call `auth=` kwargs (e.g., `client.x402.balance(auth=auth)`).
 - Per-call `headers={"X-Sign-In-With-X": ...}` overrides the default envelope if you need to sign one yourself (rare).
 

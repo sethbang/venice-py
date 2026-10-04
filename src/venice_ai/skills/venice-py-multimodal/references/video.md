@@ -13,7 +13,11 @@ from venice_ai import VeniceClient
 async def make_clip(prompt: str, out_path: Path) -> Path:
     async with VeniceClient() as client:
         async with await client.video.run(           # NOTE: `await` BEFORE `async with`
-            model=await client.models.resolve_video(video_type="text-to-video"),
+            model=await client.models.resolve_video(
+                video_type="text-to-video",
+                require_duration="5s",                # model must offer exactly this length
+                require_resolution="1080p",           # ...and this resolution tier
+            ),
             prompt=prompt,
             duration_seconds="5s",                            # str — "5s", "10s", etc.
             resolution="1080p",                       # str | None
@@ -35,7 +39,7 @@ async def make_clip(prompt: str, out_path: Path) -> Path:
 await client.video.run(
     model=...,                                  # str — required
     prompt=...,                                 # str | None — required by generation models; upscale takes none
-    duration_seconds="5s",                      # int | str — required (5, "5", "5s", "5 seconds")
+    duration_seconds="5s",                      # int | str | None — required by generation models (5, "5", "5s", "5 seconds"); omit for upscale / video-to-video
     negative_prompt=None,                       # str | None — what to avoid
     resolution=None,                            # str | None — "720p", "1080p", "4k"
     audio=None,                                 # bool | None — include audio track
@@ -54,6 +58,10 @@ await client.video.run(
 
 **`duration_seconds`, not `duration`.** The kwarg is `duration_seconds` (int or
 str); `duration="5s"` raises `TypeError: unexpected keyword argument 'duration'`.
+Leave it out for upscale and other video-to-video models (their catalog
+`durations` is `["Auto"]`): the length comes from `video_url` and no duration is
+sent. For a generation model that lists numeric durations, leaving it out raises
+`ValueError` before the request is sent.
 
 Most parameters are model-dependent — `seedance-1-5-pro-image-to-video` accepts `image_url`, `seedream-1-pro-text-to-video` accepts `prompt`, an upscale model accepts `video_url` + `upscale_factor`. Check the model's metadata via `client.models.list(type="video")` to see what each accepts.
 
@@ -61,7 +69,9 @@ Most parameters are model-dependent — `seedance-1-5-pro-image-to-video` accept
 
 ```python
 async with await client.video.run(
-    model=await client.models.resolve_video(video_type="text-to-video"),
+    model=await client.models.resolve_video(
+        video_type="text-to-video", require_duration="5s", require_resolution="1080p"
+    ),
     prompt="A jellyfish drifting through neon kelp at midnight, photorealistic",
     duration_seconds="5s",
     resolution="1080p",
@@ -75,7 +85,7 @@ async with await client.video.run(
 ```python
 # 1. Generate or have a seed image
 image_resp = await client.image.create(
-    model=await client.models.resolve_image(),
+    model=await client.models.resolve_image(require_custom_size=True),  # takes width/height
     prompt="A jellyfish drifting through neon kelp",
     width=1024, height=1024,
 )
@@ -98,6 +108,8 @@ async with await client.video.run(
     await job.download(Path("clip.mp4"), status)
 ```
 
+`video_type="image-to-video"` resolves a plain image-to-video model, one that animates the start image. Venice types reference-to-video (R2V), transition, first/last-frame and multi-angle models `image-to-video` too, and they need other inputs; ask for them with `input_mode="reference"`, `"transition"`, `"first_last_frame"` or `"multi_angle"` on `resolve_video()` / `resolve_cheapest_video()`.
+
 You can also pass a public HTTPS URL for `image_url` if the image is hosted somewhere Venice can reach.
 
 ## Upscaling existing video
@@ -107,7 +119,6 @@ async with await client.video.run(
     model=await client.models.resolve_video_upscale(),
     video_url="https://example.com/source.mp4",   # or a data: URL
     upscale_factor=2,                              # 2× or 4×
-    duration_seconds="5s",
 ) as job:
     status = await job.wait()
     await job.download(Path("upscaled.mp4"), status)
@@ -147,18 +158,17 @@ For automatic cheapest-model selection across all candidates:
 
 ```python
 result = await client.models.resolve_cheapest_video(
-    duration="5s",
     video_type="text-to-video",
-    resolution="1080p",
     exclude_beta=True,
 )
 print(f"Cheapest: {result.model} at ${result.quote_usd}")
-print("All quotes:")
-for model_id, price in result.all_quotes.items():   # dict[str, float] — model ID -> USD price
-    print(f"  {model_id}: ${price}")
+print(f"Quoted with: {result.request_params}")     # duration_seconds, resolution, aspect_ratio, audio
+job = await client.video.submit(model=result.model, prompt="...", **result.request_params)
 ```
 
-`resolve_cheapest_video` issues N quote calls (one per candidate) — cheap but not free; cache the result.
+Each candidate is quoted at its own cheapest valid request (shortest listed duration, lowest listed resolution, 16:9 when listed, `audio=False` where configurable), so models without a 5-second clip are still compared. Pass `duration=` or `resolution=` to pin one; models that don't list it are skipped. `result.all_quotes` maps every quoted model to its USD price and `result.skipped` says why any candidate was left out. `cheapest_video_params(constraints)` from `venice_ai.models.selection` builds the same request for a model you picked yourself.
+
+`resolve_cheapest_video` issues one quote call per candidate (at most 8 at once). Quotes are free, but cache the result rather than calling it in a loop.
 
 ## Multi-shot composition (`elements` and `scene_image_urls`)
 
@@ -232,10 +242,31 @@ async with await client.video.run(
 
 ## Releasing storage (`cancel`)
 
-`cancel()` wraps `/video/complete`: it deletes the job's stored media and queue
-entry (best effort). It does **not** stop a generation that is still running;
-that job keeps going on the server and is billed. The `async with` block calls it
-on exit, and logs a WARNING if you leave before the job reached a terminal status.
+`job.cancel()` deletes a finished job's stored video (best effort). It does
+**not** stop a generation that is still running: that job keeps going on the
+server, is billed, and its video is stored when it finishes, so a call made
+before then deletes nothing.
+
+What it deletes depends on the model:
+
+- **Inline or `url` models**: it calls `/video/complete`, which deletes the
+  stored media and queue entry.
+- **Models whose queue response carries a `download_url`**: the file lives
+  behind that link for up to 24 hours, and `/video/complete` answers 400
+  "Request ID is invalid" for the job whether it is running or finished.
+  `job.cancel()` first sends `DELETE` to the `download_url` without the API key
+  (the link authorizes itself; a 404 means it is already gone), then calls
+  `/video/complete` and accepts that 400. The link is never logged.
+
+The resource-level `client.video.cancel(model=..., queue_id=...)` only calls
+`/video/complete`, so for a `download_url` job either use `job.cancel()` or
+send the `DELETE` to the link yourself.
+
+The `async with` block calls `job.cancel()` on a clean exit once the job has
+finished. Leaving cleanly before that sends nothing and logs a WARNING naming
+the `queue_id`: call `wait()` again, save the video, then `cancel()`. If the
+block raises, it releases nothing (so the video can still be saved) and the
+WARNING names the `queue_id`. A failed or rejected job is released either way.
 
 ```python
 async with await client.video.run(...) as job:

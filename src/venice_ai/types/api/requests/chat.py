@@ -242,28 +242,32 @@ class ChatCompletionRequest(BaseModel):
 
     # Sampling parameters
     frequency_penalty: float | None = Field(
-        None, ge=-2.0, le=2.0, description="Frequency penalty for token repetition"
+        default=None, ge=-2.0, le=2.0, description="Frequency penalty for token repetition"
     )
     presence_penalty: float | None = Field(
-        None, ge=-2.0, le=2.0, description="Presence penalty for new topics"
+        default=None, ge=-2.0, le=2.0, description="Presence penalty for new topics"
     )
     repetition_penalty: float | None = Field(
-        None, ge=0, description="Repetition penalty (1.0 = no penalty)"
+        default=None, ge=0, description="Repetition penalty (1.0 = no penalty)"
     )
-    temperature: float | None = Field(None, ge=0, le=2, description="Sampling temperature")
-    top_p: float | None = Field(None, ge=0, le=1, description="Nucleus sampling probability mass")
-    top_k: int | None = Field(None, ge=0, description="Top-k sampling limit")
-    min_p: float | None = Field(None, ge=0, le=1, description="Minimum probability threshold")
+    temperature: float | None = Field(default=None, ge=0, le=2, description="Sampling temperature")
+    top_p: float | None = Field(
+        default=None, ge=0, le=1, description="Nucleus sampling probability mass"
+    )
+    top_k: int | None = Field(default=None, ge=0, description="Top-k sampling limit")
+    min_p: float | None = Field(
+        default=None, ge=0, le=1, description="Minimum probability threshold"
+    )
     min_temp: float | None = Field(
-        None, ge=0, le=2, description="Minimum temperature for dynamic scaling"
+        default=None, ge=0, le=2, description="Minimum temperature for dynamic scaling"
     )
     max_temp: float | None = Field(
-        None, ge=0, le=2, description="Maximum temperature for dynamic scaling"
+        default=None, ge=0, le=2, description="Maximum temperature for dynamic scaling"
     )
 
     # Generation control
     max_completion_tokens: int | None = Field(
-        None,
+        default=None,
         description=(
             "Maximum completion tokens to generate. On reasoning-capable models "
             "this caps TOTAL completion tokens (visible output + reasoning), not "
@@ -271,25 +275,31 @@ class ChatCompletionRequest(BaseModel):
             "is removed in v2; passing it raises TypeError.)"
         ),
     )
-    n: int | None = Field(1, description="Number of completions to generate")
-    seed: int | None = Field(None, gt=0, description="Random seed for reproducibility")
-    stop: str | list[str] | None = Field(None, description="Stop sequences (up to 4)")
-    stop_token_ids: list[int] | None = Field(None, description="Stop token IDs")
+    n: int | None = Field(default=1, description="Number of completions to generate")
+    seed: int | None = Field(default=None, gt=0, description="Random seed for reproducibility")
+    stop: str | list[str] | None = Field(default=None, description="Stop sequences (up to 4)")
+    stop_token_ids: list[int] | None = Field(default=None, description="Stop token IDs")
 
     # Advanced features
-    stream: bool | None = Field(False, description="Stream partial progress")
-    stream_options: StreamOptions | None = Field(None, description="Stream configuration")
-    logprobs: bool | None = Field(None, description="Include log probabilities")
-    top_logprobs: int | None = Field(None, ge=0, description="Number of top logprobs to return")
+    stream: bool | None = Field(default=False, description="Stream partial progress")
+    stream_options: StreamOptions | None = Field(default=None, description="Stream configuration")
+    logprobs: bool | None = Field(default=None, description="Include log probabilities")
+    top_logprobs: int | None = Field(
+        default=None, ge=0, description="Number of top logprobs to return"
+    )
 
     # Tools and functions
-    tools: list[Tool] | None = Field(None, description="Available tools")
-    tool_choice: str | SpecificToolChoice | None = Field(None, description="Tool choice control")
-    parallel_tool_calls: bool | None = Field(None, description="Enable parallel function calling")
+    tools: list[Tool] | None = Field(default=None, description="Available tools")
+    tool_choice: str | SpecificToolChoice | None = Field(
+        default=None, description="Tool choice control"
+    )
+    parallel_tool_calls: bool | None = Field(
+        default=None, description="Enable parallel function calling"
+    )
 
     # Response format
     response_format: JSONSchemaFormat | JSONObjectFormat | TextResponseFormat | None = Field(
-        None,
+        default=None,
         description=(
             "Response format specification. One of ``json_schema``, ``json_object``, or ``text``."
         ),
@@ -322,36 +332,36 @@ class ChatCompletionRequest(BaseModel):
 
     # Venice-specific
     venice_parameters: VeniceParameters | None = Field(
-        None, description="Venice-specific parameters"
+        default=None, description="Venice-specific parameters"
     )
 
     # OpenAI-compatible passthrough fields. The Venice API proxies these to
     # the underlying model without SDK-side interpretation.
     store: bool | None = Field(
-        None,
+        default=None,
         description="OpenAI-compat: whether to store the completion on the provider side.",
     )
     text: dict[str, Any] | None = Field(
-        None,
+        default=None,
         description='OpenAI-compat text configuration (e.g. ``{"verbosity": "low"}``).',
     )
     include: list[str] | None = Field(
-        None,
+        default=None,
         description="OpenAI-compat ``include`` specifier (response-enrichment opt-ins).",
     )
     metadata: dict[str, Any] | None = Field(
-        None,
+        default=None,
         description="OpenAI-compat free-form metadata attached to the request.",
     )
     verbosity: Literal["low", "medium", "high", "auto"] | None = Field(
-        None,
+        default=None,
         description=(
             "Controls the verbosity of the text response (low/medium/high/auto). "
             "Distinct from the nested ``text.verbosity`` configuration."
         ),
     )
     fallbacks: list[dict[str, str]] | None = Field(
-        None,
+        default=None,
         description=(
             "Anthropic beta parameter for Claude Fable 5 server-side refusal "
             "fallback. Array of fallback model objects (max 10), e.g. "
@@ -361,7 +371,7 @@ class ChatCompletionRequest(BaseModel):
     )
 
     # Compatibility
-    user: str | None = Field(None, description="User identifier (compatibility, discarded)")
+    user: str | None = Field(default=None, description="User identifier (compatibility, discarded)")
 
     @field_validator("stop")
     @classmethod

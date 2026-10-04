@@ -306,6 +306,7 @@ class TestEstimateCompletionCost:
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
             include_venice_system_prompt=False,
+            template_overhead_tokens=0,
         )
 
         # Expected calculation:
@@ -346,6 +347,7 @@ class TestEstimateCompletionCost:
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
             include_venice_system_prompt=False,
+            template_overhead_tokens=0,
         )
 
         # Only completion tokens should contribute to cost
@@ -368,6 +370,7 @@ class TestEstimateCompletionCost:
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
             include_venice_system_prompt=False,
+            template_overhead_tokens=0,
         )
 
         # 1 word * 1.3 = 1.3 -> 1 token (int conversion)
@@ -392,6 +395,7 @@ class TestEstimateCompletionCost:
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
             include_venice_system_prompt=False,
+            template_overhead_tokens=0,
         )
 
         # Only prompt tokens should contribute
@@ -418,6 +422,7 @@ class TestEstimateCompletionCost:
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
             include_venice_system_prompt=False,
+            template_overhead_tokens=0,
         )
 
         assert result["usd"] == Decimal("0.00")
@@ -439,6 +444,7 @@ class TestEstimateCompletionCost:
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
             include_venice_system_prompt=False,
+            template_overhead_tokens=0,
         )
 
         # Only input cost should be calculated
@@ -462,8 +468,11 @@ class TestEstimateCompletionCost:
             prompt="Test prompt", estimated_completion_tokens=0, model_pricing=pricing
         )
 
+        from venice_ai.costs import CHAT_MESSAGE_TOKEN_ALLOWANCE, CHAT_TEMPLATE_TOKEN_ALLOWANCE
+
         million = Decimal("1000000")
-        expected_usd = (Decimal(2) / million) * Decimal("5.0") + (
+        template = CHAT_TEMPLATE_TOKEN_ALLOWANCE + CHAT_MESSAGE_TOKEN_ALLOWANCE
+        expected_usd = (Decimal(2 + template) / million) * Decimal("5.0") + (
             Decimal(VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE) / million
         ) * Decimal("0.5")
         assert result["usd"] == expected_usd
@@ -518,6 +527,7 @@ class TestCostCalculationConsistency:
             estimated_completion_tokens=estimated_completion_tokens,
             model_pricing=pricing,
             include_venice_system_prompt=False,
+            template_overhead_tokens=0,
         )
 
         # Expected: input (1/1M * $1) + output (1M/1M * $3) = $0.000001 + $3 = ~$3

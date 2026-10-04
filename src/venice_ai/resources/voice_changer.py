@@ -31,6 +31,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
+import aiohttp
+
 from .._resource import APIResource
 from ..exceptions import InvalidRequestError
 from ..types.api.requests.voice_changer import (
@@ -47,7 +49,9 @@ from ..types.api.voice_changer import (
     VoiceChangerQuoteResponse,
     VoiceChangerRetrieveResponse,
 )
+from ..utils.errors import read_body
 from ..validation.validators import validate_model_id
+from ._inline_audio import read_inline_audio
 
 if TYPE_CHECKING:
     from .._client import VeniceClient  # noqa: F401
@@ -58,7 +62,8 @@ logger = logging.getLogger(__name__)
 class VoiceChangerJob:
     """Manages the lifecycle of an async voice-conversion request.
 
-    Use as an async context manager to guarantee server-side cleanup::
+    Use as an async context manager to release the media on a clean exit (an
+    exception in the block leaves it retrievable; see :meth:`__aexit__`)::
 
         async with VeniceClient() as client:
             model = await client.models.resolve_voice_changer()
@@ -83,6 +88,9 @@ class VoiceChangerJob:
         self.duration_seconds: float = queue_response.duration_seconds
         self._client = client
         self._status: VoiceChangerRetrieveResponse | None = None
+        # Set once cancel() succeeds on a finished conversion, so a clean exit
+        # does not release twice.
+        self._released = False
 
     async def __aenter__(self) -> VoiceChangerJob:
         return self
@@ -93,11 +101,39 @@ class VoiceChangerJob:
         _exc_val: BaseException | None,
         _exc_tb: object,
     ) -> None:
-        """Guarantee server-side cleanup on exit. Mirrors :class:`MusicJob`."""
+        """Release the provider-held media on a clean exit.
+
+        The media is released only when the block exits without an exception.
+        If the block raised (a failed save, a cancelled task), nothing is
+        released and a WARNING names the ``queue_id``: the conversion was
+        already billed, and the converted audio stays retrievable. Resume with
+        ``client.voice_changer.retrieve(model=..., queue_id=...)``, save the
+        audio, then call ``client.voice_changer.cancel(model=..., queue_id=...)``.
+        Call :meth:`cancel` inside the block to discard the audio on purpose;
+        a job already released that way is left alone on exit, whichever way
+        the block exits.
+        """
+        if self._released:
+            return
+        if exc_type is not None:
+            logger.warning(
+                "VoiceChangerJob queue_id=%s (model %s) left its context with %s, so its "
+                "media was not released. The conversion is billed; to keep the audio, call "
+                "client.voice_changer.retrieve(model=%r, queue_id=%r) and save it, then "
+                "client.voice_changer.cancel(model=%r, queue_id=%r).",
+                self.queue_id,
+                self.model,
+                exc_type.__name__,
+                self.model,
+                self.queue_id,
+                self.model,
+                self.queue_id,
+            )
+            return
         try:
             await self.cancel()
         except InvalidRequestError as e:
-            # The media is already gone — either the conversion completed with
+            # The media is already gone: the conversion completed with
             # delete_media_on_completion=True, or cleanup already ran. Not
             # worth a warning on every successful job.
             logger.debug(
@@ -106,18 +142,7 @@ class VoiceChangerJob:
                 e,
             )
         except Exception as e:
-            if exc_type is None:
-                logger.warning(
-                    "VoiceChangerJob cleanup failed for queue_id=%s: %s", self.queue_id, e
-                )
-            else:
-                logger.warning(
-                    "VoiceChangerJob cleanup failed during exception handling "
-                    "(queue_id=%s, original=%s): %s",
-                    self.queue_id,
-                    exc_type.__name__,
-                    e,
-                )
+            logger.warning("VoiceChangerJob cleanup failed for queue_id=%s: %s", self.queue_id, e)
 
     @property
     def status(self) -> VoiceChangerRetrieveResponse | None:
@@ -219,8 +244,24 @@ class VoiceChangerJob:
         return path
 
     async def cancel(self) -> VoiceChangerCompleteResponse:
-        """Release the provider-held media for this conversion."""
-        return await self._client.voice_changer.cancel(model=self.model, queue_id=self.queue_id)
+        """Release the provider-held media for this conversion.
+
+        Wraps ``POST /audio/voice-changer/complete``, which Venice documents
+        for a finished conversion, once its audio has been retrieved; it is
+        safe to call more than once. It does not un-bill a conversion: the
+        charge is taken when the job is queued. Only a successful call made
+        after :meth:`wait` (or :meth:`poll`) has returned the converted audio
+        marks the job released; leaving the ``async with`` block then does not
+        release it again. A call made earlier leaves the exit-time release in
+        place.
+        """
+        result = await self._client.voice_changer.cancel(model=self.model, queue_id=self.queue_id)
+        # The endpoint is documented for a finished conversion. A release sent
+        # before the audio arrived may leave media behind, so the exit-time
+        # release stays in place; a repeat release is harmless.
+        if result.success and self.is_complete:
+            self._released = True
+        return result
 
 
 class VoiceChanger(APIResource["VeniceClient"]):
@@ -363,7 +404,11 @@ class VoiceChanger(APIResource["VeniceClient"]):
         rather than by a status field:
 
         * ``application/json`` with ``status: "PROCESSING"`` — still running.
-        * ``audio/mpeg`` — the converted audio, returned inline.
+        * an audio body (``audio/mpeg`` per the API spec) — the converted
+          audio, returned inline. ``application/octet-stream`` is accepted
+          when the bytes are a known audio container. The completed status
+          carries the media type as ``content_type`` and the file extension
+          as ``audio_format``.
 
         Args:
             model: The model running the conversion.
@@ -385,6 +430,8 @@ class VoiceChanger(APIResource["VeniceClient"]):
                 parsed JSON body is on the exception, and it is not modelled
                 as a typed field because no voice-changer model exists to
                 provoke the response and confirm its shape.
+            APIResponseProcessingError: If a non-JSON body is empty or not
+                audio.
             ValueError: If the response is neither recognised shape.
         """
         validate_model_id(model, "model")
@@ -409,31 +456,32 @@ class VoiceChanger(APIResource["VeniceClient"]):
         )
 
         if "application/json" not in content_type:
-            logger.info(
-                "voice_changer.retrieve returned non-JSON content-type %r — "
-                "reading completed audio (%s bytes declared).",
-                content_type,
-                raw_response.content_length,
+            media_type, audio_bytes = await read_inline_audio(
+                raw_response, content_type, operation="voice_changer.retrieve"
             )
-            audio_bytes = await raw_response.read()
-            raw_response.close()
-            result = VoiceChangerCompletedStatus.model_validate({"status": "COMPLETED"})
+            logger.info(
+                "voice_changer.retrieve returned COMPLETED %s audio (%d bytes).",
+                media_type,
+                len(audio_bytes),
+            )
+            result = VoiceChangerCompletedStatus.model_validate(
+                {"status": "COMPLETED", "content_type": media_type}
+            )
             result._set_data(audio_bytes)
             return result
 
+        # Read under the transport-error mapping, then parse: a stalled body
+        # is an APITimeoutError, and a body that is not JSON is a parse error.
+        body_bytes = await read_body(raw_response)
         try:
             response_data = await raw_response.json()
-        except Exception as e:
-            try:
-                body_preview = await raw_response.text()
-            except Exception:
-                body_preview = "<unable to read body>"
+        except (aiohttp.ContentTypeError, ValueError) as e:
             logger.error(
                 "Failed to parse JSON from voice_changer.retrieve response: %s. "
                 "Content-Type: %r, Body preview: %.500s",
                 e,
                 content_type,
-                body_preview,
+                body_bytes[:500].decode("utf-8", errors="replace"),
             )
             raise
 

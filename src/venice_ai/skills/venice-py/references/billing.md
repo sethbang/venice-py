@@ -26,7 +26,7 @@ if balance.balances:
     print(f"DIEM: {balance.balances.diem}")
 ```
 
-`balance_info` on response objects (`response.balance_info.usd`) is a *different* shape — that one is flat and represents the post-call remaining balance, sourced from response headers. Don't confuse them.
+`balance_info` on response objects (`response.balance_info.usd`) is a *different* value — that one is flat, sourced from response headers, and reports what the calling API key can still spend: the lesser of the account balance and what remains under the key's consumption limit, before the request was processed. `get_balance()` is the account's balance. Don't confuse them.
 
 ## `get_usage_history` — cursor-paginated per-call usage records
 
@@ -49,9 +49,27 @@ if page.nextCursor:
     page = await client.billing.get_usage_history(cursor=page.nextCursor)
 ```
 
-Set `format=BillingFormatEnum.CSV` to receive raw bytes instead of the typed object — handy for dumping straight to a file (the next-page token then rides in the `x-next-cursor` response header rather than the body).
+Set `format=BillingFormatEnum.CSV` to receive the page as a CSV document instead:
 
-Billing endpoints can be slow; the SDK wraps each request in a 10-second timeout that surfaces as `BillingTimeoutError` — widen the range and retry.
+```python
+csv_page = await client.billing.get_usage_history(format=BillingFormatEnum.CSV, startTimestamp="2026-04-01T00:00:00Z")
+# BillingUsageHistoryCsvPage:
+#   csv_page.content    : bytes        ← one complete CSV document, header row included
+#   csv_page.text       : str          ← content decoded as UTF-8
+#   csv_page.nextCursor : str | None   ← from the x-next-cursor header; None on the last page
+#   csv_page.filename   : str | None   ← from Content-Disposition; ordering not guaranteed
+```
+
+To export a whole window, `iter_usage_history_csv()` walks the cursor and yields one page at a time. Every page repeats the header row, so save each page as its own file or drop the header of every page after the first. Name or sort the files by their position in the walk: nothing guarantees that the server's `filename` values sort in walk order.
+
+```python
+index = 0
+async for csv_page in client.billing.iter_usage_history_csv(startTimestamp="2026-04-01T00:00:00Z"):
+    index += 1
+    Path(f"usage-{index:04d}.csv").write_bytes(csv_page.content)
+```
+
+Billing endpoints can be slow; the SDK gives each request -- the response and, for CSV, its body -- a 10-second deadline that surfaces as `BillingTimeoutError`. The deadline wraps each page request on its own, so a longer range means more pages rather than more entries per page. To recover, lower the page size (`pageSize` / `page_size`), which is what sets the size of a page, and use a range of at least a day where data is known to exist: the endpoint can hang on ranges shorter than about 15 minutes or on filters that match nothing. An iterator has no resume handle, so restart the walk from the first page.
 
 For unbounded enumeration use the paginator helper, which threads the cursor for you:
 
@@ -59,6 +77,8 @@ For unbounded enumeration use the paginator helper, which threads the cursor for
 async for entry in client.billing.iter_usage_history(currency="USD", page_size=1000):
     print(entry.timestamp, entry.amount, entry.sku)
 ```
+
+`currency="USD"` returns only entries paid in USD. Spend paid from bundled credits is in the `"BUNDLED_CREDITS"` entries, so a USD-only walk understates what the account spent in USD terms. To reconcile against analytics, walk `currency="USD"` and `currency="BUNDLED_CREDITS"` and add their debits; `currency=None` also returns DIEM and refund entries.
 
 ## `get_usage_analytics` — beta aggregate dashboard
 
@@ -72,17 +92,19 @@ analytics = await client.billing.get_usage_analytics(
 
 This wraps a **beta** endpoint — schema and behavior may change. Returns aggregates by date, model, and API key. Source: `Billing.get_usage_analytics` in `src/venice_ai/resources/billing.py`.
 
+The USD figures (`byDate[].USD`, `byModel[].totalUsd`, `byKey[].totalUsd`) are **gross USD-denominated spend**: USD debits plus bundled-credit debits counted at their USD value, with refunds not netted out. They match the usage ledger only when you add the debits in the `"USD"` and `"BUNDLED_CREDITS"` entries together and leave refunds out.
+
 ## When to read which method
 
 - **`get_balance`** — pre-flight check before a long batch ("do we have headroom?"). Cheap (one call). Don't poll it tightly; the value moves with every paid response.
-- **`response.balance_info`** — post-call balance from response headers. Free (no extra request) but only present when the server emits the header (typically prepaid accounts). Use this for a running tally during a session.
+- **`response.balance_info`** — what the calling key could spend before the request, from response headers. Free (no extra request). Capped by the key's consumption limit, so it can be far below the account balance. Use this for a running tally of the key's spend during a session.
 - **`get_usage_history` / `iter_usage_history`** — historical reconciliation, per-call audit, generating invoices. Heavier — walk the cursor.
 - **`get_usage_analytics`** — dashboards. Beta.
 
 ## Pitfalls
 
 - **Reading `balance.usd`** instead of `balance.balances.usd` — the nesting is real.
-- **Polling `get_balance` after every call** — read `response.balance_info` instead; it's emitted on the same request.
+- **Polling `get_balance` after every call** — read `response.balance_info` instead; it's emitted on the same request. Remember it is the key's spendable amount, not the account balance.
 - **Resending filters with a cursor** on `get_usage_history` — a continuation carries the cursor alone; filters alongside it are rejected. The `iter_usage_history` helper handles this for you.
 - **Confusing this with x402** — different surface, different shape. `client.x402.balance(...)` returns a `data`-envelope shape (see `venice-py-x402/references/balance-and-topup.md`).
 

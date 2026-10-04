@@ -8,6 +8,7 @@ Learn how to securely handle and rotate API keys in production environments.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -15,7 +16,42 @@ from datetime import datetime
 from pathlib import Path
 
 from venice_ai import VeniceClient
-from venice_ai.types.api import UserMessage
+from venice_ai.exceptions import (
+    AuthenticationError,
+    NoMatchingModelError,
+    PermissionDeniedError,
+    VeniceError,
+)
+from venice_ai.types.api import UserMessage, VeniceParameters
+
+RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
+
+
+def key_fingerprint(key: str) -> str:
+    """Identify a key in logs without revealing it.
+
+    Every Venice key shares the same leading characters, so a prefix such as
+    ``key[:8]`` identifies nothing. A short hash of the whole key is unique per
+    key and safe to log.
+    """
+    return "sha256:" + hashlib.sha256(key.encode()).hexdigest()[:12]
+
+
+async def test_key(api_key: str) -> bool:
+    """Return True if Venice accepts ``api_key``.
+
+    The check must call an endpoint that requires authentication: ``/models``
+    is public, so listing models succeeds with any key at all. Reading the
+    key's rate limits is authenticated, free, and works for both admin and
+    inference keys. A 403 (``PermissionDeniedError``) also counts as a
+    rejection: a key that cannot pass the check is not rotated in.
+    """
+    async with VeniceClient(api_key=api_key) as client:
+        try:
+            await client.api_keys.get_rate_limits()
+        except (AuthenticationError, PermissionDeniedError):
+            return False
+    return True
 
 
 class SecureKeyManager:
@@ -64,7 +100,7 @@ class SecureKeyManager:
                 return None
 
             # Check file permissions (Unix-like systems)
-            if hasattr(os, "stat"):
+            if os.name == "posix":
                 stat_info = key_file.stat()
                 mode = stat_info.st_mode & 0o777
                 if mode != 0o600:
@@ -81,7 +117,7 @@ class SecureKeyManager:
             print(f"✅ API key loaded from file: {key_file}")
             return key
 
-        except Exception as e:
+        except OSError as e:
             print(f"❌ Failed to load key from file: {e}")
             return None
 
@@ -103,18 +139,22 @@ class SecureKeyManager:
         """Get the current API key."""
         return self._key
 
-    def rotate_key(self, new_key: str) -> bool:
+    async def rotate_key(self, new_key: str) -> bool:
         """
-        Rotate to a new API key.
+        Rotate to a new API key, keeping the current key unless the new one works.
 
         In production:
-        1. Validate new key
-        2. Test new key works
-        3. Update configuration
-        4. Invalidate old key
+        1. Validate the new key's format
+        2. Test the new key against the API
+        3. Swap it in and record the rotation for audit
+        4. Revoke the old key once every service uses the new one
         """
         if not self.validate_key(new_key):
-            print("❌ New key validation failed")
+            print("🛑 New key failed format validation; keeping the current key")
+            return False
+
+        if not await test_key(new_key):
+            print("🛑 Venice rejected the new key; keeping the current key")
             return False
 
         old_key = self._key
@@ -122,7 +162,8 @@ class SecureKeyManager:
         self._key_metadata.update(
             {
                 "rotated_at": datetime.now().isoformat(),
-                "previous_key_prefix": old_key[:8] if old_key else None,
+                "previous_key": key_fingerprint(old_key) if old_key else None,
+                "current_key": key_fingerprint(new_key),
             }
         )
 
@@ -159,7 +200,7 @@ async def environment_variable_pattern() -> bool:
 
     if key:
         print("✅ Key loaded successfully")
-        print(f"   Key prefix: {key[:8]}...")
+        print(f"   Key fingerprint: {key_fingerprint(key)}")
         print(f"   Metadata: {json.dumps(manager._key_metadata, indent=2)}")
     else:
         print("ℹ️  No key in environment (set VENICE_API_KEY to demonstrate)")
@@ -168,27 +209,35 @@ async def environment_variable_pattern() -> bool:
 
 
 async def key_rotation_pattern() -> bool:
-    """Demonstrate zero-downtime key rotation.
+    """Demonstrate key rotation, both accepted and refused.
 
-    Pure informational output — always returns ``True``.
+    First rotates to a key Venice accepts (the current key stands in for a
+    freshly created one), which must pass the live check and be swapped in.
+    Then loads a stand-in key that does not exist from a 0600 file; the live
+    check must reject it and the manager must keep the current key. Returns
+    ``False`` if either step behaves differently.
     """
     print("\n🔄 Key Rotation Pattern")
     print("-" * 40)
 
     print("✅ Production Key Rotation Strategy:")
     print()
-    print("1. Generate new API key in Venice AI dashboard")
+    print("1. Create the new key with client.api_keys.create(...) or in the dashboard")
+    print("   (see examples/api_keys/key_management.py)")
     print()
-    print("2. Test new key:")
+    print("2. Test the new key against an authenticated endpoint:")
     print("   ```python")
+    print("   from venice_ai.exceptions import AuthenticationError, PermissionDeniedError")
+    print()
     print("   async def test_key(api_key: str) -> bool:")
-    print("       try:")
-    print("           client = VeniceClient(api_key=api_key)")
-    print("           await client.models.list()  # Test call")
-    print("           return True")
-    print("       except AuthenticationError:")
-    print("           return False")
+    print("       async with VeniceClient(api_key=api_key) as client:")
+    print("           try:")
+    print("               await client.api_keys.get_rate_limits()")
+    print("           except (AuthenticationError, PermissionDeniedError):")
+    print("               return False")
+    print("       return True")
     print("   ```")
+    print("   Do not test with client.models.list(): /models is public and accepts any key.")
     print()
     print("3. Deploy new key with rollback capability:")
     print("   - Update environment variable")
@@ -196,11 +245,50 @@ async def key_rotation_pattern() -> bool:
     print("   - Monitor error rates")
     print("   - Keep old key active during transition")
     print()
-    print("4. Invalidate old key after confirmation:")
-    print("   - Verify all services using new key")
-    print("   - Disable old key in dashboard")
-    print("   - Document rotation in audit log")
+    print("4. Revoke the old key after confirmation:")
+    print("   - Verify all services use the new key")
+    print("   - Delete the old key (client.api_keys.delete) or disable it in the dashboard")
+    print("   - Record the rotation in your audit log")
 
+    manager = SecureKeyManager()
+    current = manager.load_key()
+    if not current:
+        print("\nℹ️  No key in environment (set VENICE_API_KEY to run the live rotation demo)")
+        return True
+
+    print("\n🧪 Live demo 1: rotating to a key Venice accepts")
+    print("   (the current key stands in for a newly created one)")
+    accepting = SecureKeyManager()
+    accepting.load_key()
+    accepted = await accepting.rotate_key(current)
+    rotated_at = accepting._key_metadata.get("rotated_at")
+    print(f"   Active key: {key_fingerprint(accepting.get_key() or '')}")
+    if not accepted or rotated_at is None or accepting.get_key() != current:
+        print("❌ A key Venice accepts was not rotated in")
+        return False
+    print(f"✅ Rotation accepted and recorded at {rotated_at}")
+
+    print("\n🧪 Live demo 2: rotating to a key Venice will reject")
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    key_file = RESULTS_DIR / "rotation_demo_key.txt"
+    key_file.write_text("venice-demo-key-that-does-not-exist-0000\n")
+    key_file.chmod(0o600)
+    try:
+        # A separate manager reads the candidate so the active key is untouched.
+        candidate = SecureKeyManager().load_from_file(key_file)
+    finally:
+        key_file.unlink()
+
+    if candidate is None:
+        return False
+
+    rotated = await manager.rotate_key(candidate)
+    still_current = manager.get_key() == current
+    print(f"   Active key: {key_fingerprint(manager.get_key() or '')}")
+    if rotated or not still_current:
+        print("❌ The rejected key was swapped in")
+        return False
+    print("✅ Rotation refused; the current key stayed active")
     return True
 
 
@@ -257,7 +345,7 @@ async def security_best_practices() -> bool:
 
     print("✅ Critical Security Rules:")
     print()
-    print("1. ❌ NEVER commit keys to version control")
+    print("1. 🚫 NEVER commit keys to version control")
     print("   - Add .env to .gitignore")
     print("   - Scan for accidentally committed keys")
     print("   - Use git-secrets or similar tools")
@@ -345,32 +433,34 @@ async def production_client_pattern() -> bool:
         print("ℹ️  No API key available — skipping live client demo")
         return True
 
-    # Production client with proper error handling
     try:
         async with VeniceClient(api_key=api_key) as client:
-            print("✅ Production client initialized")
-
-            # Validate key works
-            chat_model = await client.models.resolve_chat()
-
-            # Test request
+            chat_model = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
             response = await client.chat.completions.create(
                 model=chat_model,
-                messages=[UserMessage(content="Health check")],
-                max_completion_tokens=5,
+                messages=[UserMessage(content="Reply with the single word: ok")],
+                max_completion_tokens=60,
+                # Only this prompt is billed, not Venice's own system prompt.
+                venice_parameters=VeniceParameters(include_venice_system_prompt=False),
             )
-
-            print("✅ Client validated successfully")
-            print(f"   Model: {chat_model}")
-            print(f"   Response: {response.text}")
-
-    except Exception as e:
-        print(f"❌ Client initialization failed: {e}")
+    except NoMatchingModelError:
+        raise  # a missing model skips the example; see __main__
+    except VeniceError as e:
+        print(f"❌ Client health check failed: {type(e).__name__}: {e}")
         print("   Check API key validity")
         print("   Verify network connectivity")
         print("   Review error logs")
         return False
 
+    finish_reason = response.choices[0].finish_reason if response.choices else None
+    print("✅ Production client initialized and health check passed")
+    print(f"   Key: {key_fingerprint(api_key)}")
+    print(f"   Model: {chat_model}")
+    print(f"   Response: {response.text}")
+    print(f"   finish_reason: {finish_reason}")
+    if finish_reason == "length" or not (response.text or "").strip():
+        print("❌ Health-check reply was truncated or empty")
+        return False
     return True
 
 
@@ -419,6 +509,10 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n👋 Goodbye!")
         sys.exit(130)
-    except Exception as e:
-        print(f"\n❌ Error: {e}", file=sys.stderr)
+    except NoMatchingModelError as e:
+        # The catalog has no model of the kind this example needs.
+        print(f"SKIPPED: {e}")
+        sys.exit(77)
+    except (VeniceError, OSError) as e:
+        print(f"\n❌ {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

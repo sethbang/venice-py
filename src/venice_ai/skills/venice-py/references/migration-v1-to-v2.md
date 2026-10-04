@@ -54,7 +54,7 @@ In v1, several endpoints returned plain `TypedDict`s (subscript access). In v2 t
 
 - `audio.create_speech(...)` returns `AudioResponse` (raw bytes on `.content`, or use `.save(path)`), not raw `bytes`.
 - `api_keys.retrieve()` and `delete()` return typed models (`ApiKey`, `DeleteApiKeyResponse`), not dicts — read by attribute (`api_key.description`).
-- `billing.get_usage(...)` is now **`billing.get_usage_history(...)`** (the `/billing/usage` endpoint was deprecated upstream in favour of `/billing/usage-history`). It moved to cursor/keyset pagination: params renamed (`startDate`/`endDate` → `startTimestamp`/`endTimestamp`, `limit` → `pageSize`) and `page`/`sortOrder` are gone (the walk is always ascending). The response is `BillingUsageHistoryResponse` (`.data` + `.nextCursor`) instead of `.data` + `.pagination`. Walk every page with `iter_usage_history(...)`, which threads the cursor for you.
+- `billing.get_usage(...)` is now **`billing.get_usage_history(...)`** (the `/billing/usage` endpoint was deprecated upstream in favour of `/billing/usage-history`). It moved to cursor/keyset pagination: params renamed (`startDate`/`endDate` → `startTimestamp`/`endTimestamp`, `limit` → `pageSize`) and `page`/`sortOrder` are gone (the walk is always ascending). The response is `BillingUsageHistoryResponse` (`.data` + `.nextCursor`) instead of `.data` + `.pagination`. Walk every page with `iter_usage_history(...)`, which threads the cursor for you. With `format=BillingFormatEnum.CSV` it returns a `BillingUsageHistoryCsvPage` rather than `bytes`: the document is `.content` (`.text` decoded), the continuation token from the `x-next-cursor` header is `.nextCursor`, and `.filename` is the server's file name; `iter_usage_history_csv(...)` exports a whole window page by page.
 - `chat` and `characters` responses were already typed in v1 (unaffected).
 - `client.get_model_pricing(model_id)` is **removed**. Read pricing off the model entry instead: `(await client.models.get(model_id)).model_spec.pricing` (an `LLMModelPricing` for chat and embedding models; image/video/music specs carry their own pricing shapes). For a whole catalog, `CostTracker.from_client(client)` builds the `{model_id: pricing}` map in one call.
 
@@ -66,7 +66,7 @@ Per-resource type modules moved under `venice_ai.types.api`: `venice_ai.types.im
 
 Entirely new resources: `client.video`, `client.music`, `client.crypto`, `client.augment`, `client.x402`, `client.responses`, `client.tee`. New methods on existing resources: `audio.transcribe` / `audio.create_voice`, `api_keys.update`, `chat.completions.parse` / `stream` / `run_with_tools`. Plus capability-based model resolution (`client.models.resolve_*()` — use instead of hardcoded model IDs), a `venice-py` CLI, rate limiting, `client.gather([...], max_concurrency=N)`, response `.save()` / `.save_all()`, and real TEE client-side E2EE (`enable_e2ee` / `e2ee=True`) for confidential-compute models.
 
-The new async-job resources (`video`, `music`) use a consistent verb scheme — `submit()` (low-level), `run()` (high-level lifecycle manager via `async with`), `cancel()` (cleanup).
+The new async-job resources (`video`, `music`) use a consistent verb scheme — `submit()` (low-level), `run()` (high-level lifecycle manager via `async with`), and a cleanup verb that deletes stored output: `cancel()` on video, `release()` on music.
 
 ## Patterns the linter flags (not real v2 methods)
 

@@ -59,10 +59,18 @@ from venice_ai.core.models.common import (
 # ---------------------------------------------------------------------------
 
 ReasoningEffortLevel = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-"""Effort tier for reasoning-capable models.
+"""Effort tier requested from a reasoning-capable model.
 
-Mirrors the `/chat/completions` spec: higher levels allow more thinking tokens
-but cost more. ``"max"`` unlocks the full ceiling on supported models.
+The values mirror the ``/chat/completions`` spec. A tier is a request, and what
+it does depends on the model. A model's ``supportsReasoningEffort`` capability
+and its ``reasoningEffortOptions`` say which values the API accepts for it, not
+that a higher tier produces more reasoning tokens or costs more: some models
+scale their reasoning with the tier, some use about the same number of tokens
+at every tier, and some have used fewer at ``"high"`` than at ``"low"``. On
+models whose reasoning is mandatory, ``"none"`` and ``"minimal"`` may map to the
+lowest effort the model supports, and the reasoning tokens are still billed.
+Measure a model's usage at the tiers you plan to send rather than assuming an
+order.
 """
 
 ReasoningSummary = Literal["auto", "concise", "detailed"]
@@ -77,6 +85,14 @@ class ReasoningConfig(BaseModel):
     ``reasoning.effort`` when both are provided.
     """
 
+    enabled: bool | None = Field(
+        default=None,
+        description=(
+            "Turn reasoning on or off. ``False`` is Venice's recommended way to "
+            "disable reasoning on models that support it. Ignored when an effort "
+            "is given."
+        ),
+    )
     effort: ReasoningEffortLevel | None = Field(default=None, description="Reasoning effort tier")
     summary: ReasoningSummary | None = Field(
         default=None, description="Requested reasoning summary style"
@@ -91,8 +107,8 @@ class ReasoningConfig(BaseModel):
 class DateRangeParams(BaseModel):
     """Date range filtering parameters"""
 
-    startDate: datetime | None = Field(None, description="Start date")
-    endDate: datetime | None = Field(None, description="End date")
+    startDate: datetime | None = Field(default=None, description="Start date")
+    endDate: datetime | None = Field(default=None, description="End date")
 
     @field_validator("endDate")
     @classmethod

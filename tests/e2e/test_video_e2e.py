@@ -19,8 +19,8 @@ if a test fails, so a transient error never destroys a good one::
     VENICE_API_KEY=... VENICE_VCR_RECORD=all \\
         poetry run pytest tests/e2e/test_video_e2e.py
 
-Queueing a video costs real credit on every un-cassetted run, so the optional
-parameters below are derived at their cheapest supported setting.
+Queueing a video costs real credit on every un-cassetted run, so each test uses
+the cheapest model of its kind at the cheapest request that model accepts.
 
 ## Security Note
 
@@ -31,21 +31,26 @@ Cassettes are automatically scrubbed of sensitive data
 import asyncio
 import base64
 import os
+from dataclasses import dataclass
 from io import BytesIO
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from PIL import Image
 
-from venice_ai import create_test_venice_client
+from venice_ai import VideoInputMode, cheapest_video_params, create_test_venice_client
 from venice_ai.core.config import SchedulerMode
 from venice_ai.exceptions import (
     APIError,
     APIStatusError,
     InvalidRequestError,
+    ModelQuotesUnavailableError,
+    NoMatchingModelError,
     PaymentRequiredError,
     VeniceError,
 )
+from venice_ai.types.api.models import VideoModelConstraints
 from venice_ai.types.api.video import (
     VideoCompletedStatus,
     VideoCompleteResponse,
@@ -68,88 +73,121 @@ from venice_ai.types.api.video import (
 # cached for the whole session, it leaks into tests whose own cassette is
 # missing and which therefore talk to the live API. Resolving outside the
 # cassette keeps the model id and its advertised constraints consistent with the
-# API actually being called. An env var can still pin a specific model.
+# API actually being called. Each kind resolves to its cheapest model at that
+# model's cheapest valid request, since every un-cassetted queue bills real
+# credit. An env var can still pin a specific model; its request is then built
+# from the catalog constraints the same way.
 #
 # (A fixture would read better but cannot work here: async fixtures run on the
 # session event loop while test bodies run on a per-function loop, so an HTTP
 # call made during fixture setup binds the client's aiohttp session to the wrong
 # loop.)
 # ---------------------------------------------------------------------------
-_VIDEO_MODEL_CACHE: dict[str, str] = {}
+_VIDEO_PICKS: dict[str, "_VideoPick | _Unresolved"] = {}
+
+#: video_type -> (env var that pins a model, required image-to-video input mode).
+_VIDEO_KINDS: dict[str, tuple[str, VideoInputMode | None]] = {
+    "text-to-video": ("VENICE_E2E_VIDEO_T2V_MODEL", None),
+    "image-to-video": ("VENICE_E2E_VIDEO_I2V_MODEL", "image"),
+}
 
 
-async def _resolve_video_model(client, video_type: str, env_var: str) -> str:
-    """Resolve (and session-cache) a video model of ``video_type``; skip if none."""
-    if video_type not in _VIDEO_MODEL_CACHE:
-        override = os.environ.get(env_var)
-        if override:
-            _VIDEO_MODEL_CACHE[video_type] = override
-        else:
-            try:
-                _VIDEO_MODEL_CACHE[video_type] = await client.models.resolve_video(
-                    video_type=video_type
-                )
-            except (VeniceError, APIError) as exc:
-                pytest.skip(f"No {video_type} model available on this account: {exc}")
-    return _VIDEO_MODEL_CACHE[video_type]
+@dataclass(frozen=True)
+class _VideoPick:
+    """A video model and the cheapest request it accepts.
 
-
-async def _resolve_t2v(client) -> str:
-    return await _resolve_video_model(client, "text-to-video", "VENICE_E2E_VIDEO_T2V_MODEL")
-
-
-async def _resolve_i2v(client) -> str:
-    return await _resolve_video_model(client, "image-to-video", "VENICE_E2E_VIDEO_I2V_MODEL")
-
-
-def _resolution_rank(resolution: str) -> int:
-    """Approximate pixel height, so the cheapest advertised option can be picked.
-
-    Video pricing scales with resolution and these tests bill real credit on
-    every run, so "all optional params" populates ``resolution`` with the
-    smallest one the model offers rather than the first one listed. Venice
-    spells resolutions several ways: ``480p``/``768P`` (height), ``2K``/``4k``
-    (thousands), and ``2x``/``4x`` (upscale factors, which belong to upscale
-    models and are ranked last).
+    ``request_params`` holds the ``duration_seconds`` / ``resolution`` /
+    ``aspect_ratio`` / ``audio`` arguments, every one taken from values the
+    model lists, so no test carries a duration or resolution a model rejects.
+    ``quote_usd`` is the free quote for that request, or ``None`` when an env
+    var pinned the model and no ranking quote was taken.
     """
-    value = resolution.strip().lower()
-    digits = "".join(ch for ch in value if ch.isdigit())
-    if not digits:
-        return 1 << 30
-    number = int(digits)
-    if value.endswith("x"):
-        return 1 << 20  # upscale factor, not a height — never the cheap pick
-    if value.endswith("k"):
-        return number * 1000
-    return number
+
+    model: str
+    request_params: dict[str, Any]
+    quote_usd: float | None
 
 
-async def _optional_video_params(client, model: str, *, audio: bool) -> dict:
+async def _video_constraints(client, model: str) -> VideoModelConstraints:
+    entry = await client.models.get(model)
+    constraints = getattr(entry.model_spec, "constraints", None)
+    if not isinstance(constraints, VideoModelConstraints):
+        pytest.fail(f"{model!r} has no video constraints in the catalog")
+    return constraints
+
+
+@dataclass(frozen=True)
+class _Unresolved:
+    """Why no model could be picked; cached so a failed ranking is not repeated."""
+
+    reason: str
+    fail: bool
+
+
+async def _pick_video(client, video_type: str) -> "_VideoPick | _Unresolved":
+    """Pick the cheapest model of ``video_type``.
+
+    No model of that kind is a skip. Candidates existing but every quote failing
+    is a failure: it points at an outage or a rejected quote request, not at
+    the catalog.
+    """
+    env_var, input_mode = _VIDEO_KINDS[video_type]
+    override = os.environ.get(env_var)
+    if override:
+        constraints = await _video_constraints(client, override)
+        return _VideoPick(override, cheapest_video_params(constraints), None)
+    try:
+        result = await client.models.resolve_cheapest_video(
+            video_type=video_type, input_mode=input_mode
+        )
+    except ModelQuotesUnavailableError as exc:
+        return _Unresolved(f"Every {video_type} quote failed: {exc.failures}", fail=True)
+    except NoMatchingModelError as exc:
+        return _Unresolved(f"No {video_type} model available on this account: {exc}", fail=False)
+    return _VideoPick(result.model, dict(result.request_params), result.quote_usd)
+
+
+async def _resolve_video(client, video_type: str) -> _VideoPick:
+    """Resolve (and session-cache) the cheapest ``video_type`` model; skip if none.
+
+    Ranking quotes every candidate once per session; ``/video/quote`` is free.
+    """
+    if video_type not in _VIDEO_PICKS:
+        _VIDEO_PICKS[video_type] = await _pick_video(client, video_type)
+    pick = _VIDEO_PICKS[video_type]
+    if isinstance(pick, _Unresolved):
+        if pick.fail:
+            pytest.fail(pick.reason)
+        pytest.skip(pick.reason)
+    return pick
+
+
+async def _resolve_t2v(client) -> _VideoPick:
+    return await _resolve_video(client, "text-to-video")
+
+
+async def _resolve_i2v(client) -> _VideoPick:
+    return await _resolve_video(client, "image-to-video")
+
+
+async def _optional_video_params(client, model: str, *, audio: bool) -> dict[str, Any]:
     """Build the widest *valid* optional-parameter set for ``model``.
 
     Which optional parameters a video model accepts varies per model, and
     sending an unsupported one is a hard 400 rather than a silent ignore —
     ``audio`` on a model with ``audio_configurable=False`` returns
-    ``"This model does not support audio configuration"``. So the values come
-    from the model's own advertised constraints instead of being hardcoded,
-    which keeps these tests meaningful as the catalog turns over.
+    ``"This model does not support audio configuration"``. So every value comes
+    from the model's own advertised constraints, at its cheapest listed setting
+    (shortest duration, lowest resolution), which keeps these tests meaningful as
+    the catalog turns over without paying for more video than they need.
 
     Note that ``supports_audio`` and ``audio_configurable`` are different
-    claims: minimax-h3 generates audio but rejects the ``audio`` parameter.
-    Only the latter gates sending it.
+    claims: a model can generate audio yet reject the ``audio`` parameter.
+    Only the latter gates sending it; asking for audio additionally needs the
+    former.
     """
-    caps = await client.models.get_capabilities(model)
-    durations = list(caps.durations or [])
-    params: dict = {
-        "duration_seconds": "5s" if not durations or "5s" in durations else durations[0],
-    }
-    if caps.resolutions:
-        params["resolution"] = min(caps.resolutions, key=_resolution_rank)
-    if caps.aspect_ratios:
-        params["aspect_ratio"] = caps.aspect_ratios[0]
-    if caps.audio_configurable:
-        params["audio"] = audio
-    return params
+    constraints = await _video_constraints(client, model)
+    return cheapest_video_params(constraints, audio=audio and constraints.audio)
 
 
 def _generate_test_image_data_url(width: int = 256, height: int = 256) -> str:
@@ -206,12 +244,12 @@ class TestVideoE2E:
 
     async def test_quote_t2v_basic(self, venice_client, vcr_cassette):
         """Quote a text-to-video generation and verify response shape."""
-        t2v_model = await _resolve_t2v(venice_client)
+        t2v = await _resolve_t2v(venice_client)
         with vcr_cassette:
             try:
                 quote = await venice_client.video.quote(
-                    model=t2v_model,
-                    duration_seconds="5s",
+                    model=t2v.model,
+                    **t2v.request_params,
                 )
 
                 assert isinstance(quote, VideoQuoteResponse)
@@ -227,18 +265,18 @@ class TestVideoE2E:
 
     async def test_quote_t2v_all_params(self, venice_client, vcr_cassette):
         """Quote with every optional parameter the model supports populated."""
-        t2v_model = await _resolve_t2v(venice_client)
-        t2v_optional_params = await _optional_video_params(venice_client, t2v_model, audio=True)
+        t2v = await _resolve_t2v(venice_client)
+        t2v_optional_params = await _optional_video_params(venice_client, t2v.model, audio=True)
         # Guard against the derived set quietly collapsing: every video model
         # advertises resolutions, so an absent one means the capability lookup
         # degraded and this test would be exercising almost no optional params.
         assert "resolution" in t2v_optional_params, (
-            f"no optional params derived for {t2v_model}: {t2v_optional_params}"
+            f"no optional params derived for {t2v.model}: {t2v_optional_params}"
         )
         with vcr_cassette:
             try:
                 quote = await venice_client.video.quote(
-                    model=t2v_model,
+                    model=t2v.model,
                     **t2v_optional_params,
                 )
 
@@ -254,13 +292,12 @@ class TestVideoE2E:
 
     async def test_quote_upscale_with_video_url(self, venice_client, vcr_cassette):
         """Quote an upscale (v2v) request using video_url + upscale_factor."""
-        i2v_model = await _resolve_i2v(venice_client)
+        i2v = await _resolve_i2v(venice_client)
         with vcr_cassette:
             try:
                 quote = await venice_client.video.quote(
-                    model=i2v_model,
-                    duration_seconds="5s",
-                    resolution="1080p",
+                    model=i2v.model,
+                    **i2v.request_params,
                     upscale_factor=2,
                     video_url=VIDEO_TEST_IMAGE_URL,
                 )
@@ -281,14 +318,13 @@ class TestVideoE2E:
 
     async def test_queue_t2v_basic(self, venice_client, vcr_cassette):
         """Queue a minimal text-to-video request and get a queue_id back."""
-        t2v_model = await _resolve_t2v(venice_client)
+        t2v = await _resolve_t2v(venice_client)
         with vcr_cassette:
             try:
                 result = await venice_client.video.submit(
-                    model=t2v_model,
+                    model=t2v.model,
                     prompt="A serene mountain landscape with flowing clouds",
-                    duration_seconds="5s",
-                    aspect_ratio="16:9",
+                    **t2v.request_params,
                 )
 
                 assert isinstance(result, VideoQueueResponse)
@@ -305,18 +341,18 @@ class TestVideoE2E:
 
     async def test_queue_t2v_all_optional_params(self, venice_client, vcr_cassette):
         """Queue with every optional T2V parameter the model supports populated."""
-        t2v_model = await _resolve_t2v(venice_client)
-        t2v_optional_params = await _optional_video_params(venice_client, t2v_model, audio=True)
+        t2v = await _resolve_t2v(venice_client)
+        t2v_optional_params = await _optional_video_params(venice_client, t2v.model, audio=True)
         # Guard against the derived set quietly collapsing: every video model
         # advertises resolutions, so an absent one means the capability lookup
         # degraded and this test would be exercising almost no optional params.
         assert "resolution" in t2v_optional_params, (
-            f"no optional params derived for {t2v_model}: {t2v_optional_params}"
+            f"no optional params derived for {t2v.model}: {t2v_optional_params}"
         )
         with vcr_cassette:
             try:
                 result = await venice_client.video.submit(
-                    model=t2v_model,
+                    model=t2v.model,
                     prompt="A kitten chasing a laser pointer",
                     negative_prompt="blurry, ugly, low quality",
                     **t2v_optional_params,
@@ -334,13 +370,13 @@ class TestVideoE2E:
 
     async def test_queue_i2v(self, venice_client, vcr_cassette):
         """Queue an image-to-video request."""
-        i2v_model = await _resolve_i2v(venice_client)
+        i2v = await _resolve_i2v(venice_client)
         with vcr_cassette:
             try:
                 result = await venice_client.video.submit(
-                    model=i2v_model,
+                    model=i2v.model,
                     prompt="Bring this image to life with subtle motion",
-                    duration_seconds="5s",
+                    **i2v.request_params,
                     image_url=VIDEO_TEST_IMAGE_URL,
                 )
 
@@ -356,15 +392,15 @@ class TestVideoE2E:
 
     async def test_queue_i2v_all_optional_params(self, venice_client, vcr_cassette):
         """Queue I2V with every optional param the model supports populated."""
-        i2v_model = await _resolve_i2v(venice_client)
-        i2v_optional_params = await _optional_video_params(venice_client, i2v_model, audio=False)
+        i2v = await _resolve_i2v(venice_client)
+        i2v_optional_params = await _optional_video_params(venice_client, i2v.model, audio=False)
         assert "resolution" in i2v_optional_params, (
-            f"no optional params derived for {i2v_model}: {i2v_optional_params}"
+            f"no optional params derived for {i2v.model}: {i2v_optional_params}"
         )
         with vcr_cassette:
             try:
                 result = await venice_client.video.submit(
-                    model=i2v_model,
+                    model=i2v.model,
                     prompt="Pan across the scene slowly",
                     negative_prompt="low quality, distorted",
                     image_url=VIDEO_TEST_IMAGE_URL,
@@ -387,18 +423,17 @@ class TestVideoE2E:
 
     async def test_retrieve_after_queue(self, venice_client, vcr_cassette):
         """Queue → retrieve immediately; expect PROCESSING or COMPLETED."""
-        t2v_model = await _resolve_t2v(venice_client)
+        t2v = await _resolve_t2v(venice_client)
         with vcr_cassette:
             try:
                 queued = await venice_client.video.submit(
-                    model=t2v_model,
+                    model=t2v.model,
                     prompt="A river flowing through a forest",
-                    duration_seconds="5s",
-                    aspect_ratio="16:9",
+                    **t2v.request_params,
                 )
 
                 status = await venice_client.video.retrieve(
-                    model=t2v_model,
+                    model=t2v.model,
                     queue_id=queued.queue_id,
                 )
 
@@ -425,18 +460,17 @@ class TestVideoE2E:
 
     async def test_retrieve_with_delete_media_on_completion(self, venice_client, vcr_cassette):
         """Verify delete_media_on_completion flag is accepted."""
-        t2v_model = await _resolve_t2v(venice_client)
+        t2v = await _resolve_t2v(venice_client)
         with vcr_cassette:
             try:
                 queued = await venice_client.video.submit(
-                    model=t2v_model,
+                    model=t2v.model,
                     prompt="Waves crashing on a rocky shore",
-                    duration_seconds="5s",
-                    aspect_ratio="16:9",
+                    **t2v.request_params,
                 )
 
                 status = await venice_client.video.retrieve(
-                    model=t2v_model,
+                    model=t2v.model,
                     queue_id=queued.queue_id,
                     delete_media_on_completion=True,
                 )
@@ -455,20 +489,19 @@ class TestVideoE2E:
 
     async def test_retrieve_poll_until_done(self, venice_client, vcr_cassette):
         """Queue and poll until COMPLETED or FAILED (with timeout)."""
-        t2v_model = await _resolve_t2v(venice_client)
+        t2v = await _resolve_t2v(venice_client)
         with vcr_cassette:
             try:
                 queued = await venice_client.video.submit(
-                    model=t2v_model,
+                    model=t2v.model,
                     prompt="A slow-motion droplet splashing into water",
-                    duration_seconds="5s",
-                    aspect_ratio="16:9",
+                    **t2v.request_params,
                 )
 
                 max_polls = 60  # ~5 min with 5s sleep
                 for _ in range(max_polls):
                     status = await venice_client.video.retrieve(
-                        model=t2v_model,
+                        model=t2v.model,
                         queue_id=queued.queue_id,
                     )
 
@@ -498,14 +531,13 @@ class TestVideoE2E:
 
     async def test_complete_after_retrieval(self, venice_client, vcr_cassette):
         """Full lifecycle: queue → poll → complete."""
-        t2v_model = await _resolve_t2v(venice_client)
+        t2v = await _resolve_t2v(venice_client)
         with vcr_cassette:
             try:
                 queued = await venice_client.video.submit(
-                    model=t2v_model,
+                    model=t2v.model,
                     prompt="A butterfly landing on a flower",
-                    duration_seconds="5s",
-                    aspect_ratio="16:9",
+                    **t2v.request_params,
                 )
 
                 # Poll until done (or timeout)
@@ -513,7 +545,7 @@ class TestVideoE2E:
                 final_status: VideoCompletedStatus | None = None
                 for _ in range(max_polls):
                     status = await venice_client.video.retrieve(
-                        model=t2v_model,
+                        model=t2v.model,
                         queue_id=queued.queue_id,
                     )
 
@@ -535,7 +567,7 @@ class TestVideoE2E:
                 # server-side media to clean up.  Both outcomes are valid.
                 try:
                     result = await venice_client.video.cancel(
-                        model=t2v_model,
+                        model=t2v.model,
                         queue_id=queued.queue_id,
                     )
 
@@ -565,29 +597,34 @@ class TestVideoE2E:
     # ------------------------------------------------------------------
 
     async def test_queue_invalid_model(self, venice_client, vcr_cassette):
-        """Queue with a non-existent model should raise an API error."""
+        """Queue with a non-existent model should raise an API error.
+
+        The rest of the request is a real model's valid one, so the model id is
+        the only thing the API can reject.
+        """
+        t2v = await _resolve_t2v(venice_client)
         with vcr_cassette, pytest.raises((VeniceError, APIError, APIStatusError)):
             await venice_client.video.submit(
                 model="definitely-invalid-video-model-xyz",
                 prompt="This should fail",
-                duration_seconds="5s",
+                **t2v.request_params,
             )
 
     async def test_retrieve_invalid_queue_id(self, venice_client, vcr_cassette):
         """Retrieve with a bogus queue_id should raise an API error."""
-        t2v_model = await _resolve_t2v(venice_client)
+        t2v = await _resolve_t2v(venice_client)
         with vcr_cassette, pytest.raises((VeniceError, APIError, APIStatusError, ValueError)):
             await venice_client.video.retrieve(
-                model=t2v_model,
+                model=t2v.model,
                 queue_id="nonexistent-queue-id-00000000",
             )
 
     async def test_complete_invalid_queue_id(self, venice_client, vcr_cassette):
         """Complete with a bogus queue_id should raise an API error."""
-        t2v_model = await _resolve_t2v(venice_client)
+        t2v = await _resolve_t2v(venice_client)
         with vcr_cassette, pytest.raises((VeniceError, APIError, APIStatusError)):
             await venice_client.video.cancel(
-                model=t2v_model,
+                model=t2v.model,
                 queue_id="nonexistent-queue-id-00000000",
             )
 
@@ -597,24 +634,22 @@ class TestVideoE2E:
 
     async def test_full_video_workflow(self, venice_client, vcr_cassette):
         """End-to-end: quote → queue → poll → complete."""
-        t2v_model = await _resolve_t2v(venice_client)
+        t2v = await _resolve_t2v(venice_client)
         with vcr_cassette:
             try:
                 # Step 1 – Quote
                 quote = await venice_client.video.quote(
-                    model=t2v_model,
-                    duration_seconds="5s",
-                    aspect_ratio="16:9",
+                    model=t2v.model,
+                    **t2v.request_params,
                 )
                 assert isinstance(quote, VideoQuoteResponse)
                 assert quote.quote >= 0
 
                 # Step 2 – Queue
                 queued = await venice_client.video.submit(
-                    model=t2v_model,
+                    model=t2v.model,
                     prompt="A time-lapse of clouds rolling over a city skyline",
-                    duration_seconds="5s",
-                    aspect_ratio="16:9",
+                    **t2v.request_params,
                 )
                 assert isinstance(queued, VideoQueueResponse)
                 assert queued.queue_id
@@ -624,7 +659,7 @@ class TestVideoE2E:
                 final_status = None
                 for _ in range(max_polls):
                     status = await venice_client.video.retrieve(
-                        model=t2v_model,
+                        model=t2v.model,
                         queue_id=queued.queue_id,
                     )
 
@@ -648,7 +683,7 @@ class TestVideoE2E:
                 # server-side media to clean up.  Both outcomes are valid.
                 try:
                     cleanup = await venice_client.video.cancel(
-                        model=t2v_model,
+                        model=t2v.model,
                         queue_id=queued.queue_id,
                     )
                     assert isinstance(cleanup, VideoCompleteResponse)
@@ -673,22 +708,22 @@ class TestVideoE2E:
 
     async def test_full_i2v_workflow(self, venice_client, vcr_cassette):
         """End-to-end image-to-video: quote → queue → poll → complete."""
-        i2v_model = await _resolve_i2v(venice_client)
+        i2v = await _resolve_i2v(venice_client)
         with vcr_cassette:
             try:
                 # Quote — /video/quote ignores prompt/image refs;
                 # price is driven by model + duration + resolution.
                 quote = await venice_client.video.quote(
-                    model=i2v_model,
-                    duration_seconds="5s",
+                    model=i2v.model,
+                    **i2v.request_params,
                 )
                 assert isinstance(quote, VideoQuoteResponse)
 
                 # Queue
                 queued = await venice_client.video.submit(
-                    model=i2v_model,
+                    model=i2v.model,
                     prompt="Animate the scene with gentle motion",
-                    duration_seconds="5s",
+                    **i2v.request_params,
                     image_url=VIDEO_TEST_IMAGE_URL,
                 )
                 assert queued.queue_id
@@ -698,7 +733,7 @@ class TestVideoE2E:
                 final_status = None
                 for _ in range(max_polls):
                     status = await venice_client.video.retrieve(
-                        model=i2v_model,
+                        model=i2v.model,
                         queue_id=queued.queue_id,
                     )
                     if isinstance(status, VideoCompletedStatus):
@@ -715,7 +750,7 @@ class TestVideoE2E:
                 # Complete
                 try:
                     cleanup = await venice_client.video.cancel(
-                        model=i2v_model,
+                        model=i2v.model,
                         queue_id=queued.queue_id,
                     )
                     assert isinstance(cleanup, VideoCompleteResponse)

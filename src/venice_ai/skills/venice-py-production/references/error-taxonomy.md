@@ -60,6 +60,7 @@ Plus the `VeniceAPIErrorCode` enum (server error code strings) — useful for ma
 | `NotFoundError` (404) | Resource doesn't exist. | Fix the URL/ID; don't loop. |
 | `ModelGoneError` (410) | Model was retired/unrouted. Retry won't bring it back. | Migrate to `model_spec.deprecation.replacementModelId` (or re-`resolve_*()`); distinct from 404. |
 | `UnprocessableEntityError` (422) | Schema validation failed server-side. | Fix the body; don't loop. |
+| `NoMatchingModelError` | A `resolve*()` call found no catalog model passing its filters (a `ValueError`). Nothing was called or billed. | Relax the filters or skip the feature; retrying returns the same answer until the catalog changes. |
 | `MaxIterationsExceededError` | Agent loop didn't converge in budget. | **Don't retry** — investigate the model's behavior or add tools/prompts to break the cycle. |
 | `StreamConsumedError` / `StreamClosedError` | Code bug — tried to consume a stream twice or after close. | Fix the code. |
 
@@ -67,6 +68,7 @@ Plus the `VeniceAPIErrorCode` enum (server error code strings) — useful for ma
 
 | Class | When to retry |
 |---|---|
+| `ModelQuotesUnavailableError` | Raised by `resolve_cheapest_video` / `resolve_cheapest_music` when models match but every free quote failed (a `ValueError`). Inspect `e.failures` (model ID → exception): retry later for `RateLimitError` / 5xx / `APIConnectionError`; an `InvalidRequestError` means Venice rejected the quote request itself, so surface it. |
 | `ConflictError` (409) | Depends on the resource. For idempotent operations, retry once. For state-mutating operations, surface. |
 | `VideoGenerationError` / `MusicGenerationError` | Inspect `e.error_code` first — some codes (e.g., transient render failures) are retryable; others (e.g., content-policy failures) are terminal. |
 

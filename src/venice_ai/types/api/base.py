@@ -26,7 +26,9 @@ class DetailedError(BaseModel):
     """Detailed error response with field-specific information"""
 
     error: str = Field(..., description="A description of the error")
-    details: ErrorDetails | None = Field(None, description="Details about the incorrect input")
+    details: ErrorDetails | None = Field(
+        default=None, description="Details about the incorrect input"
+    )
 
 
 # ============================================================================
@@ -57,7 +59,7 @@ class UsageData(BaseModel):
     completion_tokens: int = Field(..., description="Number of tokens in the completion")
     total_tokens: int = Field(..., description="Total number of tokens used")
     prompt_tokens_details: PromptTokensDetails | None = Field(
-        None, description="Breakdown of tokens used in the prompt"
+        default=None, description="Breakdown of tokens used in the prompt"
     )
 
 

@@ -140,13 +140,13 @@ Every response with a `_response` attribute exposes `response.balance_info`:
 from venice_ai import BalanceInfo
 
 response = await client.chat.completions.create(...)
-if response.balance_info:                              # may be None on free tier
+if response.balance_info:                              # None when the headers are absent
     bi: BalanceInfo = response.balance_info
-    print(f"Remaining USD prepaid balance: ${bi.usd}")
-    print(f"Remaining diem (Venice's internal unit): {bi.diem}")
+    print(f"This key could spend ${bi.usd} before the call")
+    print(f"DIEM counterpart: {bi.diem}")
 ```
 
-`balance_info.usd` is the **post-call** balance — i.e., the new remaining balance, not the cost of THIS call. Compute the cost as `previous_balance - current_balance` if you're tracking spend without the helpers.
+`balance_info.usd` is what the calling API key can still spend: the lesser of the account balance and what remains under the key's consumption limit, as it stood **before this request was processed**. It is not the account balance (`client.billing.get_balance()`) and not the cost of this call. The drop between two consecutive responses is what the earlier call cost, plus anything else spent on the same key in between.
 
 ## `BudgetManager.can_afford` semantics
 
@@ -158,7 +158,7 @@ result = await budget.can_afford(estimated_cost_usd)
 - Computes `projected = total_cost_usd + estimated_cost_usd`.
 - Returns `True` iff `projected <= daily_usd` (when set) AND `projected <= monthly_usd` (when set).
 
-So you must **estimate** the next call's cost before invoking it. For chat completions, use `(await client.chat.completions.estimate_cost(model=..., messages=..., expected_completion_tokens=...)).total_cost_usd`: it adds an allowance for the system prompt Venice injects unless `venice_parameters` opts out. For most apps a flat `Decimal("0.05")` ceiling per call is good enough.
+So you must **estimate** the next call's cost before invoking it. For chat completions, use `(await client.chat.completions.estimate_cost(model=..., messages=..., expected_completion_tokens=..., tools=..., response_format=...)).total_cost_usd`: it adds an allowance for the system prompt Venice injects unless `venice_parameters` opts out, and one for any `tools` and `response_format` you pass. The allowances are sized to cover every chat template measured, so the estimate errs high (a small tool can be overstated several times over on a model with a compact tool template); English prose is counted with a word heuristic, so code or CJK text can still exceed it. For most apps a flat `Decimal("0.05")` ceiling per call is good enough.
 
 ## `budget.remaining()`
 

@@ -168,9 +168,11 @@ if response.deprecation_info and response.deprecation_info.is_deprecated:
 
 See `references/error-taxonomy.md` for the canonical table.
 
+The client already retries below this layer, and only where a resend cannot bill twice: idempotent calls on any transient failure, chat/responses/embeddings once on a 500, and paid generation (image, video, music, speech) only when the connection never opened or on a documented "model at capacity" 503. So an `APITimeoutError` from a paid call means the job may have run and been billed; check before re-submitting. `client.retry_options` shows the policy; see `references/retries.md`.
+
 ## Prompt caching
 
-For long, mostly-static prompts (system prompt + retrieved docs + per-turn user query), Venice supports prompt caching. Opt in via the top-level `prompt_cache_key` / `prompt_cache_retention` request params, or per-message `cache_control` markers on content blocks (e.g. `cache_control={"type": "ephemeral"}`); the cache hit rate shows up in usage stats. This pays off when the cached prefix is large and reused many times.
+For long, mostly-static prompts (system prompt + retrieved docs + per-turn user query), Venice caches the prompt prefix automatically on supporting models, adding Claude's cache markers itself. `prompt_cache_key` raises the odds that a request reaches a server holding the prefix, `prompt_cache_retention` asks for a longer lifetime, and a `cache_control={"type": "ephemeral"}` marker is only needed for something Venice would not cache on its own (a long document in a single-turn Claude request). Read hits and writes from `response.usage.cached_tokens` / `cache_write_tokens`. `resolve_chat(require_prompt_caching=True)` only checks for a listed cache price, so measure hits on the model you pick.
 
 See `references/prompt-caching.md`. Pattern from `examples/advanced/prompt_caching.py`.
 

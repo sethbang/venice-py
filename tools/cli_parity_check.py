@@ -118,6 +118,11 @@ KNOWN_CLI_MAP: dict[str, tuple[str, list[str], str]] = {
         [],
         "OpenAI-compatible generation shim not exposed.",
     ),
+    "image.submit": (
+        "missing",
+        [],
+        "Queued image generation is not exposed; `image generate` uses the synchronous path.",
+    ),
     "image.upscale": (
         "covered",
         ["venice-py image upscale"],
@@ -162,10 +167,20 @@ KNOWN_CLI_MAP: dict[str, tuple[str, list[str], str]] = {
         ["venice-py audio speak"],
         "",
     ),
+    "audio.create_voice": (
+        "missing",
+        [],
+        "Voice cloning from a reference sample is not exposed.",
+    ),
     "audio.get_voices": (
         "covered",
         ["venice-py audio voices"],
         "Filters by --model / --gender / --region; --json for scripting.",
+    ),
+    "audio.stream_long_text": (
+        "missing",
+        [],
+        "Chunked long-text TTS streaming is not exposed.",
     ),
     "audio.transcribe": (
         "covered",
@@ -173,7 +188,7 @@ KNOWN_CLI_MAP: dict[str, tuple[str, list[str], str]] = {
         "",
     ),
     # ---- music ----
-    "music.cancel": (
+    "music.release": (
         "missing",
         [],
         "Whole `music` resource has no CLI surface.",
@@ -240,6 +255,11 @@ KNOWN_CLI_MAP: dict[str, tuple[str, list[str], str]] = {
         "covered",
         ["venice-py models resolve --type asr"],
         "Routed through resolve() with type='asr'.",
+    ),
+    "models.resolve_cheapest_music": (
+        "covered",
+        ["venice-py models resolve --type cheapest-music"],
+        "Quotes every music generator at --duration and prints the cheapest.",
     ),
     "models.resolve_chat": (
         "covered",
@@ -391,6 +411,11 @@ KNOWN_CLI_MAP: dict[str, tuple[str, list[str], str]] = {
         [],
         "Aggregated analytics endpoint not exposed.",
     ),
+    "billing.iter_usage_history_csv": (
+        "missing",
+        [],
+        "CSV usage export is not exposed.",
+    ),
     "billing.iter_usage_history": (
         "partial",
         ["venice-py account usage"],
@@ -424,6 +449,16 @@ KNOWN_CLI_MAP: dict[str, tuple[str, list[str], str]] = {
         "Whole `x402` resource has no CLI surface.",
     ),
     "x402.top_up": (
+        "missing",
+        [],
+        "Whole `x402` resource has no CLI surface.",
+    ),
+    "x402.top_up_with": (
+        "missing",
+        [],
+        "Whole `x402` resource has no CLI surface.",
+    ),
+    "x402.top_up_with_solana": (
         "missing",
         [],
         "Whole `x402` resource has no CLI surface.",
@@ -477,10 +512,10 @@ KNOWN_CLI_MAP: dict[str, tuple[str, list[str], str]] = {
     ),
     # ---- decisions ----
     "decisions.create": (
-        "missing",
-        [],
-        "Beta /decisions endpoint has no CLI surface; questions are a nested "
-        "typed map that does not reduce cleanly to flags.",
+        "covered",
+        ["venice-py decisions"],
+        "Inline --noul / --choice / --score flags, or a full question map via "
+        "--questions; text or --state-json state; --json for scripting.",
     ),
     # ---- responses ----
     "responses.create": (

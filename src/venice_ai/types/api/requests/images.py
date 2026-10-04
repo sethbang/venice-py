@@ -27,7 +27,7 @@ class StyleReference(BaseModel):
         ),
     )
     strength: float | None = Field(
-        None,
+        default=None,
         ge=0.1,
         le=1,
         description=(
@@ -53,41 +53,47 @@ class ImageGenerationRequest(BaseModel):
     )
 
     # Image dimensions
-    width: int | None = Field(1024, gt=0, le=1280, description="Image width in pixels")
-    height: int | None = Field(1024, gt=0, le=1280, description="Image height in pixels")
+    width: int | None = Field(default=1024, gt=0, le=1280, description="Image width in pixels")
+    height: int | None = Field(default=1024, gt=0, le=1280, description="Image height in pixels")
 
     # Generation parameters
     cfg_scale: float | None = Field(
-        None, gt=0, le=20, description="CFG scale (higher = more prompt adherence)"
+        default=None, gt=0, le=20, description="CFG scale (higher = more prompt adherence)"
     )
     steps: int | None = Field(
-        8,
+        default=8,
         gt=0,
         description=(
             "Number of inference steps. Per-model caps are enforced server-side; "
             "8 matches the documented endpoint default."
         ),
     )
-    seed: int | None = Field(0, ge=-999999999, le=999999999, description="Random seed")
+    seed: int | None = Field(default=0, ge=-999999999, le=999999999, description="Random seed")
 
     # Style and enhancement
-    style_preset: str | None = Field(None, description="Style preset to apply")
+    style_preset: str | None = Field(default=None, description="Style preset to apply")
     lora_strength: int | None = Field(
-        None, ge=0, le=100, description="LoRA strength (if model uses LoRAs)"
+        default=None, ge=0, le=100, description="LoRA strength (if model uses LoRAs)"
     )
 
     # Output control
-    format: Literal["jpeg", "png", "webp"] | None = Field("webp", description="Output image format")
+    format: Literal["jpeg", "png", "webp"] | None = Field(
+        default="webp", description="Output image format"
+    )
     variants: int | None = Field(
-        None,
+        default=None,
         ge=1,
         le=4,
         description="Number of images to generate (only when return_binary is false)",
     )
-    return_binary: bool | None = Field(False, description="Return binary data instead of base64")
-    safe_mode: bool | None = Field(True, description="Blur adult content")
-    hide_watermark: bool | None = Field(False, description="Hide Venice watermark")
-    embed_exif_metadata: bool | None = Field(False, description="Embed generation info in EXIF")
+    return_binary: bool | None = Field(
+        default=False, description="Return binary data instead of base64"
+    )
+    safe_mode: bool | None = Field(default=True, description="Blur adult content")
+    hide_watermark: bool | None = Field(default=False, description="Hide Venice watermark")
+    embed_exif_metadata: bool | None = Field(
+        default=False, description="Embed generation info in EXIF"
+    )
 
     # Resolution control
     resolution: str | None = Field(
@@ -113,7 +119,7 @@ class ImageGenerationRequest(BaseModel):
 
     # Quality control
     quality: Literal["low", "medium", "high"] | None = Field(
-        None,
+        default=None,
         description=(
             "Output quality for quality-aware models (e.g. GPT Image 2). Higher values can "
             "increase the request charge. See the model spec's `qualities` for supported values."
@@ -121,7 +127,7 @@ class ImageGenerationRequest(BaseModel):
     )
 
     enhance_prompt: bool | None = Field(
-        None,
+        default=None,
         description=(
             "Rewrite the prompt before generation to add clarifying visual detail. "
             "Charges additional credits when a rewrite happens and adds up to ~30s "
@@ -131,7 +137,7 @@ class ImageGenerationRequest(BaseModel):
         ),
     )
     disable_prompt_optimization_thinking: bool | None = Field(
-        None,
+        default=None,
         description=(
             "Skip the model's prompt-optimization thinking step for faster "
             "generation. Supported only by models that advertise it; ignored "
@@ -139,7 +145,7 @@ class ImageGenerationRequest(BaseModel):
         ),
     )
     style_references: list[StyleReference] | None = Field(
-        None,
+        default=None,
         description=(
             "Style reference images guiding the aesthetic of the output. Only "
             "supported by models with ``supportsStyleReferences``."
@@ -166,8 +172,8 @@ class SimpleImageGenerationRequest(BaseModel):
     )
 
     # Basic parameters
-    model: ModelId | None = Field("default", description="Model to use")
-    n: int | None = Field(1, ge=1, le=1, description="Number of images (Venice supports 1)")
+    model: ModelId | None = Field(default="default", description="Model to use")
+    n: int | None = Field(default=1, ge=1, le=1, description="Number of images (Venice supports 1)")
     size: (
         Literal[
             "auto",
@@ -180,33 +186,33 @@ class SimpleImageGenerationRequest(BaseModel):
             "1024x1792",
         ]
         | None
-    ) = Field("auto", description="Image size")
+    ) = Field(default="auto", description="Image size")
 
     # Output control
     response_format: Literal["b64_json", "url"] | None = Field(
-        "b64_json", description="Response format"
+        default="b64_json", description="Response format"
     )
     output_format: Literal["jpeg", "png", "webp"] | None = Field(
-        "png", description="Output image format"
+        default="png", description="Output image format"
     )
 
     # OpenAI compatibility (not used by Venice)
     quality: Literal["auto", "high", "medium", "low", "hd", "standard"] | None = Field(
-        "auto", description="Quality setting (compatibility only)"
+        default="auto", description="Quality setting (compatibility only)"
     )
     style: Literal["vivid", "natural"] | None = Field(
-        "natural", description="Style setting (compatibility only)"
+        default="natural", description="Style setting (compatibility only)"
     )
     background: Literal["transparent", "opaque", "auto"] | None = Field(
-        "auto", description="Background setting (compatibility only)"
+        default="auto", description="Background setting (compatibility only)"
     )
     moderation: Literal["low", "auto"] | None = Field(
-        "auto", description="Moderation level (auto = safe mode on)"
+        default="auto", description="Moderation level (auto = safe mode on)"
     )
     output_compression: int | None = Field(
-        100, ge=0, le=100, description="Compression level (compatibility only)"
+        default=100, ge=0, le=100, description="Compression level (compatibility only)"
     )
-    user: str | None = Field(None, description="User identifier (compatibility only)")
+    user: str | None = Field(default=None, description="User identifier (compatibility only)")
 
     anon_user_id: AnonUserId | None = Field(
         default=None,
@@ -225,7 +231,7 @@ class ImageUpscaleRequest(BaseModel):
     image: str | Any = Field(..., description="Image to upscale (file upload or base64 string)")
 
     scale: float | None = Field(
-        2,
+        default=2,
         ge=2,
         le=4,
         description=(
@@ -236,7 +242,7 @@ class ImageUpscaleRequest(BaseModel):
         ),
     )
     creativity: float | None = Field(
-        None,
+        default=None,
         description=(
             "How much detail and texture the upscaler adds; higher values add "
             "more, lower stay closer to the source. The server clamps this to "
@@ -300,7 +306,7 @@ class ImageEditRequest(BaseModel):
         ),
     )
     enhance_prompt: bool | None = Field(
-        None,
+        default=None,
         description=(
             "Rewrite the prompt before generation to add clarifying visual detail. "
             "Charges additional credits when a rewrite happens and adds up to ~30s "
@@ -310,7 +316,7 @@ class ImageEditRequest(BaseModel):
         ),
     )
     disable_prompt_optimization_thinking: bool | None = Field(
-        None,
+        default=None,
         description=(
             "Skip the model's prompt-optimization thinking step for faster "
             "generation. Supported only by models that advertise it; ignored "
@@ -409,7 +415,7 @@ class ImageMultiEditRequest(BaseModel):
     # ============================================================================
 
     enhance_prompt: bool | None = Field(
-        None,
+        default=None,
         description=(
             "Rewrite the prompt before generation to add clarifying visual detail. "
             "Charges additional credits when a rewrite happens and adds up to ~30s "
@@ -419,7 +425,7 @@ class ImageMultiEditRequest(BaseModel):
         ),
     )
     disable_prompt_optimization_thinking: bool | None = Field(
-        None,
+        default=None,
         description=(
             "Skip the model's prompt-optimization thinking step for faster "
             "generation. Supported only by models that advertise it; ignored "

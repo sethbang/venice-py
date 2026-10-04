@@ -82,8 +82,14 @@ if isinstance(spec, ImageModelSpec) and spec.constraints:
     print(spec.constraints.defaultQuality)   # e.g. "high" or None
 ```
 
-Both fields are `None` on models without quality tiers. Higher tiers can
-increase the request charge. (This is distinct from the OpenAI-compat
+Both fields are `None` on models without quality tiers. To get a model that
+offers a given tier, resolve with the filter instead of checking afterwards:
+
+```python
+model = await client.models.resolve_image(require_quality="high")
+```
+
+Higher tiers can increase the request charge. (This is distinct from the OpenAI-compat
 `simple_generate(quality=...)` enum, which accepts `auto`/`hd`/`standard` too.)
 
 ## `edit` — image-to-image edit
@@ -111,14 +117,15 @@ edits the whole image per the prompt.
 (`Unrecognized key(s) in object: 'quality'`) when one is sent — it is not
 ignored. Quality tiers apply to `create()`/`submit()` and `multi_edit()`.
 
-`resolution` is honored only by models with resolution-based pricing; others
-reject it with a `400`. Since the catalog exposes no per-model flag for it, the
-robust pattern is to try with `resolution` and retry without on
-`InvalidRequestError` whose message mentions resolution:
+`resolution` is meant for models that list the tier in their
+`constraints.resolutions`; a model without that constraint rejects it with a
+`400`. Resolve a model that lists the tier you will send, and keep a fallback
+for a server that still refuses it:
 
 ```python
 from venice_ai.exceptions import InvalidRequestError
 
+m = await client.models.resolve_inpaint(require_resolution="2K")
 try:
     out = await client.image.edit(model=m, image=img, prompt=p, resolution="2K", timeout=180.0)
 except InvalidRequestError as e:
@@ -126,6 +133,10 @@ except InvalidRequestError as e:
         raise
     out = await client.image.edit(model=m, image=img, prompt=p, timeout=180.0)
 ```
+
+Venice flags a model `uncensored` when it applies minimal content filtering.
+To pair `safe_mode=False` with such a model, resolve one with
+`resolve_inpaint(require_uncensored=True)`.
 
 ## `multi_edit` — multiple edits in one call
 
@@ -143,6 +154,9 @@ image_bytes = await client.image.multi_edit(
 # NOT lists of images/prompts. It returns raw bytes.
 Path("./out.png").write_bytes(image_bytes)
 ```
+
+Not every edit model can combine images. Resolve one that can with
+`await client.models.resolve_inpaint(require_combine_images=True)`.
 
 Useful for compositing several reference images under one editing prompt.
 
@@ -222,7 +236,7 @@ for prompt, response in zip(prompts, responses):
 
 ## Cost estimation
 
-Image cost is harder to predict than chat — model + size + steps all matter. The cheapest path is to read `response.balance_info.usd` after the first call to your model and extrapolate. For pre-call quotes, the SDK doesn't currently expose `client.image.quote(...)` (that's video / music only).
+Image cost is harder to predict than chat — model + size + steps all matter. The cheapest path is to price one call and extrapolate: `response.balance_info.usd` is what the key could spend *before* that request, so the drop to the next response's value is what the call cost (if nothing else spent on the key in between). The catalog's image pricing (`venice_ai.model_price`) gives the per-image rate without a call. For pre-call quotes, the SDK doesn't currently expose `client.image.quote(...)` (that's video / music only).
 
 If you need a budget guard for image batches, set a `BudgetManager` on the client and pre-compute a conservative per-call estimate (e.g., $0.05).
 

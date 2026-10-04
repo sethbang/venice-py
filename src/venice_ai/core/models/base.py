@@ -136,7 +136,13 @@ class VeniceBaseModel(BaseModel):
 
     @property
     def balance_info(self) -> BalanceInfo | None:
-        """Extract balance information from headers."""
+        """What the calling API key could spend before this request, from headers.
+
+        Parsed from ``x-venice-balance-usd`` / ``x-venice-balance-diem``. The
+        value is key-scoped (see :class:`~venice_ai.core.models.headers.BalanceInfo`),
+        not the account balance that ``client.billing.get_balance()`` reports.
+        ``None`` when neither header is present.
+        """
         from .headers import BalanceInfo as _BalanceInfo  # lazy
 
         headers = self.headers
@@ -299,8 +305,8 @@ class VeniceBaseModel(BaseModel):
 class TimestampMixin(BaseModel):
     """Mixin for models that include timestamps."""
 
-    created_at: datetime | None = Field(None, description="Creation timestamp")
-    updated_at: datetime | None = Field(None, description="Last update timestamp")
+    created_at: datetime | None = Field(default=None, description="Creation timestamp")
+    updated_at: datetime | None = Field(default=None, description="Last update timestamp")
 
 
 __all__ = [

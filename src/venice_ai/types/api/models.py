@@ -7,7 +7,7 @@ including model listings, traits, compatibility, and specifications.
 
 from typing import Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 
 from ...core.models.common import VeniceBaseModel
 from ..identifiers import ModelId
@@ -187,9 +187,8 @@ class ImageModelConstraints(BaseModel):
     """Constraints for image models.
 
     ``extra='allow'`` preserves the documented per-model ``aspectRatios`` /
-    ``resolutions`` / ``defaultResolution`` / ``defaultAspectRatio`` discovery
-    keys (which the docs tell callers to read for the ``aspect_ratio`` feature)
-    on ``model_extra`` instead of dropping them.
+    ``defaultAspectRatio`` discovery keys (which the docs tell callers to read
+    for the ``aspect_ratio`` feature) on ``model_extra`` instead of dropping them.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -213,6 +212,17 @@ class ImageModelConstraints(BaseModel):
         default=None,
         description="Supported quality options (open str). Present only for quality-aware models.",
     )
+    resolutions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Supported output resolution tiers (e.g. '1K', '2K', '4K'; open str). "
+            "Present only for models that accept a ``resolution`` parameter."
+        ),
+    )
+    defaultResolution: str | None = Field(
+        default=None,
+        description="Default output resolution tier. Present only for resolution-aware models.",
+    )
 
 
 class InpaintModelConstraints(BaseModel):
@@ -222,8 +232,7 @@ class InpaintModelConstraints(BaseModel):
     focusing on prompt limits and image combination capabilities.
 
     ``extra='allow'`` preserves live keys not yet modeled (e.g. ``aspectRatios``
-    / ``resolutions`` / ``defaultResolution`` / ``singleImageAspectRatio``) on
-    ``model_extra``.
+    / ``singleImageAspectRatio`` / ``maxInputImages``) on ``model_extra``.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -231,6 +240,25 @@ class InpaintModelConstraints(BaseModel):
     promptCharacterLimit: float = Field(..., description="The maximum supported prompt length")
     combineImages: bool = Field(
         default=False, description="Whether the model can combine multiple images"
+    )
+    resolutions: list[str] | None = Field(
+        default=None,
+        description=(
+            "Supported output resolution tiers (e.g. '1K', '2K'; open str). Present "
+            "only for models that accept a ``resolution`` parameter on edits."
+        ),
+    )
+    defaultResolution: str | None = Field(
+        default=None,
+        description="Default output resolution tier. Present only for resolution-aware models.",
+    )
+    defaultQuality: str | None = Field(
+        default=None,
+        description="Default quality tier (open str). Present only for quality-aware models.",
+    )
+    qualities: list[str] | None = Field(
+        default=None,
+        description="Supported quality options (open str). Present only for quality-aware models.",
     )
 
 
@@ -810,12 +838,76 @@ class MusicModelSpec(ModelSpec):
     )
 
 
+class TtsVoiceCloning(BaseModel):
+    """Voice-cloning capability of a TTS model (``TtsModelSpec.voice_cloning``).
+
+    Present only on TTS models whose cloning endpoint is available to the
+    caller: pass the model to ``client.audio.create_voice(...)`` to mint a
+    ``vv_<id>`` voice handle, then pass that handle as ``voice`` to
+    ``client.audio.create_speech(...)`` with the same model.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    mode: str | None = Field(
+        default=None,
+        description=(
+            "How the provider implements cloning: ``zero_shot`` re-reads the "
+            "reference audio on every synthesis call; ``persistent`` derives a "
+            "voice template that survives across calls. Known values are in "
+            "KNOWN_VOICE_CLONING_MODES; others are passed through."
+        ),
+    )
+    accepted_formats: list[str] | None = Field(
+        default=None,
+        description=(
+            "Audio containers accepted as a reference sample (e.g. ['mp3', 'wav']). "
+            "Samples in other containers are rejected before upload."
+        ),
+    )
+    min_sample_seconds: float | None = Field(
+        default=None,
+        description="Recommended minimum reference-sample length, in seconds.",
+    )
+    retention_days: float | None = Field(
+        default=None,
+        description=(
+            "Days a ``vv_<id>`` handle stays valid for this model. For ``persistent`` "
+            "models the window resets on each successful synthesis; for "
+            "``zero_shot`` models it is the storage lifetime of the uploaded sample."
+        ),
+    )
+
+
 class TtsModelSpec(ModelSpec):
     """Spec for text-to-speech models (``type='tts'``)."""
 
     voices: list[str] | None = Field(default=None, description="Available voices for TTS models.")
     default_voice: str | None = Field(
         default=None, description="Default voice when none is specified."
+    )
+    supported_formats: list[str] | None = Field(
+        default=None,
+        description=(
+            "Output audio formats the model produces (e.g. ['mp3', 'wav']). An "
+            "explicit ``response_format`` outside this list is rejected."
+        ),
+    )
+    default_format: str | None = Field(
+        default=None, description="Output audio format used when the request names none."
+    )
+    supports_custom_voice_id: bool | None = Field(
+        default=None,
+        description=(
+            "Whether ``voice`` also accepts a caller-supplied provider voice ID "
+            "(e.g. an ElevenLabs Voice ID) in addition to the curated ``voices``."
+        ),
+    )
+    voice_cloning: TtsVoiceCloning | None = Field(
+        default=None,
+        description=(
+            "Voice-cloning capability; ``None`` when the model cannot clone voices for this caller."
+        ),
     )
 
 
@@ -917,6 +1009,18 @@ anything outside it as a type this release predates rather than as invalid.
 """
 
 
+KNOWN_VOICE_CLONING_MODES: Final[tuple[str, ...]] = (
+    "zero_shot",
+    "persistent",
+)
+""":attr:`TtsVoiceCloning.mode` values this SDK release knows about.
+
+The field is a plain ``str`` because it is a *response* field: a closed enum
+would turn a mode Venice adds server-side into a parse failure for the whole
+model catalog. Narrow against this tuple when branching on a known mode.
+"""
+
+
 KNOWN_PRIVACY_MODES: Final[tuple[str, ...]] = (
     "private",
     "anonymized",
@@ -976,7 +1080,10 @@ class ModelResponse(BaseModel):
             "``KNOWN_MODEL_TYPES`` to narrow."
         ),
     )
-    model_spec: ModelSpec = Field(..., description="Detailed model specifications")
+    # SerializeAsAny: the validator below builds a ModelSpec subclass, and
+    # pydantic otherwise serializes by the declared type, dropping every
+    # subclass-only field from model_dump() / model_dump_json().
+    model_spec: SerializeAsAny[ModelSpec] = Field(..., description="Detailed model specifications")
     context_length: int | None = Field(
         default=None,
         description=(
@@ -1067,6 +1174,8 @@ __all__ = [
     "InpaintModelSpec",
     "MusicModelSpec",
     "TtsModelSpec",
+    "TtsVoiceCloning",
+    "KNOWN_VOICE_CLONING_MODES",
     "AsrModelSpec",
     "EmbeddingModelSpec",
     "UpscaleModelSpec",

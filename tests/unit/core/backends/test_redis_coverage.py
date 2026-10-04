@@ -20,9 +20,10 @@ It focuses on:
 
 import asyncio
 import builtins
-import contextlib
+import gc
 import json
 import time
+import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -313,6 +314,52 @@ class TestLoopCleanupCallback:
 
         # We can't easily trigger the callback, but we can verify the structure
         assert weak_ref is not None
+
+    def test_dead_loop_cleanup_stays_off_other_loops(self):
+        """A collected loop's connection is released without touching the loop running then."""
+        backend = RedisBackend(
+            redis_url="redis://localhost:6379",
+            namespace="test_dead_loop",
+        )
+        connection = MagicMock()
+        dead_loop = asyncio.new_event_loop()
+        dead_loop_id = id(dead_loop)
+        dead_pool = MagicMock()
+        RedisBackend._connection_pools[dead_loop_id] = dead_pool
+        backend._register_loop_cleanup(dead_loop, connection)
+        dead_loop.close()
+        holder = [dead_loop]
+        del dead_loop
+
+        scheduled: list[str] = []
+
+        def collect_dead_loop() -> None:
+            holder.clear()
+            gc.collect()
+            scheduled.extend(t.get_name() for t in asyncio.all_tasks())
+
+        # The loop stops after this one iteration, so anything scheduled from
+        # the collection never gets to run before the loop closes.
+        other_loop = asyncio.new_event_loop()
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                try:
+                    other_loop.call_soon(collect_dead_loop)
+                    other_loop.call_soon(other_loop.stop)
+                    other_loop.run_forever()
+                finally:
+                    other_loop.close()
+                gc.collect()
+            pool_left_behind = dead_loop_id in RedisBackend._connection_pools
+        finally:
+            RedisBackend._connection_pools.pop(dead_loop_id, None)
+
+        never_awaited = [str(w.message) for w in caught if "never awaited" in str(w.message)]
+        assert never_awaited == []
+        assert scheduled == []
+        assert not pool_left_behind
+        assert dead_loop_id not in RedisBackend._cleanup_callbacks
 
     @pytest.mark.asyncio
     async def test_disconnect_pool_timeout(self):
@@ -1034,36 +1081,24 @@ class TestEventLoopSwitchingBranches:
 
     @pytest.mark.asyncio
     async def test_event_loop_switch_with_old_connection(self):
-        """Test event loop switch cleans up old connection (lines 125-131)."""
+        """A loop switch releases the old client without awaiting it on the new loop."""
         backend = RedisBackend(
             redis_url="redis://localhost:6379",
             namespace="test_loop_switch",
         )
 
-        # Set up existing connection in old loop - use MagicMock to avoid unclosed coroutines
         old_redis = MagicMock()
-        old_redis.aclose = MagicMock()
+        old_redis.aclose = AsyncMock()
         backend._redis = old_redis
         backend._connected = True
-        backend._event_loop_id = 11111  # Old loop ID
-
-        # Track created tasks to properly clean them up
-        created_tasks = []
+        backend._event_loop_id = 11111
 
         with patch("asyncio.get_running_loop") as mock_get_loop:
             mock_loop = fake_event_loop()
             mock_get_loop.return_value = mock_loop
 
-            # Use a real create_task but track it
-            original_create_task = asyncio.create_task
-
-            def tracking_create_task(coro, **kwargs):
-                task = original_create_task(coro, **kwargs)
-                created_tasks.append(task)
-                return task
-
             with (
-                patch("asyncio.create_task", side_effect=tracking_create_task),
+                patch("asyncio.create_task") as mock_create_task,
                 patch("venice_ai.core.backends.redis.Redis") as mock_redis,
                 patch("venice_ai.core.backends.redis.ConnectionPool") as mock_pool_class,
             ):
@@ -1074,16 +1109,15 @@ class TestEventLoopSwitchingBranches:
                 new_redis.ping = AsyncMock(return_value=True)
                 mock_redis.return_value = new_redis
 
-                await backend._ensure_connected()
+                client = await backend._ensure_connected()
 
-                # Verify cleanup task was created for old connection
-                # (covers lines 125-131)
-                assert len(created_tasks) >= 1
+                assert client is new_redis
+                assert backend._event_loop_id == id(mock_loop)
+                mock_create_task.assert_not_called()
+                mock_loop.create_task.assert_not_called()
+                old_redis.aclose.assert_not_awaited()
 
-                # Wait for cleanup tasks to complete
-                for task in created_tasks:
-                    with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
-                        await asyncio.wait_for(task, timeout=1.0)
+        RedisBackend._connection_pools.pop(id(mock_loop), None)
 
 
 class TestPartialBranchCoverage:

@@ -38,14 +38,14 @@ class MusicQueueRequest(BaseModel):
         ),
     )
     lyrics_prompt: str | None = Field(
-        None,
+        default=None,
         description=(
             "Optional lyrics for lyric-capable models. Required when ``/models`` "
             "reports ``lyrics_required=true``; rejected when ``supports_lyrics=false``."
         ),
     )
     duration_seconds: int | str | None = Field(
-        None,
+        default=None,
         description=(
             "Optional output duration hint in seconds. Accepts integer or numeric "
             "string. Applies only to models that expose duration metadata. Must be > 0."
@@ -66,32 +66,32 @@ class MusicQueueRequest(BaseModel):
         return v
 
     force_instrumental: bool | None = Field(
-        None,
+        default=None,
         description="Generate without vocals when supported (``supports_force_instrumental``).",
     )
     lyrics_optimizer: bool | None = Field(
-        None,
+        default=None,
         description=(
             "When true, auto-generates lyrics from the prompt. Requires "
             "``supports_lyrics_optimizer=true``; incompatible with ``lyrics_prompt``."
         ),
     )
     voice: str | None = Field(
-        None,
+        default=None,
         description="Optional voice selection for voice-enabled models.",
     )
     language_code: str | None = Field(
-        None,
+        default=None,
         description="Optional ISO 639-1 language code for ``supports_language_code`` models.",
     )
     speed: float | None = Field(
-        None,
+        default=None,
         ge=0.25,
         le=4.0,
         description="Optional audio speed multiplier; range 0.25–4.",
     )
     loop: bool | None = Field(
-        None,
+        default=None,
         description=(
             "Render the clip so its end splices back into its start without an "
             "audible seam. Only supported when ``/models`` reports ``supports_loop=true``."
@@ -104,11 +104,11 @@ class MusicQuoteRequest(BaseModel):
 
     model: str = Field(..., description="Music model ID")
     duration_seconds: int | str | None = Field(
-        None,
+        default=None,
         description="Optional output duration hint for the quote (must be > 0).",
     )
     character_count: int | None = Field(
-        None,
+        default=None,
         gt=0,
         description=(
             "Character count of the prompt + lyrics, when the model charges by chars. Must be > 0."
@@ -139,7 +139,7 @@ class MusicRetrieveRequest(BaseModel):
     model: str = Field(..., description="Model ID used for generation")
     queue_id: str = Field(..., description="Queue ID from the queue response")
     delete_media_on_completion: bool = Field(
-        False, description="Auto-delete media after successful retrieval"
+        default=False, description="Auto-delete media after successful retrieval"
     )
 
 

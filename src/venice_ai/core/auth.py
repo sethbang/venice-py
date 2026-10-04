@@ -2,6 +2,41 @@
 
 from __future__ import annotations
 
+import os
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import VeniceAIConfig
+
+API_KEY_ENV_VAR = "VENICE_API_KEY"
+
+
+def resolve_api_key(api_key: str | None, config: VeniceAIConfig | None = None) -> str:
+    """Resolve the API key every client entry point authenticates with.
+
+    The first source that is not ``None`` wins, in this order:
+
+    1. ``api_key`` -- the key passed to the client or factory.
+    2. ``config.api_key`` -- the key on a :class:`VeniceAIConfig`.
+    3. The ``VENICE_API_KEY`` environment variable.
+
+    An explicit empty string stops the lookup and means "no API key", so a
+    caller can authenticate with a wallet even when ``VENICE_API_KEY`` is set.
+
+    Args:
+        api_key: The explicitly passed key, or ``None``.
+        config: The client configuration, if any.
+
+    Returns:
+        The key with surrounding whitespace removed; ``""`` when no source
+        provides one.
+    """
+    if api_key is None and config is not None:
+        api_key = config.api_key
+    if api_key is None:
+        api_key = os.environ.get(API_KEY_ENV_VAR)
+    return (api_key or "").strip()
+
 
 def create_auth_headers(api_key: str) -> dict[str, str]:
     """Create authentication headers from an API key."""

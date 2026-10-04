@@ -65,6 +65,11 @@ def test_embeddings_resolves_embedding_kind(runner):
     assert captured.get("kind") == "embedding"
 
 
+def test_decisions_resolves_decision_kind(runner):
+    captured = _invoke_capture(runner, _SRC, ["decisions", "hello world", "--noul", "q", "Yes?"])
+    assert captured.get("kind") == "decision"
+
+
 def test_chat_resolves_chat_kind(runner):
     captured = _invoke_capture(
         runner, "venice_ai.cli.commands.chat.resolve_default_model", ["chat", "start", "hello"]

@@ -34,6 +34,36 @@ def _key_prefix(redis_key_prefix: str | None) -> str:
     return redis_key_prefix
 
 
+# Environment variables that supply the Redis URL when none is passed, in
+# precedence order: the SDK's own nested setting
+# (``VeniceAIConfig.backend.redis.redis_url``), then the short form.
+_REDIS_URL_ENV_VARS = ("VENICE_BACKEND__REDIS__REDIS_URL", "VENICE_REDIS_URL")
+
+
+def _resolve_redis_url(redis_url: str | None, allow_localhost: bool) -> str:
+    """Return the production Redis URL: ``redis_url`` or the first env var set.
+
+    Raises:
+        ValueError: If no URL is passed or set, or it points at localhost
+            (unless ``allow_localhost`` is set, which only tests do).
+    """
+    if redis_url is None:
+        redis_url = next((v for name in _REDIS_URL_ENV_VARS if (v := os.getenv(name))), None)
+        if redis_url is None:
+            raise ValueError(
+                "Production Redis URL required. Pass redis_url or set "
+                "VENICE_BACKEND__REDIS__REDIS_URL (or VENICE_REDIS_URL)."
+            )
+    if not allow_localhost and ("localhost" in redis_url or "127.0.0.1" in redis_url):
+        raise ValueError(
+            f"Invalid Redis URL for production: {redis_url}\n"
+            "localhost/127.0.0.1 URLs are not allowed in production mode.\n"
+            "This will fail in distributed/multi-instance environments.\n"
+            "Use a network-accessible Redis instance instead."
+        )
+    return redis_url
+
+
 def create_production_config(
     redis_url: str | None = None,
     redis_key_prefix: str | None = None,
@@ -54,7 +84,8 @@ def create_production_config(
 
     Args:
         redis_url: Redis connection URL. **REQUIRED** for production use.
-            Set via VENICE_REDIS_URL environment variable or pass explicitly.
+            When omitted, read from ``VENICE_BACKEND__REDIS__REDIS_URL``, or
+            from ``VENICE_REDIS_URL`` if that is unset.
             Example: redis://user:pass@prod-redis:6379/0
             **CRITICAL:** Using localhost in production will cause failures in
             distributed/multi-instance environments.
@@ -69,11 +100,12 @@ def create_production_config(
         VeniceAIConfig configured for production use
 
     Raises:
-        ValueError: If redis_url is not provided via parameter or VENICE_REDIS_URL environment variable
+        ValueError: If redis_url is not passed and neither
+            VENICE_BACKEND__REDIS__REDIS_URL nor VENICE_REDIS_URL is set
 
     Example:
         >>> import os
-        >>> os.environ['VENICE_REDIS_URL'] = 'redis://prod-redis:6379'
+        >>> os.environ['VENICE_BACKEND__REDIS__REDIS_URL'] = 'redis://prod-redis:6379'
         >>> from venice_ai.presets import create_production_config
         >>> from venice_ai import VeniceClient
         >>>
@@ -83,31 +115,14 @@ def create_production_config(
         >>> client = VeniceClient(config=config, api_key="your-key")
 
     Best Practices:
-        - **ALWAYS** set VENICE_REDIS_URL environment variable in production
+        - **ALWAYS** set VENICE_BACKEND__REDIS__REDIS_URL (or VENICE_REDIS_URL) in production
         - Use a dedicated Redis instance for production
         - Monitor Redis connection pool metrics
         - Adjust max_concurrent_executions based on your rate limits
         - Enable metrics for production observability
         - Use separate Redis databases (or instances) for different environments
     """
-    # Validate Redis URL is provided
-    if redis_url is None:
-        redis_url = os.getenv("VENICE_REDIS_URL")
-        if redis_url is None:
-            raise ValueError(
-                "Production Redis URL required. Set VENICE_REDIS_URL "
-                "environment variable or pass redis_url parameter."
-            )
-
-    # STRICT validation: reject localhost in production
-    # Allow override for testing purposes only
-    if not _allow_localhost_for_testing and ("localhost" in redis_url or "127.0.0.1" in redis_url):
-        raise ValueError(
-            f"Invalid Redis URL for production: {redis_url}\n"
-            "localhost/127.0.0.1 URLs are not allowed in production mode.\n"
-            "This will fail in distributed/multi-instance environments.\n"
-            "Use a network-accessible Redis instance instead."
-        )
+    redis_url = _resolve_redis_url(redis_url, _allow_localhost_for_testing)
 
     return VeniceAIConfig(
         environment="production",
@@ -178,7 +193,8 @@ def create_production_config_high_throughput(
 
     Args:
         redis_url: Redis connection URL. **REQUIRED** for production use.
-            Set via VENICE_REDIS_URL environment variable or pass explicitly.
+            When omitted, read from ``VENICE_BACKEND__REDIS__REDIS_URL``, or
+            from ``VENICE_REDIS_URL`` if that is unset.
             **CRITICAL:** Using localhost in production will cause failures in
             distributed/multi-instance environments.
         redis_key_prefix: Deprecated and ignored; see :func:`create_production_config`.
@@ -187,30 +203,14 @@ def create_production_config_high_throughput(
         VeniceAIConfig optimized for high throughput
 
     Raises:
-        ValueError: If redis_url is not provided via parameter or VENICE_REDIS_URL environment variable
+        ValueError: If redis_url is not passed and neither
+            VENICE_BACKEND__REDIS__REDIS_URL nor VENICE_REDIS_URL is set
 
     Warning:
         Only use this preset if you have sufficient rate limits and
         infrastructure to handle high concurrency.
     """
-    # Validate Redis URL is provided
-    if redis_url is None:
-        redis_url = os.getenv("VENICE_REDIS_URL")
-        if redis_url is None:
-            raise ValueError(
-                "Production Redis URL required. Set VENICE_REDIS_URL "
-                "environment variable or pass redis_url parameter."
-            )
-
-    # STRICT validation: reject localhost in production
-    # Allow override for testing purposes only
-    if not _allow_localhost_for_testing and ("localhost" in redis_url or "127.0.0.1" in redis_url):
-        raise ValueError(
-            f"Invalid Redis URL for production: {redis_url}\n"
-            "localhost/127.0.0.1 URLs are not allowed in production mode.\n"
-            "This will fail in distributed/multi-instance environments.\n"
-            "Use a network-accessible Redis instance instead."
-        )
+    redis_url = _resolve_redis_url(redis_url, _allow_localhost_for_testing)
 
     return VeniceAIConfig(
         environment="production",
@@ -273,7 +273,8 @@ def create_production_config_conservative(
 
     Args:
         redis_url: Redis connection URL. **REQUIRED** for production use.
-            Set via VENICE_REDIS_URL environment variable or pass explicitly.
+            When omitted, read from ``VENICE_BACKEND__REDIS__REDIS_URL``, or
+            from ``VENICE_REDIS_URL`` if that is unset.
             **CRITICAL:** Using localhost in production will cause failures in
             distributed/multi-instance environments.
         redis_key_prefix: Deprecated and ignored; see :func:`create_production_config`.
@@ -282,26 +283,10 @@ def create_production_config_conservative(
         VeniceAIConfig optimized for reliability
 
     Raises:
-        ValueError: If redis_url is not provided via parameter or VENICE_REDIS_URL environment variable
+        ValueError: If redis_url is not passed and neither
+            VENICE_BACKEND__REDIS__REDIS_URL nor VENICE_REDIS_URL is set
     """
-    # Validate Redis URL is provided
-    if redis_url is None:
-        redis_url = os.getenv("VENICE_REDIS_URL")
-        if redis_url is None:
-            raise ValueError(
-                "Production Redis URL required. Set VENICE_REDIS_URL "
-                "environment variable or pass redis_url parameter."
-            )
-
-    # STRICT validation: reject localhost in production
-    # Allow override for testing purposes only
-    if not _allow_localhost_for_testing and ("localhost" in redis_url or "127.0.0.1" in redis_url):
-        raise ValueError(
-            f"Invalid Redis URL for production: {redis_url}\n"
-            "localhost/127.0.0.1 URLs are not allowed in production mode.\n"
-            "This will fail in distributed/multi-instance environments.\n"
-            "Use a network-accessible Redis instance instead."
-        )
+    redis_url = _resolve_redis_url(redis_url, _allow_localhost_for_testing)
 
     return VeniceAIConfig(
         environment="production",

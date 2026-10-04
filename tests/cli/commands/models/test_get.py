@@ -113,6 +113,48 @@ class TestGetAsync:
             assert payload["id"] == "llama-3.3-70b"
 
     @pytest.mark.asyncio
+    async def test_get_json_output_keeps_capabilities(self):
+        from venice_ai.types.api.models import ModelResponse
+
+        model = ModelResponse.model_validate(
+            {
+                "id": "llama-3.3-70b",
+                "object": "model",
+                "created": 0,
+                "owned_by": "venice.ai",
+                "type": "text",
+                "model_spec": {
+                    "name": "Llama",
+                    "availableContextTokens": 131072,
+                    "capabilities": {
+                        "optimizedForCode": False,
+                        "quantization": "fp8",
+                        "supportsFunctionCalling": True,
+                        "supportsReasoning": False,
+                        "supportsResponseSchema": True,
+                        "supportsVision": True,
+                        "supportsWebSearch": False,
+                        "supportsLogProbs": False,
+                    },
+                },
+            }
+        )
+        mock_client = AsyncMock()
+        mock_client.models.get = AsyncMock(return_value=model)
+
+        with (
+            patch("venice_ai.VeniceClient") as MockClient,
+            patch("venice_ai.cli.config.ensure_api_key", return_value="test-key"),
+            patch("venice_ai.cli.commands.models.get.click.echo") as mock_echo,
+        ):
+            _setup_client(MockClient, mock_client)
+            await _get_async(_make_ctx(), model_id="llama-3.3-70b", output_json=True)
+
+        spec = json.loads(mock_echo.call_args[0][0])["model_spec"]
+        assert spec["availableContextTokens"] == 131072
+        assert spec["capabilities"]["supportsVision"] is True
+
+    @pytest.mark.asyncio
     async def test_get_value_error_exits_nonzero(self):
         mock_client = AsyncMock()
         mock_client.models.get = AsyncMock(side_effect=ValueError("not found"))

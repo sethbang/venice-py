@@ -171,7 +171,7 @@ async with VeniceClient() as client:
         await job.download(Path("track.mp3"), status)
 ```
 
-The `async with job:` block is **mandatory** — it guarantees server-side cleanup if your code exits early. `await job.wait()` polls until completion or timeout; `job.download()` writes the asset.
+The `async with job:` block is **mandatory** — it releases the stored output once the block finishes cleanly. If the block raises (for example the download fails), the output is kept for a retry and a WARNING names the `queue_id`. `await job.wait()` polls until completion or timeout; `job.download()` writes the asset.
 
 **Why both `async` keywords?** `client.music.run(...)` is an async function (it submits the queue request), and its return value `MusicJob` is itself an async context manager (it owns the server-side cleanup). The `await` resolves the coroutine; the `async with` then enters the context manager. So the full shape is `async with await client.music.run(...) as job:`. The same pattern applies to `client.video.run(...)` and `client.image.submit(...)`. If you only see one keyword, you're missing one — `async with client.music.run(...)` won't work because you're trying to enter a coroutine, and `await client.music.run(...) as job` is a syntax error.
 
@@ -210,14 +210,14 @@ against `spec.duration_options` when the catalog is reachable; otherwise
 the server is the backstop.
 
 Other patterns:
-- **Image-to-video**: pass `image_url="https://..."` (a public or `data:` URL string) to `client.video.run()`.
+- **Image-to-video**: pass `image_url="https://..."` (a public or `data:` URL string) to `client.video.run()`. Resolve with `video_type="image-to-video"` for a plain image-to-video model; reference-to-video, transition, first/last-frame and multi-angle models share that catalog type and need `input_mode="reference"` (etc.) instead.
 - **Upscale**: `client.video.run(model=..., video_url=..., upscale_factor=2)` (model-dependent).
 - **Reference fields** (`run()`/`submit()`): `reference_image_urls` (≤9, style/identity),
   `reference_audio_urls` (≤3, R2V audio donors for vocal timbre/narration/SFX on
   Seedance 2.0 R2V models — each 2–15s `.wav`/`.mp3`, **must be paired with a
   reference image/video**), `end_image_url` (transitions), and `elements` /
   `scene_image_urls` (element-aware models). Each accepts a public URL or a `data:` URL.
-- **Cancel a running job**: `await client.video.cancel(model=..., queue_id=...)` (keyword-only).
+- **Release a finished job's stored media**: `await job.cancel()` on the `VideoJob` (the `async with` block does it on a clean exit once the job finished). It does not stop generation or refund the job, and before the job finishes it deletes nothing. Models whose queue response carries a `download_url` keep the file behind that link: `job.cancel()` sends `DELETE` to it (no API key) before `/video/complete`, which answers 400 "Request ID is invalid" for such jobs. The resource-level `client.video.cancel(model=..., queue_id=...)` (keyword-only) only calls `/video/complete`.
 - `client.video.quote(...)` returns USD cost before launching.
 
 ## Cost-quote-before-run

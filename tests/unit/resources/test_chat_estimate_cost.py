@@ -136,7 +136,7 @@ class TestEstimateCost:
             expected_completion_tokens=200,
             venice_parameters={"include_venice_system_prompt": False},
         )
-        assert result.prompt_tokens == 6
+        assert result.prompt_tokens - result.template_overhead_tokens == 6
         assert result.venice_system_prompt_tokens == 0
         assert result.expected_completion_tokens == 200
 
@@ -156,11 +156,13 @@ class TestEstimateCost:
             expected_completion_tokens=500,
             venice_parameters={"include_venice_system_prompt": False},
         )
-        # 1001 / 1_000_000 * 3.0 = 0.003003
-        assert result.prompt_cost_usd == Decimal("0.003003")
+        # (1001 + template overhead) / 1_000_000 * 3.0
+        assert result.prompt_tokens == 1001 + result.template_overhead_tokens
+        expected_prompt = Decimal(result.prompt_tokens) / Decimal(1_000_000) * Decimal("3.0")
+        assert result.prompt_cost_usd == expected_prompt
         # 500 / 1_000_000 * 6.0 = 0.003
         assert result.completion_cost_usd == Decimal("0.003000")
-        assert result.total_cost_usd == Decimal("0.006003")
+        assert result.total_cost_usd == expected_prompt + Decimal("0.003000")
 
     @pytest.mark.asyncio
     async def test_custom_tokens_per_word(self):
@@ -174,7 +176,7 @@ class TestEstimateCost:
             tokens_per_word=2.0,
             venice_parameters={"include_venice_system_prompt": False},
         )
-        assert result.prompt_tokens == 10  # 5 * 2.0
+        assert result.prompt_tokens - result.template_overhead_tokens == 10  # 5 * 2.0
 
     @pytest.mark.asyncio
     async def test_default_completion_tokens(self):

@@ -3,358 +3,245 @@
 Venice AI SDK - Model Selection by Traits and Compatibility
 ===========================================================
 
-This example demonstrates how to use Venice AI's intelligent model selection features:
-- Selecting models by semantic traits (fastest, default)
-- Cross-platform compatibility mappings for seamless migration
-- Smart model discovery for different use cases
+This example demonstrates how to use Venice AI's model selection features:
+- Selecting models by the semantic traits the API publishes (``default``,
+  ``default_code``, ``highest_quality``, ...). The trait set differs per model
+  type and changes over time, so it is always read from ``list_traits()``.
+- Cross-platform compatibility mappings, and how to judge whether an alias
+  still points where you want it to
+- Falling back to ``resolve_*()`` when a type has no mapping
+
+All calls here are read-only catalog lookups — running this example costs nothing.
 """
 
 import asyncio
 import sys
+from collections import Counter
 
-from venice_ai import VeniceClient
-from venice_ai.types.api import TextModelSpec
+from venice_ai import NoMatchingModelError, VeniceClient
+from venice_ai.exceptions import VeniceError
+from venice_ai.types.api import KNOWN_MODEL_TYPES, ModelResponse, TextModelSpec
+
+
+def _describe(model: ModelResponse | None) -> str:
+    """Short catalog description of a model, or a note that it isn't listed."""
+    if model is None:
+        return "not in the current catalog"
+    parts = [model.model_spec.name or model.id]
+    spec = model.model_spec
+    if isinstance(spec, TextModelSpec) and spec.availableContextTokens:
+        parts.append(f"{spec.availableContextTokens:,.0f} ctx")
+    if spec.deprecation is not None:
+        parts.append("DEPRECATED")
+    return ", ".join(parts)
+
+
+async def _load_catalog(client: VeniceClient) -> dict[str, ModelResponse]:
+    """Fetch the full catalog once and index it by model id."""
+    listing = await client.models.list()
+    return {m.id: m for m in listing.data}
 
 
 async def discover_models_by_traits() -> bool:
-    """Discover models using semantic traits for easy selection."""
+    """Discover every trait the API publishes, for every model type."""
     print("🏷️ Model Discovery by Traits")
     print("-" * 40)
 
-    # Only text and image types have traits
-    model_types = ["text", "image"]
+    try:
+        async with VeniceClient() as client:
+            catalog = await _load_catalog(client)
+            traits_by_type = {
+                model_type: (await client.models.list_traits(type=model_type)).data
+                for model_type in KNOWN_MODEL_TYPES
+            }
+    except VeniceError as e:
+        print(f"❌ Error reading traits: {e}")
+        return False
 
-    ok = True
-    async with VeniceClient() as client:
-        for model_type in model_types:
-            print(f"\n🎯 {model_type.upper()} Model Traits:")
+    without_traits = []
+    for model_type, traits in traits_by_type.items():
+        if not traits:
+            without_traits.append(model_type)
+            continue
+        print(f"\n🎯 {model_type.upper()}: {len(traits)} traits")
+        for trait_name, model_id in traits.items():
+            print(f"   🔹 {trait_name:26s} → {model_id} ({_describe(catalog.get(model_id))})")
 
-            try:
-                traits_response = await client.models.list_traits(type=model_type)
+    if without_traits:
+        print(f"\nℹ️ No traits published today for: {', '.join(without_traits)}")
+        print("   Use the resolve_*() helpers or catalog constraints for those types.")
 
-                if traits_response.data:
-                    print(f"   📊 Found {len(traits_response.data)} traits for {model_type} models")
-
-                    # Display all actual traits returned by the API
-                    for trait_name, model_id in traits_response.data.items():
-                        # Format trait name for display
-                        formatted_trait = trait_name.replace("_", " ").title()
-                        print(f"     🔹 {formatted_trait}")
-                        print(f"       → Model: {model_id}")
-
-                        # Get additional info about this model if possible
-                        try:
-                            models_list = await client.models.list(type=model_type)
-                            model_info = next(
-                                (m for m in models_list.data if m.id == model_id), None
-                            )
-                            if model_info and hasattr(model_info, "model_spec"):
-                                spec = model_info.model_spec
-                                if hasattr(spec, "name"):
-                                    print(f"       → Name: {spec.name}")
-                                # ``availableContextTokens`` only exists on
-                                # ``TextModelSpec``; narrow before accessing.
-                                if isinstance(spec, TextModelSpec) and spec.availableContextTokens:
-                                    print(
-                                        f"       → Context: {spec.availableContextTokens:,.0f} tokens"
-                                    )
-                        except Exception:
-                            pass  # Skip if we can't get additional info
-
-                        print()  # Empty line for readability
-                else:
-                    print("   ℹ️ No traits found for this model type")
-
-            except Exception as e:
-                print(f"   ❌ Error getting {model_type} traits: {e}")
-                ok = False
-
-    return ok
+    return any(traits_by_type.values())
 
 
 async def demonstrate_trait_based_selection() -> bool:
-    """Show practical examples of using traits for model selection."""
+    """Pick a model from an ordered trait preference, falling back gracefully."""
     print("\n🎯 Practical Trait-Based Selection")
     print("-" * 40)
 
+    # (title, model type, trait preference in order, rationale)
+    scenarios: list[tuple[str, str, list[str], str]] = [
+        (
+            "💬 Chat Application",
+            "text",
+            ["default"],
+            "The general-purpose default is the right start for chat",
+        ),
+        (
+            "💻 Coding Assistant",
+            "text",
+            ["default_code", "default"],
+            "Prefer the code-tuned model, fall back to the default",
+        ),
+        (
+            "🎨 Image Generation",
+            "image",
+            ["highest_quality", "default"],
+            "For creative work, quality is often preferred over speed",
+        ),
+    ]
+
     ok = True
     async with VeniceClient() as client:
-        # Example scenarios
-        scenarios = [
-            {
-                "name": "💬 Chat Application",
-                "type": "text",
-                "recommended_traits": ["default", "most_uncensored", "fastest"],
-                "description": "For a chat application, you want balanced performance",
-            },
-            {
-                "name": "🎨 Image Generation",
-                "type": "image",
-                "recommended_traits": ["highest_quality", "default"],
-                "description": "For creative work, quality is often preferred over speed",
-            },
-        ]
-
-        for scenario in scenarios:
-            print(f"\n{scenario['name']}")
-            print(f"   📝 {scenario['description']}")
-
+        for title, model_type, preference, rationale in scenarios:
+            print(f"\n{title}")
+            print(f"   📝 {rationale}")
             try:
-                traits_response = await client.models.list_traits(type=scenario["type"])
+                traits = (await client.models.list_traits(type=model_type)).data
+            except VeniceError as e:
+                print(f"   ❌ Error reading {model_type} traits: {e}")
+                ok = False
+                continue
 
-                if traits_response.data:
-                    print("   🎯 Recommended selection order:")
-
-                    for i, trait in enumerate(scenario["recommended_traits"], 1):
-                        model_id = traits_response.data.get(trait)
-                        if model_id:
-                            print(f"      {i}. {trait.title()}: {model_id}")
-                        else:
-                            print(f"      {i}. {trait.title()}: ❌ Not available")
-
-                    # Show what we'd actually use
-                    selected_model = None
-                    selected_trait = None
-                    for trait in scenario["recommended_traits"]:
-                        if trait in traits_response.data:
-                            selected_model = traits_response.data[trait]
-                            selected_trait = trait
-                            break
-
-                    if selected_model:
-                        print(f"   ✅ Would select: {selected_model} ({selected_trait})")
-                    else:
-                        print("   ❌ No suitable model found")
+            selected = None
+            for i, trait in enumerate(preference, 1):
+                model_id = traits.get(trait)
+                if model_id:
+                    print(f"      {i}. {trait}: {model_id}")
+                    selected = selected or (trait, model_id)
                 else:
-                    print(f"   ❌ No traits available for {scenario['type']} models")
+                    print(f"      {i}. {trait}: ℹ️ not offered for {model_type} today")
 
-            except Exception as e:
-                print(f"   ❌ Error: {e}")
+            if selected:
+                print(f"   ✅ Would select: {selected[1]} (trait '{selected[0]}')")
+            else:
+                print("   ❌ None of the preferred traits exist for this type")
                 ok = False
 
     return ok
 
 
+async def _load_compat(client: VeniceClient) -> dict[str, dict[str, str]]:
+    """Fetch the compatibility mapping for every known model type once."""
+    return {
+        model_type: (await client.models.list_compatibility(type=model_type)).data
+        for model_type in KNOWN_MODEL_TYPES
+    }
+
+
 async def explore_compatibility_mappings() -> bool:
-    """Explore cross-platform compatibility for easy migration."""
+    """Show the live alias map, and where the aliases actually land."""
     print("\n🔄 Cross-Platform Compatibility")
     print("-" * 40)
 
-    # Well-known external model names to check by type
-    test_models_by_type = {
-        "text": ["gpt-4.1", "o1-mini", "gpt-3.5-turbo", "claude-3-5-haiku-20241022"],
-        "image": ["flux-dev-uncensored-11"],
-        "embedding": ["text-embedding-ada-002", "text-embedding-3-small", "text-embedding-3-large"],
-    }
+    try:
+        async with VeniceClient() as client:
+            catalog = await _load_catalog(client)
+            compat = await _load_compat(client)
+    except VeniceError as e:
+        print(f"❌ Error reading compatibility mappings: {e}")
+        return False
 
-    # Per-type compat lookups legitimately skip types with no mappings, so we
-    # key success off whether *any* list_compatibility call returned, not off
-    # the result being non-empty. Start False; flip True on the first call that
-    # completes. If every call raises (e.g. bad key) this stays False.
-    ok = False
-    async with VeniceClient() as client:
-        all_mappings = {}
-        total_found = 0
+    total = sum(len(m) for m in compat.values())
+    print(f"📊 {total} compatibility aliases across {sum(1 for m in compat.values() if m)} types")
 
-        # Query compatibility mappings for each type
-        for model_type in ["text", "image", "embedding", "tts"]:
-            try:
-                compatibility_response = await client.models.list_compatibility(type=model_type)
-                ok = True
-                if compatibility_response.data:
-                    all_mappings.update(compatibility_response.data)
-            except Exception:
-                pass  # Skip if this type doesn't have compatibility mappings
+    for model_type, mapping in compat.items():
+        if not mapping:
+            continue
+        print(f"\n🔍 {model_type.upper()} aliases ({len(mapping)}):")
+        for alias, target in list(mapping.items())[:8]:
+            print(f"   📄 {alias} → {target}")
+        if len(mapping) > 8:
+            print(f"   ... and {len(mapping) - 8} more")
 
-        if all_mappings:
-            print(f"📊 Found {len(all_mappings)} total compatibility mappings")
+        # An alias is a compatibility shim, not a recommendation: many aliases
+        # can collapse onto one older target. Show where they land.
+        print("   🎯 Targets:")
+        for target, count in Counter(mapping.values()).most_common():
+            print(f"      {count:3d} alias(es) → {target} ({_describe(catalog.get(target))})")
 
-            # Check our test models by type
-            for model_type, test_models in test_models_by_type.items():
-                if test_models:
-                    print(f"\n🔍 {model_type.upper()} models:")
-                    type_found = 0
-
-                    for external_model in test_models:
-                        venice_equivalent = all_mappings.get(external_model)
-                        if venice_equivalent:
-                            print(f"   ✅ {external_model} → {venice_equivalent}")
-                            type_found += 1
-                            total_found += 1
-                        else:
-                            print(f"   ❌ {external_model} → No mapping found")
-
-                    if type_found > 0:
-                        print(
-                            f"   📈 Found mappings for {type_found}/{len(test_models)} {model_type} models"
-                        )
-
-            print(f"\n📊 Total: Found mappings for {total_found} models across all types")
-
-            # Show some additional mappings not in our test set
-            all_test_models = [m for models in test_models_by_type.values() for m in models]
-            other_mappings = {k: v for k, v in all_mappings.items() if k not in all_test_models}
-
-            if other_mappings:
-                print("\n🔍 Additional mappings (showing first 10):")
-                for _i, (external, venice) in enumerate(list(other_mappings.items())[:10]):
-                    print(f"   📄 {external} → {venice}")
-
-                if len(other_mappings) > 10:
-                    print(f"   ... and {len(other_mappings) - 10} more mappings")
-        else:
-            print("❌ No compatibility mappings found")
-
-    return ok
+    empty = [t for t, m in compat.items() if not m]
+    print(f"\nℹ️ No aliases published for: {', '.join(empty) or '(none)'}")
+    return True
 
 
-async def demonstrate_migration_workflow() -> bool:
-    """Show a complete migration workflow using compatibility mappings."""
+async def demonstrate_migration_workflow() -> bool | None:
+    """Plan a migration: compare each alias target with the resolver's pick.
+
+    Returns ``None`` (section skipped) when no type has a model to compare.
+    """
     print("\n🚀 Migration Workflow Example")
     print("-" * 40)
 
-    # Example migration scenario with diverse model types
-    outside_models_by_type = {
-        "text": ["gpt-4.1", "gpt-3.5-turbo", "claude-3-5-sonnet-20241022"],
-        "embedding": ["text-embedding-ada-002", "text-embedding-3-small"],
-        "image": ["flux-dev-uncensored-11", "dall-e-3"],
-        "tts": ["tts-1"],
-    }
-
-    # Flatten for display
-    all_outside_models = []
-    for models in outside_models_by_type.values():
-        all_outside_models.extend(models)
-
-    print("📋 Migrating application from multiple platforms to Venice AI")
-    print("   Legacy models in use:", ", ".join(all_outside_models))
-
-    # As in explore_compatibility_mappings: per-type compat lookups legitimately
-    # skip types with no mappings, so key success off any call completing rather
-    # than off a non-empty result. Start False; flip True on the first call that
-    # returns. The outer except below also forces False on an unexpected error.
-    ok = False
+    ok = True
     async with VeniceClient() as client:
-        migration_plan = {}
-        all_compatibility_mappings = {}
-
         try:
-            # Get compatibility mappings for each type
-            for model_type in ["text", "image", "embedding", "tts"]:
-                try:
-                    compatibility_response = await client.models.list_compatibility(type=model_type)
-                    ok = True
-                    if compatibility_response.data:
-                        all_compatibility_mappings.update(compatibility_response.data)
-                except Exception:
-                    pass  # Skip if this type doesn't have compatibility mappings
+            catalog = await _load_catalog(client)
+            compat = await _load_compat(client)
+        except VeniceError as e:
+            print(f"❌ Error loading catalog data: {e}")
+            return False
 
-            print("\n🔍 Migration Analysis:")
+        resolvers = {
+            "text": client.models.resolve_chat,
+            "embedding": client.models.resolve_embedding,
+            "image": client.models.resolve_image,
+            "tts": client.models.resolve_tts,
+        }
 
-            for model_type, outside_models in outside_models_by_type.items():
-                if outside_models:
-                    print(f"\n📦 {model_type.upper()} Models:")
+        print("📋 For each type: what an existing alias maps to, versus what the")
+        print("   resolver would choose for new code today.")
 
-                    for out_model in outside_models:
-                        venice_equivalent = all_compatibility_mappings.get(out_model)
+        resolved_types: list[str] = []
+        for model_type, resolve in resolvers.items():
+            try:
+                resolved = await resolve()
+            except NoMatchingModelError:
+                # A type with no model today is a catalog fact, not a failure.
+                print(f"\n📦 {model_type.upper()}: ℹ️ no {model_type} model in the catalog")
+                continue
+            except VeniceError as e:
+                print(f"\n📦 {model_type.upper()}: ❌ resolver failed: {e}")
+                ok = False
+                continue
 
-                        if venice_equivalent:
-                            print(f"   ✅ {out_model} → {venice_equivalent}")
-                            migration_plan[out_model] = venice_equivalent
+            resolved_types.append(model_type)
+            mapping = compat.get(model_type, {})
+            print(f"\n📦 {model_type.upper()}")
+            print(f"   🤖 resolver pick: {resolved} ({_describe(catalog.get(resolved))})")
+            if not mapping:
+                print("   ℹ️ No aliases for this type; resolve the model by capability instead.")
+                continue
 
-                            # Get additional info about the Venice model
-                            try:
-                                models_list = await client.models.list(type=model_type)
-                                venice_model_info = next(
-                                    (m for m in models_list.data if m.id == venice_equivalent), None
-                                )
+            targets = Counter(mapping.values())
+            for target, count in targets.most_common():
+                verdict = "matches the resolver" if target == resolved else "differs from resolver"
+                print(f"   🔁 {count} alias(es) → {target}: {verdict}")
 
-                                if venice_model_info and hasattr(venice_model_info, "model_spec"):
-                                    spec = venice_model_info.model_spec
-                                    print(f"     📋 Venice model: {spec.name or venice_equivalent}")
-                                    # ``availableContextTokens`` and ``capabilities``
-                                    # are on ``TextModelSpec`` only.
-                                    if (
-                                        isinstance(spec, TextModelSpec)
-                                        and spec.availableContextTokens
-                                    ):
-                                        print(
-                                            f"     📏 Context length: {spec.availableContextTokens:,.0f} tokens"
-                                        )
+        print("\n📝 Migration guidance:")
+        print("   • Aliases keep existing code running, but their targets are fixed")
+        print("     server-side and can lag behind newer models.")
+        print("   • For new or migrated code, call resolve_chat() / resolve_embedding() /")
+        print("     resolve_image() / resolve_tts() so the choice tracks the catalog.")
+        print("   • A trait is the one model Venice tags for a role. resolve_chat() filters")
+        print("     by capability and passes over reasoning models unless you ask for")
+        print("     reasoning, so its pick can differ from the 'default' trait above.")
+        print("   • resolve_chat(prefer='cheapest') ranks strictly by price, reasoning")
+        print("     models included; add exclude_reasoning=True for direct answers.")
 
-                                    # Show capabilities for text models
-                                    if (
-                                        model_type == "text"
-                                        and isinstance(spec, TextModelSpec)
-                                        and spec.capabilities
-                                    ):
-                                        caps = spec.capabilities
-                                        features = []
-                                        if caps.supportsFunctionCalling:
-                                            features.append("Function Calling")
-                                        if caps.supportsVision:
-                                            features.append("Vision")
-                                        if caps.supportsWebSearch:
-                                            features.append("Web Search")
-                                        if features:
-                                            print(f"     🔧 Features: {', '.join(features)}")
-
-                            except Exception:
-                                pass  # Skip detailed info if error
-
-                        else:
-                            print(f"   ❌ {out_model} → No direct equivalent found")
-
-                            # Suggest alternatives based on traits for text and image types
-                            if model_type in ["text", "image"]:
-                                try:
-                                    traits_response = await client.models.list_traits(
-                                        type=model_type
-                                    )
-                                    if traits_response.data:
-                                        recommended = traits_response.data.get("default")
-                                        if recommended:
-                                            print(
-                                                f"     💡 Suggested alternative: {recommended} (default {model_type} model)"
-                                            )
-                                            migration_plan[out_model] = recommended
-                                except Exception:
-                                    pass
-                            # For other types, suggest the first available model
-                            elif model_type in ["embedding", "tts"]:
-                                try:
-                                    models_list = await client.models.list(type=model_type)
-                                    if models_list.data:
-                                        recommended = models_list.data[0].id
-                                        print(
-                                            f"     💡 Suggested alternative: {recommended} (available {model_type} model)"
-                                        )
-                                        migration_plan[out_model] = recommended
-                                except Exception:
-                                    pass
-
-            # Summary
-            print("\n📊 Migration Summary:")
-            direct_mappings = len([k for k in migration_plan if all_compatibility_mappings.get(k)])
-            alternatives = len(migration_plan) - direct_mappings
-            no_solution = len(all_outside_models) - len(migration_plan)
-
-            print(f"   ✅ Direct mappings: {direct_mappings}")
-            print(f"   💡 Alternative suggestions: {alternatives}")
-            print(f"   ❌ No solution found: {no_solution}")
-
-            if migration_plan:
-                print("\n📝 Final Migration Plan:")
-                for legacy, venice in migration_plan.items():
-                    mapping_type = (
-                        "Direct" if all_compatibility_mappings.get(legacy) else "Alternative"
-                    )
-                    print(f"   {legacy} → {venice} ({mapping_type})")
-
-        except Exception as e:
-            print(f"❌ Error creating migration plan: {e}")
-            ok = False
-
+    if ok and not resolved_types:
+        print("Section skipped: no resolver found a model of any type in the catalog")
+        return None
     return ok
 
 
@@ -367,27 +254,31 @@ async def main() -> int:
     print("🚀 Venice AI Model Selection & Compatibility Examples")
     print("=" * 70)
 
-    results: list[tuple[str, bool]] = [
+    # Each section returns True (passed), False (failed) or None (skipped).
+    results: list[tuple[str, bool | None]] = [
         ("discover_models_by_traits", await discover_models_by_traits()),
         ("demonstrate_trait_based_selection", await demonstrate_trait_based_selection()),
         ("explore_compatibility_mappings", await explore_compatibility_mappings()),
         ("demonstrate_migration_workflow", await demonstrate_migration_workflow()),
     ]
 
-    failed = [name for name, ok in results if not ok]
+    failed = [name for name, ok in results if ok is False]
+    skipped = [name for name, ok in results if ok is None]
+
+    if failed:
+        print(f"\n❌ {len(failed)} of {len(results)} sections failed: {', '.join(failed)}")
+        return 1
+    if skipped:
+        print(f"\n✅ Catalog sections verified; skipped: {', '.join(skipped)}")
+        return 0
 
     print("\n✨ Model selection examples completed!")
-    if failed:
-        print(f"\n❌ {len(failed)} section(s) failed: {', '.join(failed)}")
     print("\n💡 Key concepts demonstrated:")
-    print("   - Semantic trait-based model discovery (default, fastest)")
-    print("   - Practical model selection for different use cases")
-    print("   - Cross-platform compatibility mappings")
-    print("   - Complete migration workflow from other AI platforms")
-    print("   - Model capabilities and specifications analysis")
-    print("   - Fallback strategies when direct mappings aren't available")
-
-    return 1 if failed else 0
+    print("   - Reading the per-type trait set from list_traits()")
+    print("   - Ordered trait preferences with graceful fallback")
+    print("   - Inspecting compatibility aliases and where they land")
+    print("   - Choosing resolve_*() over aliases for new code")
+    return 0
 
 
 if __name__ == "__main__":
@@ -398,5 +289,5 @@ if __name__ == "__main__":
         sys.exit(130)
     except Exception as e:
         print(f"\n❌ Error: {e}", file=sys.stderr)
-        print("Check that your API key is valid and you have appropriate access.", file=sys.stderr)
+        print("Check your network connection and API key.", file=sys.stderr)
         sys.exit(1)

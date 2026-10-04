@@ -90,8 +90,8 @@ class VideoFailedStatus(VeniceBaseModel):
     model_config = ConfigDict(extra="allow")
 
     status: Literal["FAILED"] = Field(..., description="Failed status")
-    error: str | None = Field(None, description="Error message if available")
-    error_code: str | None = Field(None, description="Error code if available")
+    error: str | None = Field(default=None, description="Error message if available")
+    error_code: str | None = Field(default=None, description="Error code if available")
 
 
 class VideoCompletedStatus(VeniceBaseModel):
@@ -109,8 +109,8 @@ class VideoCompletedStatus(VeniceBaseModel):
     model_config = ConfigDict(extra="allow")
 
     status: Literal["COMPLETED"] = Field(..., description="Completed status")
-    url: str | None = Field(None, description="Download URL if provided")
-    expires_at: str | None = Field(None, description="URL expiration timestamp")
+    url: str | None = Field(default=None, description="Download URL if provided")
+    expires_at: str | None = Field(default=None, description="URL expiration timestamp")
 
     # Binary video data when the API returns the video inline (non-JSON).
     # Stored as a PrivateAttr because it is set programmatically, not
@@ -151,7 +151,7 @@ class VideoTranscriptionResponse(VeniceBaseModel):
 
     transcript: str = Field(..., description="The transcribed text from the video")
     lang: str | None = Field(
-        None, description="Detected language code for the transcript (e.g. 'en')"
+        default=None, description="Detected language code for the transcript (e.g. 'en')"
     )
 
 

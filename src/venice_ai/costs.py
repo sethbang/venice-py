@@ -26,7 +26,9 @@ Pricing Models:
 
 Cost Types:
     * **USD**: Traditional US Dollar pricing for enterprise billing
-    * **DIEM**: Platform currency where 1 DIEM = $1 USD
+    * **DIEM**: The staking allowance. Each staked DIEM grants $1 of credit
+      per epoch (resetting at 00:00 UTC), and requests are priced from the
+      same USD price sheet, so a DIEM price equals the USD price
 
 Example:
     >>> from venice_ai.costs import calculate_completion_cost, estimate_completion_cost
@@ -68,17 +70,56 @@ if TYPE_CHECKING:
 class ChatCostEstimate(BaseModel):
     """Pre-flight cost estimate for a chat completion request.
 
-    Returned by :meth:`client.chat.completions.estimate_cost`. Token counts
-    are heuristic word-count approximations (the same approach the
-    :func:`estimate_completion_cost` helper uses) plus, unless the request
-    opts out, a fixed allowance for the system prompt Venice injects;
-    ``total_cost_usd`` is therefore an estimate, not a guarantee.
+    Returned by :meth:`client.chat.completions.estimate_cost`. Message text
+    is counted with the word heuristic (the same approach the
+    :func:`estimate_completion_cost` helper uses). On top of it come an
+    allowance for the chat template the model wraps the request in, an
+    allowance for the ``tools`` and ``response_format`` (``schema_tokens``)
+    and, unless the request opts out, an allowance for the system prompt
+    Venice injects.
+
+    Venice has no tokenize endpoint, so ``total_cost_usd`` is an estimate,
+    not a guarantee. Every allowance is sized to be at least what the
+    measured models bill, so for English prose the estimate is meant to err
+    high; see :data:`TOOLS_TEMPLATE_TOKEN_ALLOWANCE` and
+    :data:`SCHEMA_JSON_CHARS_PER_TOKEN` for how the schema allowance was
+    derived and how far it can overstate. Text that tokenizes worse than
+    ``tokens_per_word`` assumes (code, CJK) can still exceed the estimate.
+
+    The estimate covers the request you send, not a system prompt built into
+    a model's own chat template. The catalog does not publish one, and some
+    models carry one: a measured model billed about 550 prompt tokens for a
+    one-word message with the Venice system prompt off. To budget for such a
+    model, send a one-word request once with ``max_completion_tokens=1`` and
+    add the difference between its billed prompt tokens and its estimate.
     """
 
     model: str = Field(..., description="Model id used for the estimate")
     prompt_tokens: int = Field(
         ...,
-        description="Estimated input token count, including venice_system_prompt_tokens",
+        description=(
+            "Estimated input token count, including template_overhead_tokens, "
+            "schema_tokens and venice_system_prompt_tokens"
+        ),
+    )
+    template_overhead_tokens: int = Field(
+        default=0,
+        description=(
+            "Allowance for the tokens the model's chat template adds: "
+            "CHAT_TEMPLATE_TOKEN_ALLOWANCE per request plus "
+            "CHAT_MESSAGE_TOKEN_ALLOWANCE per message. An upper-bound constant, "
+            "not an exact count."
+        ),
+    )
+    schema_tokens: int = Field(
+        default=0,
+        description=(
+            "Allowance for the tools and response_format: the compact JSON at "
+            "SCHEMA_JSON_CHARS_PER_TOKEN characters per token, plus "
+            "TOOLS_TEMPLATE_TOKEN_ALLOWANCE once when tools are sent. Sized to "
+            "cover every measured chat template, so it can overstate a model "
+            "whose template renders tools compactly."
+        ),
     )
     venice_system_prompt_tokens: int = Field(
         default=0,
@@ -105,6 +146,38 @@ class ChatCostEstimate(BaseModel):
 #: sits at the top of that range: an estimate should err towards overstating
 #: cost. It is an allowance, not an exact count.
 VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE = 1750
+
+#: Prompt-token allowance per request for the chat template a model wraps the
+#: conversation in (start markers, the generation prompt). For one identical
+#: 9-word prompt, models were billed between 3 and 16 tokens more than its
+#: text, so this errs high. An allowance, not a count.
+CHAT_TEMPLATE_TOKEN_ALLOWANCE = 20
+
+#: Prompt-token allowance per message for its role header and separators.
+CHAT_MESSAGE_TOKEN_ALLOWANCE = 4
+
+#: Prompt-token allowance for the tool-calling instructions a chat template
+#: adds once per request when ``tools`` are sent, on top of the tool JSON
+#: itself (counted at :data:`SCHEMA_JSON_CHARS_PER_TOKEN`). Measured on
+#: five chat models from five providers, Venice system prompt off: a 256-character tool definition added 43 to 270 prompt tokens, a
+#: 1,410-character one 250 to 741, and both together 283 to 864. Splitting
+#: each model's cost into a fixed part and a per-character part puts the
+#: fixed part between 0 and about 170 tokens. This allowance sits above the
+#: largest. Together with the per-character rate, the tools allowance came
+#: out at least 1.2x the billed overhead on every model measured, and up to
+#: about 7.8x for a small tool on the most compact template. An allowance,
+#: not a count.
+TOOLS_TEMPLATE_TOKEN_ALLOWANCE = 200
+
+#: Characters of compact JSON per prompt token used to size the ``tools`` and
+#: ``response_format`` allowance. In the same measurements, tool
+#: JSON cost one token per 2.45 to 3.4 characters on open-weight chat
+#: templates (JSON tokenizes worse than prose, and templates re-render it) and
+#: less on a proprietary one. A ``json_schema`` response format added no
+#: prompt tokens on three models, which enforce it while decoding, and one
+#: token per 4.4 characters on a model that sends the schema in the prompt.
+#: Two characters per token sits below every measured rate.
+SCHEMA_JSON_CHARS_PER_TOKEN = 2
 
 _MILLION = Decimal("1000000")
 _ZERO = Decimal("0.00")
@@ -352,6 +425,7 @@ def estimate_completion_cost(
     tokens_per_word: float = 1.3,
     *,
     include_venice_system_prompt: bool = True,
+    template_overhead_tokens: int = CHAT_TEMPLATE_TOKEN_ALLOWANCE + CHAT_MESSAGE_TOKEN_ALLOWANCE,
 ) -> dict[str, Decimal]:
     """
     Estimate the cost of a chat completion before making the API request.
@@ -368,7 +442,9 @@ def estimate_completion_cost(
     * User-facing cost previews
 
     Estimation Methodology:
-        * **Input Tokens**: Estimated from word count using configurable ratio
+        * **Input Tokens**: Estimated from word count using configurable ratio,
+          plus ``template_overhead_tokens`` for the chat template the model
+          wraps the prompt in (one request with one message by default)
         * **Venice System Prompt**: Unless ``include_venice_system_prompt`` is
           ``False``, :data:`VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE` tokens are
           added for the system prompt Venice prepends. They are priced at
@@ -400,6 +476,10 @@ def estimate_completion_cost(
                         system prompt. Pass ``False`` when the request sets
                         ``venice_parameters.include_venice_system_prompt=False``;
                         the default matches the server default (``True``).
+        template_overhead_tokens: Allowance for the chat template, billed at the
+                        input rate. Defaults to one request with one message
+                        (:data:`CHAT_TEMPLATE_TOKEN_ALLOWANCE` +
+                        :data:`CHAT_MESSAGE_TOKEN_ALLOWANCE`).
 
     Returns:
         Dictionary with estimated cost breakdown containing:
@@ -445,7 +525,7 @@ def estimate_completion_cost(
     if not model_pricing:
         return {"usd": Decimal("0.00")}
 
-    prompt_tokens = int(len(prompt.split()) * tokens_per_word)
+    prompt_tokens = int(len(prompt.split()) * tokens_per_word) + template_overhead_tokens
     system_prompt_tokens = (
         VENICE_SYSTEM_PROMPT_TOKEN_ALLOWANCE if include_venice_system_prompt else 0
     )
@@ -518,16 +598,16 @@ class BudgetRemaining(BaseModel):
     """Remaining-budget snapshot returned by :meth:`BudgetManager.remaining`."""
 
     daily_remaining_usd: Decimal | None = Field(
-        None, description="USD remaining against the daily cap (None if no daily cap)"
+        default=None, description="USD remaining against the daily cap (None if no daily cap)"
     )
     daily_used_pct: float | None = Field(
-        None, description="Daily-cap usage as a 0–100 percentage (None if no daily cap)"
+        default=None, description="Daily-cap usage as a 0–100 percentage (None if no daily cap)"
     )
     monthly_remaining_usd: Decimal | None = Field(
-        None, description="USD remaining against the monthly cap (None if no monthly cap)"
+        default=None, description="USD remaining against the monthly cap (None if no monthly cap)"
     )
     monthly_used_pct: float | None = Field(
-        None, description="Monthly-cap usage as a 0–100 percentage (None if no monthly cap)"
+        default=None, description="Monthly-cap usage as a 0–100 percentage (None if no monthly cap)"
     )
 
 

@@ -11,14 +11,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
+from venice_ai._client import VeniceClient
 from venice_ai._resource import APIResource
 
 
 class MockClient:
-    """Mock client for testing APIResource."""
+    """Mock client for testing APIResource.
+
+    Header building and SIWE re-sign scoping are the real client's, so the
+    multipart path is exercised with the headers a real request carries.
+    """
+
+    _request_headers = VeniceClient._request_headers
+    _siwe_resigning = VeniceClient._siwe_resigning
+    _resolve_siwe_resigner = VeniceClient._resolve_siwe_resigner
+    _default_siwe_header = VeniceClient._default_siwe_header
 
     def __init__(self, api_key: str = "test-key"):
         self._api_key = api_key
+        self._auth = None
+        self._headers = None
+        self._timeout = aiohttp.ClientTimeout(total=30.0)
         self._base_url = MagicMock()
         self._base_url.__truediv__ = MagicMock(return_value="https://api.test.venice.ai/test-path")
         self._session = None
@@ -130,7 +143,7 @@ class TestAPIResourceMultipart:
 
     @pytest.mark.asyncio
     async def test_request_multipart_client_timeout_passthrough(self, api_resource, mock_client):
-        """A ClientTimeout instance is forwarded unchanged; omitting timeout sends no timeout kwarg."""
+        """A ClientTimeout instance is forwarded unchanged; omitting it sends the client's."""
         mock_session = AsyncMock()
         mock_session.headers = {}
         mock_response = AsyncMock()
@@ -158,10 +171,10 @@ class TestAPIResourceMultipart:
             )
             assert mock_session.request.call_args[1]["timeout"] is explicit
 
-            # No timeout arg -> the kwarg is omitted entirely (server/session default applies).
+            # No timeout arg -> the client's timeout, as on every other request path.
             mock_session.request.reset_mock()
             await api_resource._request_multipart("POST", "/upload", files={"image": b"x"})
-            assert "timeout" not in mock_session.request.call_args[1]
+            assert mock_session.request.call_args[1]["timeout"] is mock_client._timeout
 
     @pytest.mark.asyncio
     async def test_request_multipart_tuple_3_elements_bytes(self, api_resource, mock_client):
@@ -354,7 +367,7 @@ class TestAPIResourceMultipart:
 
     @pytest.mark.asyncio
     async def test_request_multipart_missing_auth_header(self, api_resource, mock_client):
-        """Test that auth header is added when missing."""
+        """The client's key is attached when the call passes no Authorization header."""
         mock_session = AsyncMock()
         mock_session.headers = {}
         mock_response = AsyncMock()
@@ -384,13 +397,11 @@ class TestAPIResourceMultipart:
 
         files = {"file": b"content"}
 
-        with patch("venice_ai.core.auth.create_auth_headers") as mock_auth:
-            mock_auth.return_value = {"Authorization": "Bearer test-key"}
-
-            result = await api_resource._request_multipart("POST", "/upload", files=files)
+        result = await api_resource._request_multipart("POST", "/upload", files=files)
 
         assert result == {"success": True}
-        mock_auth.assert_called_once_with("test-key")
+        sent = mock_session.request.call_args.kwargs["headers"]
+        assert sent["Authorization"] == "Bearer test-key"
 
 
 class TestAPIResourceEdgeCases:

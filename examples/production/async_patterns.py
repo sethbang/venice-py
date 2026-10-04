@@ -3,12 +3,25 @@ Venice AI SDK - Production Async Patterns
 
 This example demonstrates production-ready asynchronous patterns for the Venice AI SDK:
 
-1. Concurrent request handling
-2. Async context managers
-3. Task cancellation and cleanup
+1. Async context managers
+2. Concurrent request handling
+3. Timeouts and task cancellation
 4. Error handling in async code
 5. Streaming with async iteration
-6. Connection pooling optimization
+6. Bounded concurrency with client.gather()
+7. Background tasks
+8. Scoped retry policies with client.with_retries()
+
+Every pattern checks its own result, including what each answer says: the
+prompts ask for short, checkable answers, so a refusal or an off-topic reply
+fails the pattern. The script exits non-zero if any pattern did not behave as
+described.
+
+The model is the cheapest one that answers directly
+(``resolve_chat(prefer="cheapest", exclude_reasoning=True)``): a reasoning
+model would spend these small completion budgets thinking. Every request
+passes ``include_venice_system_prompt=False``, so only the prompts shown here
+are billed.
 
 Requirements:
     pip install venice-py
@@ -16,148 +29,235 @@ Requirements:
 """
 
 import asyncio
+import contextlib
+import re
 import sys
+import time
+from collections.abc import Awaitable
+from typing import TypeVar
 
 from venice_ai import VeniceClient
+from venice_ai.exceptions import (
+    APIConnectionError,
+    NoMatchingModelError,
+    NotFoundError,
+    VeniceError,
+)
+from venice_ai.middleware.retry import RetryOptions
 from venice_ai.types.api.chat import ChatCompletionResponse
-from venice_ai.types.api.requests import UserMessage
+from venice_ai.types.api.requests import UserMessage, VeniceParameters
 
-# =============================================================================
-# Pattern 1: Concurrent Request Handling
-# =============================================================================
+T = TypeVar("T")
+
+# A deliberately bogus model id used to make one request fail. It is a
+# failure-trigger fixture, not a usage example: a model that does not exist
+# cannot be resolved with client.models.resolve_*().
+INVALID_MODEL = "venice-nonexistent-model"
+
+# Bill only the prompts shown here, not the system prompt Venice adds by default.
+OWN_PROMPT_ONLY = VeniceParameters(include_venice_system_prompt=False)
+
+# The words Pattern 6 expects back for 1 to 5.
+NUMBER_WORDS = ("one", "two", "three", "four", "five")
 
 
-async def example_concurrent_requests():
+def check_answer(response: ChatCompletionResponse, label: str, expected: str) -> bool:
+    """Print a one-line answer summary and report whether it answers the prompt.
+
+    A ``finish_reason`` of ``"length"`` means the answer was cut off at
+    ``max_completion_tokens``; an empty answer fails too, and so does one that
+    does not contain *expected* as a whole word (case-insensitive), such as a
+    refusal, or "none" when "one" is expected.
     """
-    Demonstrate efficient concurrent API request handling.
+    finish_reason = response.choices[0].finish_reason if response.choices else None
+    text = (response.text or "").strip().replace("\n", " ")
+    print(f"   {label}: {text}")
+    print(f"      finish_reason={finish_reason}")
+    if finish_reason == "length" or not text:
+        print("      ❌ answer was truncated or empty")
+        return False
+    if not re.search(rf"\b{re.escape(expected)}\b", text, re.IGNORECASE):
+        print(f"      ❌ answer does not contain {expected!r}")
+        return False
+    return True
 
-    Best practices:
-    - Use asyncio.gather() for concurrent requests
-    - Handle individual task failures gracefully
-    - Limit concurrency to avoid overwhelming the API
-    """
-    print("=" * 60)
-    print("Pattern 1: Concurrent Request Handling")
-    print("=" * 60)
 
-    async with VeniceClient() as client:
-        model = await client.models.resolve_chat()
-        # Define multiple prompts to process concurrently
-        prompts = [
-            "What is Python?",
-            "What is async/await?",
-            "What is Venice AI?",
-        ]
-
-        # Create tasks for concurrent execution
-        tasks = [
-            client.chat.completions.create(
-                model=model,
-                messages=[UserMessage(content=prompt)],
-                max_completion_tokens=50,
-            )
-            for prompt in prompts
-        ]
-
-        # Execute concurrently and gather results
-        print(f"\n🚀 Executing {len(tasks)} requests concurrently...")
-        responses: list[ChatCompletionResponse] = await asyncio.gather(*tasks)
-
-        # Process results
-        for i, response in enumerate(responses):
-            print(f"\n✅ Response {i + 1}:")
-            print(f"   Prompt: {prompts[i]}")
-            content = response.text or ""
-            print(f"   Answer: {content[:100]}...")
-            if response.usage:
-                print(f"   Tokens: {response.usage.total_tokens}")
+async def resolve_direct_model(client: VeniceClient) -> str:
+    """The cheapest chat model that answers without a reasoning phase."""
+    return await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
 
 
 # =============================================================================
-# Pattern 2: Async Context Managers
+# Pattern 1: Async Context Managers
 # =============================================================================
 
 
-async def example_context_managers():
+async def example_context_managers() -> bool:
     """
     Demonstrate proper resource management with async context managers.
 
     Best practices:
     - Always use async with for automatic cleanup
-    - Ensure connections are properly closed
-    - Handle exceptions within context
+    - If you cannot, close the client in a finally block
     """
-    print("\n" + "=" * 60)
-    print("Pattern 2: Async Context Managers")
+    print("=" * 60)
+    print("Pattern 1: Async Context Managers")
     print("=" * 60)
 
     print("\n✅ Using async context manager for automatic cleanup:")
-
-    # The client will automatically close when exiting the context
     async with VeniceClient() as client:
-        model = await client.models.resolve_chat()
+        model = await resolve_direct_model(client)
         response = await client.chat.completions.create(
             model=model,
-            messages=[UserMessage(content="Hello!")],
-            max_completion_tokens=20,
+            messages=[UserMessage(content="Reply with the single word: hello")],
+            max_completion_tokens=60,
+            venice_parameters=OWN_PROMPT_ONLY,
         )
-        print(f"   Response: {response.text}")
+        ok = check_answer(response, "Response", "hello")
+    print("   ✓ Client closed on leaving the block")
 
-    print("   ✓ Client automatically closed")
-
-    # Manual resource management (not recommended)
     print("\n⚠️  Manual management (for comparison):")
     client = VeniceClient()
     try:
-        model = await client.models.resolve_chat()
+        model = await resolve_direct_model(client)
         response = await client.chat.completions.create(
             model=model,
-            messages=[UserMessage(content="Hi!")],
-            max_completion_tokens=20,
+            messages=[UserMessage(content="Reply with the single word: goodbye")],
+            max_completion_tokens=60,
+            venice_parameters=OWN_PROMPT_ONLY,
         )
-        print(f"   Response: {response.text}")
+        ok = check_answer(response, "Response", "goodbye") and ok
     finally:
         await client.close()
-        print("   ✓ Client manually closed")
+        print("   ✓ Client closed in finally")
+
+    return ok
 
 
 # =============================================================================
-# Pattern 3: Task Cancellation and Cleanup
+# Pattern 2: Concurrent Request Handling
 # =============================================================================
 
 
-async def example_task_cancellation():
+async def example_concurrent_requests(client: VeniceClient, model: str) -> bool:
     """
-    Demonstrate proper task cancellation and cleanup.
+    Demonstrate efficient concurrent API request handling.
 
     Best practices:
-    - Use asyncio.timeout() for timeouts
-    - Handle CancelledError appropriately
-    - Clean up resources on cancellation
+    - Use asyncio.gather() for concurrent requests
+    - Handle individual task failures with return_exceptions=True
+    - Count the exceptions: gather returns them as list items, it does not raise
     """
     print("\n" + "=" * 60)
-    print("Pattern 3: Task Cancellation & Cleanup")
+    print("Pattern 2: Concurrent Request Handling")
     print("=" * 60)
 
-    async with VeniceClient() as client:
-        model = await client.models.resolve_chat()
-        print("\n🔄 Testing timeout handling...")
+    # Each prompt has a short answer the check can recognise.
+    prompts = [
+        ("What is the capital of Japan? Answer in one word.", "Tokyo"),
+        ("What is 12 times 12? Reply with the number only.", "144"),
+        ("Which planet is known as the Red Planet? Answer in one word.", "Mars"),
+    ]
 
-        try:
-            # Set a timeout that will likely succeed
-            async with asyncio.timeout(30):
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[UserMessage(content="Quick response")],
-                    max_completion_tokens=20,
-                )
-                print(f"✅ Completed: {response.text}")
+    print(f"\n🚀 Executing {len(prompts)} requests concurrently...")
+    started = time.perf_counter()
+    results = await asyncio.gather(
+        *(
+            client.chat.completions.create(
+                model=model,
+                messages=[UserMessage(content=prompt)],
+                max_completion_tokens=150,
+                venice_parameters=OWN_PROMPT_ONLY,
+            )
+            for prompt, _ in prompts
+        ),
+        return_exceptions=True,
+    )
+    print(f"   Wall time: {time.perf_counter() - started:.2f}s")
 
-        except TimeoutError:
-            print("⏱️  Request timed out (would handle cleanup here)")
-        except asyncio.CancelledError:
-            print("🚫 Task was cancelled (would handle cleanup here)")
-            raise
+    ok = True
+    for (prompt, expected), result in zip(prompts, results, strict=True):
+        print(f"\n   Prompt: {prompt}")
+        if isinstance(result, BaseException):
+            print(f"   ❌ {type(result).__name__}: {result}")
+            ok = False
+            continue
+        ok = check_answer(result, "Answer", expected) and ok
+        if result.usage:
+            print(
+                f"      tokens: {result.usage.prompt_tokens} prompt + "
+                f"{result.usage.completion_tokens} completion"
+            )
+
+    print(
+        "\n   ℹ️  include_venice_system_prompt=False keeps Venice's own system prompt out,"
+        "\n      so the prompt tokens above are only the question asked."
+    )
+    return ok
+
+
+# =============================================================================
+# Pattern 3: Timeouts and Task Cancellation
+# =============================================================================
+
+
+async def example_task_cancellation(client: VeniceClient, model: str) -> bool:
+    """
+    Demonstrate timeouts and task cancellation, and show the client is still
+    usable afterwards.
+
+    Best practices:
+    - Use asyncio.timeout() to bound how long you wait
+    - Re-raise CancelledError unless you started the cancellation yourself
+    - Clean up in finally blocks so cancellation never leaks resources
+    """
+    print("\n" + "=" * 60)
+    print("Pattern 3: Timeouts & Task Cancellation")
+    print("=" * 60)
+
+    async def slow_request() -> ChatCompletionResponse:
+        return await client.chat.completions.create(
+            model=model,
+            messages=[UserMessage(content="Write a haiku about patience.")],
+            max_completion_tokens=150,
+            venice_parameters=OWN_PROMPT_ONLY,
+        )
+
+    ok = True
+
+    # A 10ms budget is far below any real round trip, so this must time out.
+    print("\n⏱️  Request with a 10ms timeout:")
+    try:
+        async with asyncio.timeout(0.01):
+            await slow_request()
+        print("   ❌ Request finished inside 10ms; the timeout never fired")
+        ok = False
+    except TimeoutError:
+        # asyncio.timeout raises the built-in TimeoutError for its own
+        # deadline. The client's HTTP timeout raises APITimeoutError instead.
+        print("   ✅ TimeoutError raised; the in-flight request was cancelled")
+
+    print("\n🚫 Cancelling a running task:")
+    task = asyncio.create_task(slow_request())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+        print("   ❌ Task completed before it could be cancelled")
+        ok = False
+    except asyncio.CancelledError:
+        # This coroutine requested the cancellation, so it is safe to absorb.
+        print(f"   ✅ Task cancelled (task.cancelled() = {task.cancelled()})")
+
+    print("\n🔁 Follow-up request on the same client:")
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[UserMessage(content="Reply with the single word: ready")],
+        max_completion_tokens=60,
+        venice_parameters=OWN_PROMPT_ONLY,
+    )
+    ok = check_answer(response, "Response", "ready") and ok
+    return ok
 
 
 # =============================================================================
@@ -165,59 +265,57 @@ async def example_task_cancellation():
 # =============================================================================
 
 
-async def example_async_error_handling():
+async def example_async_error_handling(client: VeniceClient, model: str) -> bool:
     """
-    Demonstrate comprehensive error handling in async code.
+    Demonstrate per-task error handling with asyncio.gather().
 
     Best practices:
-    - Catch specific exceptions
-    - Use try/except/finally for cleanup
-    - Handle errors per-task in gather()
+    - Catch specific exception classes
+    - Use return_exceptions=True so one failure does not abort the batch
+    - Inspect every result: a failure is a list item, not a raised exception
     """
     print("\n" + "=" * 60)
     print("Pattern 4: Async Error Handling")
     print("=" * 60)
+    print("\n🛡️  One valid request and one for a model that does not exist:")
 
-    async with VeniceClient() as client:
-        model = await client.models.resolve_chat()
-        print("\n🛡️  Demonstrating error recovery:")
+    results = await asyncio.gather(
+        client.chat.completions.create(
+            model=model,
+            messages=[UserMessage(content="Reply with the single word: valid")],
+            max_completion_tokens=60,
+            venice_parameters=OWN_PROMPT_ONLY,
+        ),
+        client.chat.completions.create(
+            model=INVALID_MODEL,
+            messages=[UserMessage(content="This call should fail")],
+            max_completion_tokens=60,
+            venice_parameters=OWN_PROMPT_ONLY,
+        ),
+        return_exceptions=True,
+    )
 
-        # A deliberately bogus model id so one task genuinely fails — this is a
-        # failure-trigger fixture, not a usage example, so a literal is correct
-        # here (you cannot resolve_*() a model that does not exist).
-        invalid_model = "venice-nonexistent-model"
+    valid, invalid = results
+    ok = True
 
-        # Using return_exceptions=True so one failure doesn't abort the batch
-        tasks = [
-            client.chat.completions.create(
-                model=model,
-                messages=[UserMessage(content="Valid request")],
-                max_completion_tokens=20,
-            ),
-            client.chat.completions.create(
-                model=invalid_model,
-                messages=[UserMessage(content="This call should fail")],
-                max_completion_tokens=20,
-            ),
-        ]
+    if isinstance(valid, BaseException):
+        print(f"❌ Valid task failed: {type(valid).__name__}: {valid}")
+        ok = False
+    else:
+        print("✅ Task 1 succeeded")
+        ok = check_answer(valid, "Response", "valid") and ok
 
-        # Gather with error handling
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+    if isinstance(invalid, NotFoundError):
+        print(f"✅ Task 2 failed as expected with {type(invalid).__name__}")
+        print(f"   {invalid}")
+    elif isinstance(invalid, BaseException):
+        print(f"❌ Task 2 raised {type(invalid).__name__}, expected NotFoundError: {invalid}")
+        ok = False
+    else:
+        print("❌ Task 2 succeeded against a model that does not exist")
+        ok = False
 
-        # Process results and errors
-        successes = 0
-        failures = 0
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                failures += 1
-                print(f"❌ Task {i + 1} failed (recovered): {type(result).__name__}")
-            elif hasattr(result, "choices"):
-                successes += 1
-                print(f"✅ Task {i + 1} succeeded")
-                content = result.text or ""  # type: ignore[union-attr]
-                print(f"   Response: {content[:50]}...")
-
-        print(f"\n   📊 Handled {failures} failure(s), {successes} success(es)")
+    return ok
 
 
 # =============================================================================
@@ -225,43 +323,54 @@ async def example_async_error_handling():
 # =============================================================================
 
 
-async def example_async_streaming():
+async def example_async_streaming(client: VeniceClient, model: str) -> bool:
     """
     Demonstrate async streaming with proper iteration.
 
     Best practices:
     - Use async for to iterate over streams
-    - Handle stream interruption
+    - Record finish_reason from the final chunk
     - Process chunks incrementally
     """
     print("\n" + "=" * 60)
     print("Pattern 5: Async Streaming")
     print("=" * 60)
+    print("\n📡 Streaming response:")
 
-    async with VeniceClient() as client:
-        model = await client.models.resolve_chat()
-        print("\n📡 Streaming response:")
+    stream = await client.chat.completions.create(
+        model=model,
+        messages=[UserMessage(content="Count from 1 to 5, separated by spaces.")],
+        max_completion_tokens=100,
+        venice_parameters=OWN_PROMPT_ONLY,
+        stream=True,
+    )
 
-        stream = await client.chat.completions.create(
-            model=model,
-            messages=[UserMessage(content="Count to 5")],
-            max_completion_tokens=50,
-            stream=True,
-        )
+    chunks = 0
+    text = ""
+    finish_reason = None
+    print("   ", end="", flush=True)
+    async for chunk in stream:
+        if chunk.text:
+            chunks += 1
+            text += chunk.text
+            print(chunk.text, end="", flush=True)
+        if chunk.choices and chunk.choices[0].finish_reason:
+            finish_reason = chunk.choices[0].finish_reason
+    print()
+    print(f"   {chunks} content chunks, finish_reason={finish_reason}")
 
-        print("   ", end="", flush=True)
-        async for chunk in stream:
-            if chunk.text:
-                print(chunk.text, end="", flush=True)
-        print()  # New line after streaming
+    if finish_reason == "length" or re.findall(r"\d+", text)[:5] != ["1", "2", "3", "4", "5"]:
+        print("   ❌ Stream was truncated or did not count 1 to 5 in order")
+        return False
+    return True
 
 
 # =============================================================================
-# Pattern 6: Semaphore for Rate Limiting
+# Pattern 6: Bounded Concurrency with client.gather()
 # =============================================================================
 
 
-async def example_semaphore_pattern():
+async def example_bounded_concurrency(client: VeniceClient, model: str) -> bool:
     """
     Demonstrate ``client.gather()`` for bounded-concurrency request batching.
 
@@ -269,28 +378,56 @@ async def example_semaphore_pattern():
     - Use ``client.gather(awaitables, max_concurrency=N)`` instead of
       hand-rolled ``asyncio.Semaphore`` + ``asyncio.gather()`` loops
     - It accepts awaitables across any modality (chat, image, embeddings…)
-    - ``return_exceptions=True`` (default) keeps one failure from aborting the batch
+    - ``return_exceptions=True`` (the default) returns failures as list items,
+      so count them
     """
     print("\n" + "=" * 60)
-    print("Pattern 6: Bounded-Concurrency with client.gather()")
+    print("Pattern 6: Bounded Concurrency with client.gather()")
     print("=" * 60)
 
-    async with VeniceClient() as client:
-        model = await client.models.resolve_chat()
-        print("\n🚦 Executing 5 requests with max 3 concurrent:")
+    max_concurrency = 3
+    in_flight = 0
+    peak = 0
 
-        responses = await client.gather(
-            [
+    async def tracked(awaitable: Awaitable[T]) -> T:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        try:
+            return await awaitable
+        finally:
+            in_flight -= 1
+
+    print(f"\n🚦 Executing 5 requests with max {max_concurrency} concurrent:")
+    results = await client.gather(
+        [
+            tracked(
                 client.chat.completions.create(
                     model=model,
-                    messages=[UserMessage(content=f"Request {i + 1}")],
-                    max_completion_tokens=20,
+                    messages=[UserMessage(content=f"Spell the number {i + 1} as an English word.")],
+                    max_completion_tokens=60,
+                    venice_parameters=OWN_PROMPT_ONLY,
                 )
-                for i in range(5)
-            ],
-            max_concurrency=3,
-        )
-        print(f"\n✅ All {len(responses)} requests completed")
+            )
+            for i in range(5)
+        ],
+        max_concurrency=max_concurrency,
+    )
+
+    errors = [r for r in results if isinstance(r, BaseException)]
+    ok = not errors
+    for i, result in enumerate(results):
+        if isinstance(result, BaseException):
+            print(f"   ❌ Request {i + 1}: {type(result).__name__}: {result}")
+        else:
+            ok = check_answer(result, f"Request {i + 1}", NUMBER_WORDS[i]) and ok
+
+    print(f"\n   {len(results) - len(errors)}/{len(results)} succeeded")
+    print(f"   Peak requests in flight: {peak} (limit {max_concurrency})")
+    if peak > max_concurrency:
+        print("   ❌ Concurrency limit was exceeded")
+        ok = False
+    return ok
 
 
 # =============================================================================
@@ -298,97 +435,149 @@ async def example_semaphore_pattern():
 # =============================================================================
 
 
-async def example_background_tasks():
+async def example_background_tasks(client: VeniceClient, model: str) -> bool:
     """
-    Demonstrate running background tasks alongside main work.
+    Demonstrate running background work alongside a request.
 
     Best practices:
     - Use asyncio.create_task() for background work
-    - Track and cancel background tasks
-    - Handle background task errors
+    - Keep a reference to the task and cancel it when you are done
+    - Await the cancelled task so its cleanup runs
     """
     print("\n" + "=" * 60)
     print("Pattern 7: Background Tasks")
     print("=" * 60)
 
-    async def background_processor(client: VeniceClient):
-        """Simulated background task."""
-        for i in range(3):
-            await asyncio.sleep(1)
-            print(f"   📊 Background task tick {i + 1}")
+    ticks = 0
 
-    async with VeniceClient() as client:
-        model = await client.models.resolve_chat()
-        print("\n🔄 Starting background task...")
+    async def heartbeat() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.1)
+            ticks += 1
 
-        # Create background task
-        bg_task = asyncio.create_task(background_processor(client))
-
-        # Main work
-        print("   🚀 Executing main request...")
+    print("\n🔄 Starting a 100ms heartbeat, then making a request...")
+    bg_task = asyncio.create_task(heartbeat())
+    try:
         response = await client.chat.completions.create(
             model=model,
-            messages=[UserMessage(content="Hello")],
-            max_completion_tokens=20,
+            messages=[
+                UserMessage(content="What colour is a clear daytime sky? Answer in one word.")
+            ],
+            max_completion_tokens=60,
+            venice_parameters=OWN_PROMPT_ONLY,
         )
-        content = response.text or ""
-        print(f"   ✅ Main request done: {content[:30]}...")
+        ticks_during_request = ticks
+    finally:
+        bg_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await bg_task
 
-        # Wait for background task
-        await bg_task
-        print("   ✅ Background task completed")
+    ok = check_answer(response, "Main request", "blue")
+    print(f"   Heartbeat ticked {ticks_during_request} times while the request was in flight")
+    print(f"   Background task cancelled: {bg_task.cancelled()}")
+    if ticks_during_request == 0:
+        print("   ❌ The background task never ran concurrently with the request")
+        ok = False
+    return ok
 
 
 # =============================================================================
-# Pattern 8: Retry with Exponential Backoff
+# Pattern 8: Scoped Retry Policies
 # =============================================================================
 
 
-async def example_retry_pattern():
+async def example_retry_pattern(client: VeniceClient, model: str) -> bool:
     """
-    Demonstrate retry pattern with exponential backoff.
+    Demonstrate ``client.with_retries()`` for a scoped retry policy.
+
+    The SDK's retry middleware resends a request only when that is safe for
+    its endpoint. A chat completion is resent after a connection failure, a
+    502 or 503, and at most once after a 500; a 504 or a read timeout is not
+    resent, because the model may already have produced (and billed) the
+    answer. A failure to connect is retried for every endpoint, since the
+    request never left the client. Client errors such as a 404 for an unknown
+    model are never retried. ``on_retry`` receives the 0-based index of the
+    attempt that failed.
 
     Best practices:
-    - Use exponential backoff for retries
-    - Set maximum retry attempts
-    - Log retry attempts
+    - Configure retries with RetryOptions instead of hand-written loops
+    - Use on_retry to log or count retry attempts
+    - Do not retry 4xx errors
     """
     print("\n" + "=" * 60)
-    print("Pattern 8: Retry with Exponential Backoff")
+    print("Pattern 8: Scoped Retries with client.with_retries()")
     print("=" * 60)
 
-    async def request_with_retry(
-        client: VeniceClient,
-        model: str,
-        max_retries: int = 3,
-        base_delay: float = 1.0,
-    ) -> ChatCompletionResponse:
-        """Make a request with exponential backoff retry."""
-        for attempt in range(max_retries):
-            try:
-                print(f"   🔄 Attempt {attempt + 1}/{max_retries}")
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[UserMessage(content="Test")],
-                    max_completion_tokens=20,
-                )
-                print(f"   ✅ Success on attempt {attempt + 1}")
-                return response
-            except Exception:
-                if attempt == max_retries - 1:
-                    raise
-                delay = base_delay * (2**attempt)
-                print(f"   ⚠️  Failed, retrying in {delay}s...")
-                await asyncio.sleep(delay)
+    retries: list[tuple[int, float, str]] = []
 
-        raise RuntimeError("Max retries exceeded")
+    max_attempts = 3
 
-    async with VeniceClient() as client:
-        model = await client.models.resolve_chat()
-        print("\n🔄 Testing retry pattern:")
-        response = await request_with_retry(client, model)
-        content = response.text or ""
-        print(f"   Final response: {content[:40]}...")
+    def on_retry(attempt: int, delay: float, error: Exception | None) -> None:
+        reason = type(error).__name__ if error else "retryable status"
+        retries.append((attempt, delay, reason))
+        print(f"   🔄 Retry {attempt + 1}/{max_attempts} in {delay:.2f}s ({reason})")
+
+    options = RetryOptions(
+        max_attempts=max_attempts, base_delay=0.2, max_delay=2.0, on_retry=on_retry
+    )
+
+    ok = True
+    async with client.with_retries(options):
+        print("\n✅ Normal request inside the retry scope:")
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[UserMessage(content="Reply with the single word: done")],
+            max_completion_tokens=60,
+            venice_parameters=OWN_PROMPT_ONLY,
+        )
+        ok = check_answer(response, "Response", "done")
+        print(f"      retries needed: {len(retries)}")
+
+        print("\n🧪 Request for an unknown model inside the same scope:")
+        retries_before = len(retries)
+        try:
+            await client.chat.completions.create(
+                model=INVALID_MODEL,
+                messages=[UserMessage(content="This call should fail")],
+                max_completion_tokens=60,
+                venice_parameters=OWN_PROMPT_ONLY,
+            )
+            print("   ❌ Request unexpectedly succeeded")
+            ok = False
+        except NotFoundError as e:
+            retried = len(retries) - retries_before
+            print(f"   ✅ {type(e).__name__} raised after {retried} retries (4xx is not retried)")
+            if retried:
+                ok = False
+
+    # A transient failure: nothing listens on this local port, so every
+    # attempt fails to connect and is retried until the budget runs out. The
+    # client gets a placeholder key: the real one is never sent to a
+    # non-Venice URL.
+    print("\n🧪 Request to an unreachable host, with the same retry policy:")
+    retries_before = len(retries)
+    async with (
+        VeniceClient(api_key="placeholder-key", base_url="http://127.0.0.1:9/api/v1") as offline,
+        offline.with_retries(options),
+    ):
+        try:
+            await offline.chat.completions.create(
+                model=model,
+                messages=[UserMessage(content="This call cannot connect")],
+                max_completion_tokens=60,
+                venice_parameters=OWN_PROMPT_ONLY,
+            )
+            print("   ❌ Request unexpectedly succeeded")
+            ok = False
+        except APIConnectionError as e:
+            retried = len(retries) - retries_before
+            print(f"   ✅ {type(e).__name__} raised after {retried} retries")
+            if retried != max_attempts:
+                print(f"   ❌ Expected {max_attempts} retries")
+                ok = False
+
+    return ok
 
 
 # =============================================================================
@@ -396,7 +585,7 @@ async def example_retry_pattern():
 # =============================================================================
 
 
-async def show_best_practices():
+def show_best_practices() -> None:
     """Display async programming best practices."""
     print("\n" + "=" * 60)
     print("Async Programming Best Practices")
@@ -408,7 +597,7 @@ async def show_best_practices():
             [
                 "✅ Always use async with for VeniceClient",
                 "✅ Ensure proper cleanup in finally blocks",
-                "✅ Cancel tasks on shutdown",
+                "✅ Cancel background tasks on shutdown and await them",
             ],
         ),
         (
@@ -416,14 +605,14 @@ async def show_best_practices():
             [
                 "✅ Use asyncio.gather() for multiple requests",
                 "✅ Bound concurrency with client.gather(max_concurrency=N)",
-                "✅ Handle individual task failures",
+                "✅ Count the exceptions gather() returns as results",
             ],
         ),
         (
             "Error Handling",
             [
-                "✅ Use return_exceptions=True in gather()",
-                "✅ Implement exponential backoff for retries",
+                "✅ Catch specific exception classes",
+                "✅ Use client.with_retries(RetryOptions(...)) for transient failures",
                 "✅ Log all errors with context",
             ],
         ),
@@ -431,17 +620,16 @@ async def show_best_practices():
             "Streaming",
             [
                 "✅ Use async for to iterate streams",
-                "✅ Handle stream interruption gracefully",
+                "✅ Check finish_reason on the final chunk",
                 "✅ Process chunks incrementally",
             ],
         ),
         (
             "Performance",
             [
-                "✅ Reuse client connections",
-                "✅ Use connection pooling",
+                "✅ Reuse one client (and its connection pool) across requests",
                 "✅ Batch similar requests",
-                "✅ Monitor async task overhead",
+                "✅ Bound every wait with asyncio.timeout()",
             ],
         ),
     ]
@@ -457,42 +645,61 @@ async def show_best_practices():
 # =============================================================================
 
 
-async def main():
-    """Run all async pattern examples."""
+async def main() -> int:
+    """Run all async pattern examples; return 0 only if every pattern succeeded."""
     print("=" * 60)
     print("Venice AI SDK - Production Async Patterns")
     print("=" * 60)
 
-    await example_concurrent_requests()
-    await example_context_managers()
-    await example_task_cancellation()
-    await example_async_error_handling()
-    await example_async_streaming()
-    await example_semaphore_pattern()
-    await example_background_tasks()
-    await example_retry_pattern()
-    await show_best_practices()
+    results: list[tuple[str, bool]] = []
+    results.append(("Context Managers", await example_context_managers()))
 
+    # One shared client for the remaining patterns: it reuses a single
+    # connection pool, which is what a long-running service should do.
+    async with VeniceClient() as client:
+        model = await resolve_direct_model(client)
+        print(f"\nUsing model: {model}")
+        results.append(("Concurrent Requests", await example_concurrent_requests(client, model)))
+        results.append(("Timeouts & Cancellation", await example_task_cancellation(client, model)))
+        results.append(("Async Error Handling", await example_async_error_handling(client, model)))
+        results.append(("Async Streaming", await example_async_streaming(client, model)))
+        results.append(("Bounded Concurrency", await example_bounded_concurrency(client, model)))
+        results.append(("Background Tasks", await example_background_tasks(client, model)))
+        results.append(("Scoped Retries", await example_retry_pattern(client, model)))
+
+    show_best_practices()
+
+    failed = [name for name, ok in results if not ok]
     print("\n" + "=" * 60)
-    print("✅ All async patterns demonstrated!")
+    if failed:
+        print(f"❌ {len(results) - len(failed)}/{len(results)} patterns succeeded")
+        for name, ok in results:
+            print(f"   {'✓' if ok else '✗'} {name}")
+    else:
+        print(f"✅ All {len(results)} async patterns succeeded")
     print("=" * 60)
 
     print("\n🔑 Key Takeaways:")
     print("   1. Always use async with for automatic resource cleanup")
     print("   2. Use client.gather() for bounded-concurrency batching")
-    print("   3. Implement proper error handling with return_exceptions")
+    print("   3. Count the exceptions gather() returns instead of assuming success")
     print("   4. Use client.with_retries() for scoped retry policies")
-    print("   5. Handle task cancellation and timeouts")
-    print("   6. Use async for to iterate over streams")
-    print("   7. Monitor and manage background tasks")
+    print("   5. Bound waits with asyncio.timeout() and cancel what you start")
+    print("   6. Use async for to iterate over streams and check finish_reason")
+
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
         print("\n👋 Goodbye!")
         sys.exit(130)
-    except Exception as e:
-        print(f"\n❌ Error: {e}", file=sys.stderr)
+    except NoMatchingModelError as e:
+        # The catalog has no model of the kind this example needs.
+        print(f"SKIPPED: {e}")
+        sys.exit(77)
+    except VeniceError as e:
+        print(f"\n❌ {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

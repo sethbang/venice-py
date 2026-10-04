@@ -136,8 +136,8 @@ async def test_music_quote_returns_estimated_cost(vcr_cassette, venice_client):
 
 
 @pytest.mark.integration
-async def test_music_submit_then_cancel(vcr_cassette, venice_client):
-    """End-to-end smoke: ``submit()`` queues a job and ``cancel()`` releases it.
+async def test_music_submit_then_release(vcr_cassette, venice_client):
+    """End-to-end smoke: ``submit()`` queues a job and ``release()`` releases it.
 
     This validates the queue/complete wire shapes without waiting for
     generation to finish. The cassette captures both the submission body
@@ -161,12 +161,12 @@ async def test_music_submit_then_cancel(vcr_cassette, venice_client):
         # ``model`` round-trips on the response — server can echo or remap.
         assert queue_response.model
 
-        # Cleanup — also exercises the ``cancel()`` wire shape. The server
+        # Cleanup — also exercises the ``release()`` wire shape. The server
         # returns ``{"success": <bool>}`` regardless of whether the job was
         # actually in-flight; on fast models the job may complete before this
         # call lands and the server returns ``success: false``. The wire
         # shape is what we verify here.
-        cleanup = await venice_client.music.cancel(
+        cleanup = await venice_client.music.release(
             model=queue_response.model,
             queue_id=queue_response.queue_id,
         )
@@ -175,7 +175,7 @@ async def test_music_submit_then_cancel(vcr_cassette, venice_client):
 
 
 @pytest.mark.integration
-async def test_music_submit_retrieve_processing_then_cancel(vcr_cassette, venice_client):
+async def test_music_submit_retrieve_processing_then_release(vcr_cassette, venice_client):
     """``music.retrieve()`` returns a ``PROCESSING`` status while generation runs.
 
     Validates the JSON-content-type branch of ``Music.retrieve()``: the
@@ -204,7 +204,7 @@ async def test_music_submit_retrieve_processing_then_cancel(vcr_cassette, venice
             )
         except APIError as e:
             # Cleanup the queue entry even if retrieve fails so we don't leak.
-            await venice_client.music.cancel(
+            await venice_client.music.release(
                 model=queue_response.model, queue_id=queue_response.queue_id
             )
             _skip_if_unavailable(e)
@@ -222,6 +222,6 @@ async def test_music_submit_retrieve_processing_then_cancel(vcr_cassette, venice
             assert status.execution_duration >= 0
 
         # Cleanup
-        await venice_client.music.cancel(
+        await venice_client.music.release(
             model=queue_response.model, queue_id=queue_response.queue_id
         )

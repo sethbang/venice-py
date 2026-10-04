@@ -21,108 +21,166 @@ reach for muscle memory:
   not the ``"60s"`` form the video endpoints accept.
 * ``retrieve`` has two outcomes, not three: still processing, or the converted
   audio itself. There is no FAILED status to branch on — a failed conversion
-  raises instead, and the error carries ``credits_refunded``.
+  raises instead, and the error carries ``credits_refunded``. The completed
+  status reports the audio's media type as ``content_type``, and
+  ``audio_format`` turns it into a file extension.
 
 Voice-changer models are not their own model type. They report
 ``type="music"`` with ``voice_changer=true``, so resolve them with
 ``models.resolve_voice_changer()`` — ``resolve_music()`` would happily hand
 back a music *generator*, which these endpoints reject.
 
-**This capability is not enabled on every account.** When no voice-changer
-model is in the catalog, this example reports that and exits cleanly rather
-than failing.
+**Voice-changer models do not always appear in the catalog.** When none is
+listed, this example prints a ``SKIPPED:`` line and exits 77 without claiming
+to have run anything. Any other error, including a failed catalog fetch or a
+source recording that is not a PCM WAV file, exits 1.
 """
 
 import asyncio
+import math
 import sys
+import wave
 from pathlib import Path
 
-from venice_ai import VeniceClient
-from venice_ai.exceptions import APIError, VeniceError
+from venice_ai import APITimeoutError, NoMatchingModelError, VeniceClient
+from venice_ai.exceptions import VeniceError
+from venice_ai.types.api.voice_changer import (
+    VoiceChangerCompletedStatus,
+    VoiceChangerProcessingStatus,
+)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _helpers import detect_audio_format  # noqa: E402
 
 SAMPLE_PATH = Path(__file__).resolve().parent.parent / "voice-to-clone.wav"
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-#: Length to price in the quote step, in whole seconds.
-QUOTE_SECONDS = 30
+
+#: Exit status for a run that skipped because a prerequisite is missing.
+EXIT_SKIPPED = 77
 
 
-async def change_voice() -> bool:
+def sample_seconds(path: Path) -> int:
+    """Length of a PCM WAV recording, rounded up to the whole seconds ``quote`` takes.
+
+    Raises:
+        wave.Error: If the file is not a PCM WAV file.
+        EOFError: If the file is truncated.
+    """
+    with wave.open(str(path)) as w:
+        return max(1, math.ceil(w.getnframes() / w.getframerate()))
+
+
+def output_extension(status: VoiceChangerCompletedStatus) -> str | None:
+    """File extension for the converted audio.
+
+    ``status.audio_format`` comes from the response's Content-Type. An audio
+    type the SDK has no extension for leaves it ``None``; the container is
+    then read from the bytes, and the example says so.
+    """
+    if status.audio_format is not None:
+        return status.audio_format
+    sniffed = detect_audio_format(status.data or b"")
+    if sniffed is not None:
+        print(f"   ℹ️  No extension for {status.content_type}; the bytes are {sniffed}")
+    return sniffed
+
+
+async def change_voice(client: VeniceClient) -> int:
     """Quote, then convert the sample recording into another voice.
 
-    Returns ``True`` on success, and also on a clean skip when the account has
-    no voice-changer model — that is an entitlement condition, not a failure.
+    Returns the exit status: ``0`` after a real conversion, ``77`` when the
+    catalog lists no voice-changer model, ``1`` on any failure.
     """
     print("🎚️  Voice changer")
     print("-" * 40)
 
-    async with VeniceClient() as client:
-        # Never hardcode a model id. This filters type="music" by the
-        # voice_changer capability flag.
+    # Never hardcode a model id. This filters type="music" by the
+    # voice_changer capability flag.
+    try:
+        model = await client.models.resolve_voice_changer()
+    except NoMatchingModelError as e:
+        print("\nSKIPPED: no voice-changer model in the catalog, so nothing was converted.")
+        print(f"   {e}")
+        return EXIT_SKIPPED
+
+    print(f"   Model: {model}")
+
+    # Price the sample's own length first, as a bare count of seconds, not "9s".
+    # Measuring it needs a PCM WAV file; anything else fails before any paid
+    # call.
+    try:
+        seconds = sample_seconds(SAMPLE_PATH)
+    except (OSError, wave.Error, EOFError) as e:
+        print(f"   ❌ {SAMPLE_PATH} could not be read as a PCM WAV file: {e}")
+        return 1
+    quote = await client.voice_changer.quote(model=model, duration_seconds=seconds)
+    print(f"   Quote for the {seconds}s sample: ${quote.quote:.4f} USD")
+    print("   (an estimate — you are billed on the length Venice measures)")
+
+    print(f"\n   Converting: {SAMPLE_PATH.name}")
+    # A clean exit from the block releases the provider-held media.
+    async with await client.voice_changer.run(model=model, file=SAMPLE_PATH) as job:
+        print(f"   Queued: {job.queue_id}")
+        print(f"   Billed length: {job.duration_seconds:.0f}s")
+
+        def show(status: VoiceChangerProcessingStatus) -> None:
+            print(f"   ⏳ {status.progress_percent:.0f}% …", end="\r")
+
         try:
-            model = await client.models.resolve_voice_changer()
-        except ValueError as e:
-            print("   ⏭️  No voice-changer model is available on this account.")
-            print(f"      ({e})")
-            print("      Contact support@venice.ai to request access.")
-            return True
-
-        print(f"   Model: {model}")
-
-        # Price it first — a bare count of seconds, not "30s".
-        quote = await client.voice_changer.quote(model=model, duration_seconds=QUOTE_SECONDS)
-        print(f"   Quote for {QUOTE_SECONDS}s: ${quote.quote:.4f} USD")
-        print("   (an estimate — you are billed on the length Venice measures)")
-
-        if not SAMPLE_PATH.exists():
-            raise FileNotFoundError(
-                f"Source recording not found at {SAMPLE_PATH}. Drop a short WAV/MP3 there."
-            )
-
-        print(f"\n   Converting: {SAMPLE_PATH.name}")
-        # The context manager releases the provider-held media on exit.
-        async with await client.voice_changer.run(model=model, file=SAMPLE_PATH) as job:
-            print(f"   Queued: {job.queue_id}")
-            print(f"   Billed length: {job.duration_seconds:.0f}s")
-
-            def show(status) -> None:
-                print(f"   ⏳ {status.progress_percent:.0f}% …")
-
             status = await job.wait(poll_interval=3.0, on_progress=show)
-            out_path = await job.download(RESULTS_DIR / "voice_changed.mp3", status)
+            print()
+            extension = output_extension(status)
+            if extension is None:
+                print(
+                    f"   ❌ The converted result ({status.content_type}) is not a known audio format"
+                )
+                return 1
+            out_path = await job.download(RESULTS_DIR / f"voice_changed.{extension}", status)
+        except TimeoutError as e:
+            # wait() ran out of polls; the conversion is still running.
+            print(f"\n   ❌ {e} (queue_id={job.queue_id})")
+            return 1
+        except APITimeoutError as e:
+            # One status or download request timed out. The job keeps its
+            # media when this block raises, so it can be retrieved again.
+            print(f"\n   ❌ A status or download request timed out (queue_id={job.queue_id}): {e}")
+            return 1
 
-        print(f"\n   🔊 Saved converted audio → {out_path}")
-    return True
+    size = out_path.stat().st_size
+    print(f"\n   🔊 Saved {size} bytes of {status.content_type} → {out_path}")
+
+    print("\n✨ Voice changer example completed!")
+    print("\n💡 Key concepts demonstrated:")
+    print("   - client.models.resolve_voice_changer() — a capability, not a type")
+    print(f"   - voice_changer.quote(duration_seconds={seconds}) — bare seconds, not '{seconds}s'")
+    print("   - voice_changer.run(...) → VoiceChangerJob, as an async context manager")
+    print("   - job.wait() → the audio itself; there is no FAILED status to check")
+    print("   - status.audio_format names the file from the response's content type")
+    return 0
 
 
 async def main() -> int:
-    """Run the voice-changer example.
+    """Run the voice-changer example and return its exit status.
 
-    Returns ``0`` only if the demo succeeded, ``1`` otherwise, so a real API
-    failure surfaces as a non-zero exit instead of being masked by the
-    success banner.
+    ``0`` if the conversion succeeded, ``77`` if it was skipped for lack of a
+    model, and ``1`` otherwise. The success banner prints only after a real
+    conversion.
     """
     print("🚀 Venice AI Voice Changer")
     print("=" * 50)
 
     try:
-        ok = await change_voice()
-    except (VeniceError, APIError) as e:
-        print(f"\n❌ API error: {e}", file=sys.stderr)
-        ok = False
+        async with VeniceClient() as client:
+            status = await change_voice(client)
+    except (VeniceError, OSError) as e:
+        print(f"\n❌ {type(e).__name__}: {e}", file=sys.stderr)
+        status = 1
 
-    if not ok:
+    if status == 1:
         print("\n⚠️ Voice conversion failed.")
-        return 1
-
-    print("\n✨ Voice changer example completed!")
-    print("\n💡 Key concepts demonstrated:")
-    print("   - client.models.resolve_voice_changer() — a capability, not a type")
-    print("   - voice_changer.quote(duration_seconds=30) — bare seconds, not '30s'")
-    print("   - voice_changer.run(...) → VoiceChangerJob, as an async context manager")
-    print("   - job.wait() → the audio itself; there is no FAILED status to check")
-    return 0
+    return status
 
 
 if __name__ == "__main__":

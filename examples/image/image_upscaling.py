@@ -3,466 +3,237 @@
 Venice AI SDK - Image Upscaling
 ================================
 
-This example demonstrates how to upscale and enhance images using the Venice AI SDK.
-Learn how to improve image quality and resolution with AI-powered upscaling.
+This example demonstrates how to upscale images with ``client.image.upscale()``.
+
+- ``scale`` accepts any value from 2 to 4; the output is the input size times
+  the scale. The demos use 2 and 4, the two scales the catalog prices.
+- ``creativity`` sets how much detail and texture the upscaler adds. The
+  server clamps it to 0-0.02, so its effect is subtle.
+- The image can be a file path, a ``Path``, raw bytes or a file-like object.
+  The demos pass a ``Path``, a path string and raw bytes.
+
+The example generates one small source image and reuses it across the demos,
+so every output can be compared with the same original. Each output's pixel
+size is read from its header and checked against the expected size. A quote
+of the run's catalog price is printed first. Outputs are written to
+``examples/results/``.
 """
 
 import asyncio
-import base64
 import sys
 from pathlib import Path
 
-from venice_ai import VeniceClient, detect_image_format
-from venice_ai.types.api import ImageGenerationResponse
+from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _helpers import (  # noqa: E402
+    SKIPPED,
+    catalog_price_usd,
+    generate_base_image,
+    image_dimensions,
+    save_image,
+)
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+BASE_SIZE = 256
+
+# Upscales usually take 10-20s but can take over a minute under load, so every
+# call passes an explicit per-call timeout rather than relying on the default.
+UPSCALE_TIMEOUT = 180.0
+
+# The paid calls the demos below make, for the quote printed before they run:
+# upscales per scale factor, and generated source images.
+PLANNED_UPSCALES = {2: 3, 4: 1}
+SOURCE_IMAGES = 1
 
 
-async def setup_sample_image() -> str | None:
-    """Generate a sample image for upscaling demonstrations.
+async def _upscale_and_check(
+    client: VeniceClient,
+    image: str | bytes | Path,
+    source_size: tuple[int, int],
+    stem: str,
+    written: list[Path],
+    *,
+    scale: float = 2,
+    creativity: float | None = None,
+    timeout: float = UPSCALE_TIMEOUT,
+) -> bool:
+    """Upscale ``image``, save the result, and check its size is ``source * scale``.
 
-    Returns the saved image path, or ``None`` if generation failed (so the
-    caller can mark its demo as failed instead of silently skipping).
+    ``timeout`` (seconds, or an ``aiohttp.ClientTimeout``) caps each request.
+    Large sources and high scale factors take longer, so a generous per-call
+    timeout avoids a premature client-side abort. ``image.edit()`` takes the
+    same parameter (see image_editing.py).
     """
-    print("🎨 Generating sample image for upscaling...")
+    try:
+        upscaled = await client.image.upscale(
+            image=image, scale=scale, creativity=creativity, timeout=timeout
+        )
+    except VeniceError as e:
+        print(f"   ❌ Upscale failed: {e}")
+        return False
 
-    async with VeniceClient() as client:
-        try:
-            # Get image model
-            image_model = await client.models.resolve_image()
-
-            # Generate a small test image with more detail for better enhancement demonstration
-            response: ImageGenerationResponse = await client.image.create(
-                model=image_model,
-                prompt="A detailed fantasy landscape with mountains, forest, lake, and castle at sunset, rich colors and intricate details",
-                width=256,
-                height=256,
-                num_images=1,
-                return_binary=False,
-            )
-
-            # Save the base image
-            image_data = response.images[0]
-            image_bytes = base64.b64decode(image_data)
-
-            base_path = RESULTS_DIR / f"base_image_256.{detect_image_format(image_bytes)[0]}"
-            with open(base_path, "wb") as f:
-                f.write(image_bytes)
-
-            print(f"✅ Generated base image: {base_path}")
-            print(f"📏 Size: {len(image_bytes)} bytes")
-
-            return str(base_path)
-
-        except Exception as e:
-            print(f"❌ Error generating sample image: {e}")
-            return None
+    path = save_image(RESULTS_DIR / stem, upscaled)
+    written.append(path)
+    width, height = image_dimensions(upscaled)
+    expected = (round(source_size[0] * scale), round(source_size[1] * scale))
+    print(
+        f"   ✅ {path.name}: {source_size[0]}x{source_size[1]} → {width}x{height} "
+        f"({len(upscaled)} bytes)"
+    )
+    if (width, height) != expected:
+        print(f"   ❌ Expected {expected[0]}x{expected[1]} for scale={scale}")
+        return False
+    return True
 
 
-async def basic_upscaling() -> bool:
-    """Demonstrate basic image upscaling.
-
-    Returns ``True`` on success, ``False`` if the sample image or the upscale
-    call failed.
-    """
+async def basic_upscaling(
+    client: VeniceClient, base_path: Path, base_size: tuple[int, int], written: list[Path]
+) -> bool:
+    """Upscale a file on disk, passed as a ``Path``, by 2x."""
     print("\n🔍 Basic Image Upscaling")
     print("-" * 40)
-
-    # First generate a sample image
-    base_image_path = await setup_sample_image()
-    if not base_image_path:
-        return False
-
-    async with VeniceClient() as client:
-        try:
-            print("\n📤 Upscaling image by 2x...")
-
-            # Upscale the image. The `timeout` parameter (a float in seconds, or
-            # an aiohttp.ClientTimeout) caps the request — large source images
-            # and high scale factors take longer, so a generous per-call timeout
-            # prevents a premature client-side abort on a slow upscale. The same
-            # parameter is available on image.edit() (see image_editing.py).
-            upscaled_bytes = await client.image.upscale(
-                image=base_image_path,
-                scale=2,
-                timeout=120.0,  # seconds; raise for very large images
-            )
-
-            if not isinstance(upscaled_bytes, bytes):
-                print("❌ Upscale did not return image bytes")
-                return False
-
-            # Save upscaled image
-            output_path = (
-                RESULTS_DIR / f"upscaled_2x_basic.{detect_image_format(upscaled_bytes)[0]}"
-            )
-            with open(output_path, "wb") as f:
-                f.write(upscaled_bytes)
-
-            # Get original size
-            with open(base_image_path, "rb") as f:
-                original_bytes = f.read()
-
-            print("✅ Upscaling complete!")
-            print(f"📊 Original size: {len(original_bytes)} bytes")
-            print(f"📊 Upscaled size: {len(upscaled_bytes)} bytes")
-            print(f"📈 Size increase: {len(upscaled_bytes) / len(original_bytes):.2f}x")
-            print(f"💾 Saved to: {output_path}")
-
-            return True
-
-        except Exception as e:
-            print(f"❌ Error during upscaling: {e}")
-            if "not supported" in str(e).lower():
-                print("💡 Note: Image upscaling may not be available for your API tier")
-            return False
+    return await _upscale_and_check(
+        client, base_path, base_size, "upscaled_2x_basic", written, scale=2
+    )
 
 
-async def upscaling_with_added_detail() -> bool:
-    """Demonstrate upscaling with added detail via ``creativity``.
+async def creativity_sweep(
+    client: VeniceClient,
+    base_path: Path,
+    base_bytes: bytes,
+    base_size: tuple[int, int],
+    written: list[Path],
+) -> bool:
+    """Upscale the same source at the lowest and highest ``creativity``.
 
-    Returns ``True`` on success, ``False`` if the sample image or the upscale
-    call failed.
-    """
-    print("\n✨ Upscaling with Added Detail")
-    print("-" * 40)
-
-    # Generate a sample image
-    base_image_path = await setup_sample_image()
-    if not base_image_path:
-        return False
-
-    async with VeniceClient() as client:
-        try:
-            print("\n🎨 Upscaling with extra detail...")
-
-            # `creativity` is the only tuning knob; the server clamps it to 0-0.02.
-            enhanced_bytes = await client.image.upscale(
-                image=base_image_path,
-                scale=2,
-                creativity=0.02,
-            )
-
-            if not isinstance(enhanced_bytes, bytes):
-                print("❌ Enhanced upscale did not return image bytes")
-                return False
-
-            output_path = (
-                RESULTS_DIR / f"upscaled_2x_enhanced.{detect_image_format(enhanced_bytes)[0]}"
-            )
-            with open(output_path, "wb") as f:
-                f.write(enhanced_bytes)
-
-            print("✅ Upscaling complete!")
-            print(f"💾 Saved to: {output_path}")
-            print(f"📏 Size: {len(enhanced_bytes)} bytes")
-            print("🎨 Maximum creativity applied for extra detail")
-
-            return True
-
-        except Exception as e:
-            print(f"❌ Error during enhancement: {e}")
-            return False
-
-
-async def creativity_sweep() -> bool:
-    """Compare the upscaler's ``creativity`` settings side by side.
-
-    Returns ``True`` only if every setting succeeded; ``False`` if the sample
-    image failed or any individual upscale failed.
+    The first call passes the image as a path string, the second as raw bytes
+    held in memory, so both input types are exercised.
     """
     print("\n🎭 Creativity Sweep")
     print("-" * 40)
-
-    # Generate a sample image
-    base_image_path = await setup_sample_image()
-    if not base_image_path:
-        return False
+    print("   The server clamps creativity to 0-0.02 (default 0.01). The extra texture")
+    print("   at 0.02 is subtle and can be hard to tell from run-to-run variation.")
 
     ok = True
-    async with VeniceClient() as client:
-        try:
-            # Different enhancement styles with more distinct characteristics
-            # The endpoint takes no style prompt — `creativity` is the whole
-            # dial, and the server clamps it to 0-0.02.
-            enhancements = [
-                {"creativity": 0.0, "name": "faithful"},
-                {"creativity": 0.01, "name": "default"},
-                {"creativity": 0.02, "name": "detailed"},
-            ]
-
-            for enhancement in enhancements:
-                print(f"\n🎨 Setting: {enhancement['name']}")
-                print(f"   Creativity: {enhancement['creativity']}")
-
-                try:
-                    enhanced_bytes = await client.image.upscale(
-                        image=base_image_path,
-                        scale=2,
-                        creativity=enhancement["creativity"],
-                    )
-
-                    if not isinstance(enhanced_bytes, bytes):
-                        print("   ❌ Enhancement did not return image bytes")
-                        ok = False
-                        continue
-
-                    output_path = (
-                        RESULTS_DIR
-                        / f"upscaled_{enhancement['name']}.{detect_image_format(enhanced_bytes)[0]}"
-                    )
-                    with open(output_path, "wb") as f:
-                        f.write(enhanced_bytes)
-
-                    print(f"   ✅ Saved to: {output_path}")
-                    print(f"   📏 Size: {len(enhanced_bytes)} bytes")
-
-                except Exception as e:
-                    print(f"   ❌ Failed: {e}")
-                    ok = False
-
-        except Exception as e:
-            print(f"❌ Error during creative enhancement: {e}")
-            ok = False
-
+    sources: list[tuple[str, float, str | bytes, str]] = [
+        ("faithful", 0.0, str(base_path), "path string"),
+        ("detailed", 0.02, base_bytes, "raw bytes"),
+    ]
+    for name, creativity, image, input_type in sources:
+        print(f"   creativity={creativity} ({name}), image as {input_type}")
+        ok &= await _upscale_and_check(
+            client,
+            image,
+            base_size,
+            f"upscaled_creativity_{name}",
+            written,
+            scale=2,
+            creativity=creativity,
+        )
     return ok
 
 
-async def batch_upscaling() -> bool:
-    """Demonstrate batch upscaling of multiple images.
-
-    Returns ``True`` only if every image was generated and upscaled; ``False``
-    if any generation or upscale step failed.
-    """
-    print("\n📦 Batch Upscaling")
-    print("-" * 40)
-
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            # Generate multiple small images
-            prompts = [
-                "A red apple",
-                "A blue car",
-                "A green tree",
-            ]
-
-            print(f"🎨 Generating {len(prompts)} test images...")
-            image_paths = []
-
-            # Get image model
-            image_model = await client.models.resolve_image()
-
-            for i, prompt in enumerate(prompts):
-                try:
-                    response: ImageGenerationResponse = await client.image.create(
-                        model=image_model,
-                        prompt=prompt,
-                        width=256,
-                        height=256,
-                        num_images=1,
-                        return_binary=False,
-                    )
-
-                    image_data = response.images[0]
-                    image_bytes = base64.b64decode(image_data)
-
-                    path = RESULTS_DIR / f"batch_base_{i}.{detect_image_format(image_bytes)[0]}"
-                    with open(path, "wb") as f:
-                        f.write(image_bytes)
-
-                    image_paths.append(path)
-                    print(f"   ✓ Generated image {i + 1}")
-
-                except Exception as e:
-                    print(f"   ❌ Failed to generate image {i + 1}: {e}")
-                    ok = False
-
-            # Upscale all images
-            print(f"\n🔍 Upscaling {len(image_paths)} images...")
-
-            for i, path in enumerate(image_paths):
-                try:
-                    upscaled_bytes = await client.image.upscale(
-                        image=path,
-                        scale=2,
-                    )
-
-                    if not isinstance(upscaled_bytes, bytes):
-                        print(f"   ❌ Image {i + 1} upscale did not return bytes")
-                        ok = False
-                        continue
-
-                    output_path = (
-                        RESULTS_DIR / f"batch_upscaled_{i}.{detect_image_format(upscaled_bytes)[0]}"
-                    )
-                    with open(output_path, "wb") as f:
-                        f.write(upscaled_bytes)
-
-                    print(f"   ✓ Upscaled image {i + 1} → {output_path}")
-
-                except Exception as e:
-                    print(f"   ❌ Failed to upscale image {i + 1}: {e}")
-                    ok = False
-
-            if ok:
-                print("\n✅ Batch upscaling complete!")
-            else:
-                print("\n⚠️ Batch upscaling finished with failures")
-
-        except Exception as e:
-            print(f"❌ Error during batch upscaling: {e}")
-            ok = False
-
-    return ok
-
-
-async def different_scale_factors() -> bool:
-    """Demonstrate upscaling with different scale factors.
-
-    Returns ``True`` only if every scale factor succeeded; ``False`` if the
-    sample image failed or any scale factor failed.
-    """
+async def different_scale_factors(
+    client: VeniceClient, base_path: Path, base_size: tuple[int, int], written: list[Path]
+) -> bool:
+    """Upscale the same source at 4x (the basic demo covers 2x)."""
     print("\n📐 Different Scale Factors")
     print("-" * 40)
-
-    # Generate a sample image
-    base_image_path = await setup_sample_image()
-    if not base_image_path:
-        return False
-
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            # Different scale factors
-            scales = [1.5, 2.0, 3.0]
-
-            # Get original size
-            with open(base_image_path, "rb") as f:
-                original_bytes = f.read()
-            original_size = len(original_bytes)
-
-            print(f"📊 Original image: {original_size} bytes")
-
-            for scale in scales:
-                print(f"\n🔍 Upscaling by {scale}x...")
-
-                try:
-                    upscaled_bytes = await client.image.upscale(
-                        image=base_image_path,
-                        scale=scale,
-                    )
-
-                    if not isinstance(upscaled_bytes, bytes):
-                        print(f"   ❌ Scale {scale}x did not return image bytes")
-                        ok = False
-                        continue
-
-                    output_path = (
-                        RESULTS_DIR / f"upscaled_{scale}x.{detect_image_format(upscaled_bytes)[0]}"
-                    )
-                    with open(output_path, "wb") as f:
-                        f.write(upscaled_bytes)
-
-                    size_ratio = len(upscaled_bytes) / original_size
-                    print(f"   ✅ Scale {scale}x complete")
-                    print(f"   📊 New size: {len(upscaled_bytes)} bytes")
-                    print(f"   📈 Size ratio: {size_ratio:.2f}x")
-                    print(f"   💾 Saved to: {output_path}")
-
-                except Exception as e:
-                    print(f"   ❌ Failed at {scale}x: {e}")
-                    ok = False
-
-        except Exception as e:
-            print(f"❌ Error testing scale factors: {e}")
-            ok = False
-
-    return ok
+    print("   scale=4")
+    return await _upscale_and_check(client, base_path, base_size, "upscaled_4x", written, scale=4)
 
 
-async def upscale_from_bytes() -> bool:
-    """Demonstrate upscaling from in-memory image bytes.
+async def _print_quote(client: VeniceClient, image_model: str) -> None:
+    """Print the catalog price of every paid call this run makes."""
+    upscalers = await client.models.list(type="upscale")
+    tiers: dict[str, float] = {}
+    for entry in upscalers.data:
+        pricing = entry.model_spec.pricing
+        listed = pricing.model_dump().get("upscale", {}) if pricing else {}
+        tiers = {name: float(tier["usd"]) for name, tier in listed.items()}
+        break
 
-    Returns ``True`` on success, ``False`` if generation or upscaling failed.
-    """
-    print("\n💾 Upscaling from Memory (Bytes)")
-    print("-" * 40)
-
-    async with VeniceClient() as client:
-        try:
-            # Get image model
-            image_model = await client.models.resolve_image()
-
-            # Generate image and keep in memory
-            print("🎨 Generating image in memory...")
-
-            response: ImageGenerationResponse = await client.image.create(
-                model=image_model,
-                prompt="A simple geometric pattern",
-                width=256,
-                height=256,
-                num_images=1,
-                return_binary=False,
-            )
-
-            # Get bytes directly
-            image_data = response.images[0]
-            image_bytes = base64.b64decode(image_data)
-
-            print(f"✅ Generated image: {len(image_bytes)} bytes")
-
-            # Upscale directly from bytes
-            print("\n🔍 Upscaling from memory...")
-
-            upscaled_bytes = await client.image.upscale(
-                image=image_bytes,  # Pass bytes directly
-                scale=2,
-            )
-
-            if not isinstance(upscaled_bytes, bytes):
-                print("❌ Upscale did not return image bytes")
-                return False
-
-            output_path = (
-                RESULTS_DIR / f"upscaled_from_bytes.{detect_image_format(upscaled_bytes)[0]}"
-            )
-            with open(output_path, "wb") as f:
-                f.write(upscaled_bytes)
-
-            print("✅ Upscaled successfully!")
-            print(f"📊 Original: {len(image_bytes)} bytes")
-            print(f"📊 Upscaled: {len(upscaled_bytes)} bytes")
-            print(f"💾 Saved to: {output_path}")
-
-            return True
-
-        except Exception as e:
-            print(f"❌ Error upscaling from bytes: {e}")
-            return False
+    print("💰 Catalog quote for this run:")
+    total = 0.0
+    unpriced: list[str] = []
+    for scale, count in PLANNED_UPSCALES.items():
+        price = tiers.get(f"x{scale}")
+        if price is None:
+            unpriced.append(f"scale={scale}")
+            print(f"   {count} upscale(s) at scale={scale}: no catalog tier listed")
+            continue
+        total += count * price
+        print(f"   {count} upscale(s) at scale={scale}: {count} x ${price:.2f}")
+    gen_price = catalog_price_usd((await client.models.get(image_model)).model_spec)
+    if gen_price is None:
+        unpriced.append("source images")
+        print(f"   {SOURCE_IMAGES} source image(s) with {image_model}: price not listed")
+    else:
+        total += SOURCE_IMAGES * gen_price
+        print(
+            f"   {SOURCE_IMAGES} source image(s) with {image_model}: {SOURCE_IMAGES} x ${gen_price:.2f}"
+        )
+    note = f", plus the unpriced {', '.join(unpriced)}" if unpriced else ""
+    print(f"   Total: ${total:.2f}{note}")
 
 
 async def main() -> int:
     """Run all image upscaling examples.
 
-    Returns ``0`` only if every demo succeeded, ``1`` otherwise, so a real API
-    failure surfaces as a non-zero process exit instead of being masked by the
-    success banner.
+    Returns ``0`` only if every demo succeeded, ``1`` if any failed, and ``77``
+    if no catalog image model is sized by width/height.
     """
     print("🚀 Venice AI Image Upscaling Examples")
     print("=" * 50)
 
-    results: list[tuple[str, bool]] = [
-        ("basic_upscaling", await basic_upscaling()),
-        ("upscaling_with_added_detail", await upscaling_with_added_detail()),
-        ("creativity_sweep", await creativity_sweep()),
-        ("batch_upscaling", await batch_upscaling()),
-        ("different_scale_factors", await different_scale_factors()),
-        ("upscale_from_bytes", await upscale_from_bytes()),
-    ]
+    written: list[Path] = []
+    async with VeniceClient() as client:
+        # Pixel sizes are requested below, so pick among models sized by width/height.
+        try:
+            image_model = await client.models.resolve_image(
+                prefer="cheapest", require_custom_size=True
+            )
+        except NoMatchingModelError as e:
+            print(f"SKIPPED: no image model in the catalog takes width/height ({e})")
+            return SKIPPED
+        await _print_quote(client, image_model)
+
+        print(f"\n🎨 Generating one {BASE_SIZE}x{BASE_SIZE} source image for the demos...")
+        try:
+            base_bytes = await generate_base_image(
+                client,
+                "A detailed fantasy landscape with mountains, forest, lake, and castle "
+                "at sunset, rich colors and intricate details",
+                model=image_model,
+                width=BASE_SIZE,
+                height=BASE_SIZE,
+            )
+        except VeniceError as e:
+            print(f"❌ Could not generate the source image: {e}")
+            return 1
+        base_path = save_image(RESULTS_DIR / f"upscale_source_{BASE_SIZE}", base_bytes)
+        written.append(base_path)
+        base_size = image_dimensions(base_bytes)
+        print(f"   💾 {base_path.name}: {base_size[0]}x{base_size[1]}")
+
+        results: list[tuple[str, bool]] = [
+            (
+                "basic_upscaling",
+                await basic_upscaling(client, base_path, base_size, written),
+            ),
+            (
+                "creativity_sweep",
+                await creativity_sweep(client, base_path, base_bytes, base_size, written),
+            ),
+            (
+                "different_scale_factors",
+                await different_scale_factors(client, base_path, base_size, written),
+            ),
+        ]
 
     failed = [name for name, ok in results if not ok]
     passed = len(results) - len(failed)
@@ -471,22 +242,15 @@ async def main() -> int:
         print(f"\n⚠️ {passed}/{len(results)} demos completed; failed: {', '.join(failed)}")
     else:
         print(f"\n✨ Image upscaling examples completed! ({passed}/{len(results)})")
+        print("\n💡 Key concepts demonstrated:")
+        print("   - Upscaling with a generous per-call timeout")
+        print("   - Image inputs as a Path, a path string and raw bytes")
+        print("   - The creativity setting (0-0.02)")
+        print("   - Scale factors 2 and 4, checked against the output size")
 
-    print("\n💡 Key concepts demonstrated:")
-    print("   - Basic image upscaling (2x, 3x)")
-    print("   - AI-powered enhancement")
-    print("   - Creative enhancement with prompts")
-    print("   - Batch processing multiple images")
-    print("   - Different scale factors")
-    print("   - Upscaling from memory (bytes)")
-    print("   - Quality comparison")
-
-    # Extensions are auto-detected from the returned format (e.g. .webp), so
-    # the listing below uses an <ext> placeholder rather than a hardcoded .png.
-    print("\n📁 Generated files in examples/results/:")
-    print("   - base_image_256.<ext> (original)")
-    print("   - upscaled_*.<ext> (enhanced versions)")
-    print("   - batch_*.<ext> (batch processing)")
+    print(f"\n📁 Files written by this run ({len(written)}):")
+    for path in written:
+        print(f"   - {path.name}")
 
     return 1 if failed else 0
 

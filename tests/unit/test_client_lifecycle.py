@@ -183,6 +183,7 @@ class TestErrorHandling:
         mock_response.ok = True
         mock_response.content_length = 10
         mock_response.headers = {"content-type": "application/json"}
+        mock_response.read = AsyncMock(return_value=b"not json")
         mock_response.json = AsyncMock(side_effect=ValueError("Invalid JSON"))
 
         with patch.object(
@@ -201,6 +202,7 @@ class TestErrorHandling:
         mock_response.ok = True
         mock_response.content_length = 10
         mock_response.headers = {"content-type": "application/json"}
+        mock_response.read = AsyncMock(return_value=b"<html></html>")
         mock_response.json = AsyncMock(
             side_effect=aiohttp.ContentTypeError(request_info=MagicMock(), history=())
         )

@@ -15,6 +15,7 @@ from .commands import api_keys as api_keys_commands
 from .commands import audio as audio_commands
 from .commands import characters as characters_commands
 from .commands import chat as chat_commands
+from .commands import decisions as decisions_commands
 from .commands import embeddings as embeddings_commands
 from .commands import image as image_commands
 from .commands import skills as skills_commands
@@ -29,7 +30,7 @@ from .utils.console import console, enable_plain_mode, print_version_info
 # The CLI ships ~13 subcommands; lumping them in one alphabetical block was
 # making the help output a wall of names, so we group them by intent.
 _COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Generate", ("chat", "image", "audio", "video", "embeddings")),
+    ("Generate", ("chat", "image", "audio", "video", "embeddings", "decisions")),
     ("Discover", ("models", "characters", "health")),
     ("Account", ("account", "api-keys")),
     ("Develop", ("lint", "skills", "configure", "completion")),
@@ -112,6 +113,7 @@ cli.add_command(api_keys_commands.api_keys)
 cli.add_command(audio_commands.audio)
 cli.add_command(characters_commands.characters)
 cli.add_command(chat_commands.chat)
+cli.add_command(decisions_commands.decisions)
 cli.add_command(embeddings_commands.embeddings)
 cli.add_command(image_commands.image)
 cli.add_command(video_commands.video)

@@ -37,15 +37,16 @@ class VideoElement(BaseModel):
     """
 
     frontal_image_url: str | None = Field(
-        None, description="Frontal reference image for this element (HTTP URL or data: URI)."
+        default=None,
+        description="Frontal reference image for this element (HTTP URL or data: URI).",
     )
     reference_image_urls: list[str] | None = Field(
-        None,
+        default=None,
         max_length=3,
         description="Optional additional reference images for this element (up to 3).",
     )
     video_url: str | None = Field(
-        None,
+        default=None,
         description=(
             "Reference video for this element (HTTP URL or data: URI), used by "
             "element-aware models that accept per-element motion donors. "
@@ -201,7 +202,7 @@ class VideoConsents(BaseModel):
     """Provider-specific consent attestations for video generation."""
 
     seedance: SeedanceConsents | None = Field(
-        None, description="Seedance face-media consent attestations."
+        default=None, description="Seedance face-media consent attestations."
     )
 
 
@@ -219,7 +220,7 @@ class VideoRequestBase(BaseModel):
         description="Video model ID (e.g., 'wan-2.6-text-to-video', 'wan-3-0-prime-image-to-video')",
     )
     prompt: str | None = Field(
-        None,
+        default=None,
         min_length=1,
         max_length=20000,
         description=(
@@ -228,12 +229,16 @@ class VideoRequestBase(BaseModel):
             "from a source video do not."
         ),
     )
-    duration: str = Field(
-        ...,
-        description="Duration of generated video (e.g., '5s', '10s'). Valid values vary by model.",
+    duration: str | None = Field(
+        default=None,
+        description=(
+            "Duration of generated video (e.g., '5s', '10s'). Valid values vary by "
+            "model. Generation models require it; upscale and other video-to-video "
+            "models take the length from the source video and omit it."
+        ),
     )
     negative_prompt: str | None = Field(
-        None,
+        default=None,
         max_length=20000,
         description=(
             "Optional negative prompt. Per-model max length varies (default 2500, "
@@ -241,7 +246,7 @@ class VideoRequestBase(BaseModel):
         ),
     )
     resolution: str | None = Field(
-        None,
+        default=None,
         description=(
             "Output resolution (e.g., '720p', '1080p'). Valid values vary by "
             "model; some models don't accept resolution. Omit to use the model's "
@@ -249,39 +254,39 @@ class VideoRequestBase(BaseModel):
         ),
     )
     audio: bool | None = Field(
-        None,
+        default=None,
         description="Generate audio if model supports it. Check model.model_spec.constraints.audio_configurable.",
     )
     upscale_factor: Literal[1, 2, 4] | None = Field(
-        None,
+        default=None,
         description=(
             "For upscale models only: 1 = quality enhancement, 2 = double resolution "
             "(default for topaz-video-upscale), 4 = quadruple."
         ),
     )
     end_image_url: str | None = Field(
-        None,
+        default=None,
         description=(
             "For models supporting end images / transitions, the end-frame image "
             "(HTTP URL or data: URI)."
         ),
     )
     audio_url: str | None = Field(
-        None,
+        default=None,
         description=(
             "For models supporting background audio input (WAV/MP3, max 30s, 15MB). "
             "HTTP URL or data: URI."
         ),
     )
     video_url: str | None = Field(
-        None,
+        default=None,
         description=(
             "For video-to-video / upscale models, the source video "
             "(MP4/MOV/WebM). HTTP URL or data: URI."
         ),
     )
     reference_image_urls: list[str] | None = Field(
-        None,
+        default=None,
         max_length=9,
         description=(
             "Up to 9 reference images for character/style consistency. Each must be "
@@ -289,7 +294,7 @@ class VideoRequestBase(BaseModel):
         ),
     )
     reference_audio_urls: list[str] | None = Field(
-        None,
+        default=None,
         max_length=3,
         description=(
             "Up to 3 reference audio URLs (role 'reference_audio') for R2V models "
@@ -299,7 +304,7 @@ class VideoRequestBase(BaseModel):
         ),
     )
     reference_video_urls: list[str] | None = Field(
-        None,
+        default=None,
         max_length=3,
         description=(
             "Up to 3 reference video URLs (role 'reference_video') for R2V models "
@@ -309,7 +314,7 @@ class VideoRequestBase(BaseModel):
         ),
     )
     elements: list[VideoElement] | None = Field(
-        None,
+        default=None,
         max_length=4,
         description=(
             "Up to 4 structured elements for advanced element-aware models (Kling O3 R2V). "
@@ -317,7 +322,7 @@ class VideoRequestBase(BaseModel):
         ),
     )
     scene_image_urls: list[str] | None = Field(
-        None,
+        default=None,
         max_length=4,
         description=(
             "Up to 4 scene reference images for advanced element-aware models. Reference "
@@ -325,7 +330,7 @@ class VideoRequestBase(BaseModel):
         ),
     )
     omni_reference_task_type: Literal["auto", "reference", "edit", "extend"] | None = Field(
-        None,
+        default=None,
         description=(
             "Seedance 2.5 reference-to-video task-type hint forwarded to BytePlus. "
             "Pre-guides the classification the model would otherwise infer from the "
@@ -333,7 +338,7 @@ class VideoRequestBase(BaseModel):
         ),
     )
     reference_document_urls: list[str] | None = Field(
-        None,
+        default=None,
         max_length=1,
         description=(
             "For models with document / webpage Omni-Reference (Wan 3.0), up to 1 "
@@ -341,7 +346,7 @@ class VideoRequestBase(BaseModel):
         ),
     )
     keyframes: list[VideoKeyframe] | None = Field(
-        None,
+        default=None,
         max_length=10,
         description=(
             "For keyframe-driven models: up to 10 images pinned to frame positions "
@@ -349,7 +354,7 @@ class VideoRequestBase(BaseModel):
         ),
     )
     camera_trajectory: list[CameraKeyframe] | None = Field(
-        None,
+        default=None,
         min_length=2,
         max_length=12,
         description=(
@@ -368,46 +373,54 @@ class VideoRequestBase(BaseModel):
 
     # ---- Enhancement (Topaz-style) models only -----------------------------
     enhancement_model: str | None = Field(
-        None,
+        default=None,
         description=(
             "Provider-side enhancement model. Allowed values are published per "
             "model under ``constraints.topaz.models`` on ``GET /models``."
         ),
     )
     compression: float | None = Field(
-        None, ge=0, le=1, description="Compression-artifact removal level (0.0-1.0)."
+        default=None, ge=0, le=1, description="Compression-artifact removal level (0.0-1.0)."
     )
     creativity: float | None = Field(
-        None, ge=0, le=1, description="How much new detail the model invents (0.0-1.0)."
+        default=None, ge=0, le=1, description="How much new detail the model invents (0.0-1.0)."
     )
-    grain: float | None = Field(None, ge=0, le=0.1, description="Film grain amount (0.0-0.1).")
-    halo: float | None = Field(None, ge=0, le=1, description="Halo reduction level (0.0-1.0).")
-    noise: float | None = Field(None, ge=0, le=1, description="Noise reduction level (0.0-1.0).")
+    grain: float | None = Field(
+        default=None, ge=0, le=0.1, description="Film grain amount (0.0-0.1)."
+    )
+    halo: float | None = Field(
+        default=None, ge=0, le=1, description="Halo reduction level (0.0-1.0)."
+    )
+    noise: float | None = Field(
+        default=None, ge=0, le=1, description="Noise reduction level (0.0-1.0)."
+    )
     realism: float | None = Field(
-        None, ge=0, le=1, description="Bias generated detail toward photorealism (0.0-1.0)."
+        default=None, ge=0, le=1, description="Bias generated detail toward photorealism (0.0-1.0)."
     )
     recover_detail: float | None = Field(
-        None, ge=0, le=1, description="Recover original detail level (0.0-1.0)."
+        default=None, ge=0, le=1, description="Recover original detail level (0.0-1.0)."
     )
     sharp: float | None = Field(
-        None,
+        default=None,
         ge=0,
         le=1,
         description="Output sharpness (0.0 softens, 0.5 neutral, 1.0 strong).",
     )
     softness: float | None = Field(
-        None, ge=1, le=5, description="Softness level (1 sharpest to 5 softest)."
+        default=None, ge=1, le=5, description="Softness level (1 sharpest to 5 softest)."
     )
-    h264_output: bool | None = Field(None, description="Output H.264 instead of the default H.265.")
+    h264_output: bool | None = Field(
+        default=None, description="Output H.264 instead of the default H.265."
+    )
     output_format: Literal["mp4", "prores"] | None = Field(
-        None,
+        default=None,
         description=(
             "For SDR-to-HDR enhancement: output container. ``mp4`` is 10-bit H265 "
             "HDR10, ``prores`` is 10-bit ProRes."
         ),
     )
     target_fps: int | None = Field(
-        None,
+        default=None,
         ge=16,
         le=120,
         description=(
@@ -416,7 +429,7 @@ class VideoRequestBase(BaseModel):
         ),
     )
     slowdown_factor: Literal[1, 2, 4, 8] | None = Field(
-        None,
+        default=None,
         description=(
             "Slow-motion factor for frame interpolation: 2 makes the output twice "
             "as long at the target FPS, up to 8x. Multiplies the billed duration."
@@ -424,7 +437,7 @@ class VideoRequestBase(BaseModel):
     )
 
     bitrate_mode: Literal["standard", "high"] | None = Field(
-        None,
+        default=None,
         description=(
             "Output encode bitrate. ``high`` is a higher-quality, larger-file "
             "encode; omitting the field is equivalent to ``standard``. Supported "
@@ -434,7 +447,7 @@ class VideoRequestBase(BaseModel):
         ),
     )
     consents: VideoConsents | None = Field(
-        None,
+        default=None,
         description=(
             "Provider-specific consent attestations. Required only when submitted "
             "media contains faces (e.g. Seedance) — the API returns a 409 "
@@ -480,7 +493,7 @@ class VideoTextToVideoRequest(VideoRequestBase):
     """
 
     aspect_ratio: str | None = Field(
-        None,
+        default=None,
         description="Aspect ratio (e.g., '16:9', '9:16'). Check model constraints for valid values.",
     )
 
@@ -510,7 +523,7 @@ class VideoImageToVideoRequest(VideoRequestBase):
         description="Reference image (HTTP URL or data: URI). REQUIRED for I2V models.",
     )
     aspect_ratio: str | None = Field(
-        None,
+        default=None,
         description="Aspect ratio (usually ignored for I2V, uses input image ratio)",
     )
 
@@ -541,52 +554,56 @@ class VideoQuoteRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     model: str = Field(..., description="Video model ID (e.g., 'wan-2-7-text-to-video').")
-    duration: str = Field(
-        ...,
-        description="Duration of generated video (e.g., '5s', '10s'). Valid values vary by model.",
+    duration: str | None = Field(
+        default=None,
+        description=(
+            "Duration of generated video (e.g., '5s', '10s'). Valid values vary by "
+            "model. Generation models require it; upscale and other video-to-video "
+            "models take the length from the source video and omit it."
+        ),
     )
     aspect_ratio: str | None = Field(
-        None,
+        default=None,
         description="Aspect ratio (e.g., '16:9', '9:16'). Optional; valid values vary by model.",
     )
     resolution: str | None = Field(
-        None,
+        default=None,
         description="Output resolution (e.g., '720p', '1080p'). Optional; valid values vary by model.",
     )
     upscale_factor: Literal[1, 2, 4] | None = Field(
-        None,
+        default=None,
         description="For upscale models: 1 = quality enhancement, 2 = double, 4 = quadruple.",
     )
     audio: bool | None = Field(
-        None,
+        default=None,
         description="Generate audio if the model supports it.",
     )
     video_url: str | None = Field(
-        None,
+        default=None,
         description=(
             "For video-to-video / upscale models, the source video "
             "(MP4/MOV/WebM). HTTP URL or data: URI."
         ),
     )
     enhancement_model: str | None = Field(
-        None,
+        default=None,
         description=(
             "Provider-side enhancement model; published per model under "
             "``constraints.topaz.models`` on ``GET /models``."
         ),
     )
     target_fps: int | None = Field(
-        None,
+        default=None,
         ge=16,
         le=120,
         description="Target FPS for frame interpolation (16-120). Affects the quote.",
     )
     slowdown_factor: Literal[1, 2, 4, 8] | None = Field(
-        None,
+        default=None,
         description="Slow-motion factor; multiplies the billed duration.",
     )
     reference_video_total_duration: float | None = Field(
-        None,
+        default=None,
         ge=0,
         description=(
             "For R2V models (e.g. Seedance 2.0 R2V), the aggregate duration in "
@@ -618,7 +635,7 @@ class VideoRetrieveRequest(BaseModel):
     model: str = Field(..., description="Model ID used for generation")
     queue_id: str = Field(..., description="Queue ID from queue response")
     delete_media_on_completion: bool = Field(
-        False, description="Auto-delete media after successful retrieval"
+        default=False, description="Auto-delete media after successful retrieval"
     )
 
 
@@ -646,7 +663,7 @@ class VideoTranscriptionRequest(BaseModel):
 
     url: str = Field(..., description="YouTube video URL to transcribe")
     response_format: Literal["json", "text"] = Field(
-        "json",
+        default="json",
         description=(
             "Transcript output format: ``json`` (default) returns a structured "
             "object with ``transcript`` and ``lang``; ``text`` returns plain text."

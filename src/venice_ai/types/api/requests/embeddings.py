@@ -27,12 +27,13 @@ class EmbeddingsRequest(BaseModel):
 
     # Optional parameters
     dimensions: int | None = Field(
-        None, ge=1, description="Number of dimensions for output embeddings"
+        default=None, ge=1, description="Number of dimensions for output embeddings"
     )
     encoding_format: Literal["float", "base64"] | None = Field(
-        None, description="Format to return embeddings (server default is 'float' when omitted)"
+        default=None,
+        description="Format to return embeddings (server default is 'float' when omitted)",
     )
-    user: str | None = Field(None, description="User identifier (compatibility only)")
+    user: str | None = Field(default=None, description="User identifier (compatibility only)")
 
     @field_validator("input", mode="before")
     @classmethod

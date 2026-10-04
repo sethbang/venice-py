@@ -6,7 +6,7 @@ import dataclasses
 import json
 import logging
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -15,11 +15,14 @@ from typing import (
 )
 
 import aiohttp
+from multidict import CIMultiDict
 from pydantic import BaseModel, ValidationError
 from yarl import URL
 
 from . import _constants
-from .core.http_client import _extract_rate_limit_headers
+from ._base_url import DEFAULT_API_VERSION, normalize_base_url
+from .core.auth import create_auth_headers, resolve_api_key
+from .core.http_client import ConnectionLimits, _extract_rate_limit_headers
 from .exceptions import (
     APIError,
     APIResponseProcessingError,
@@ -48,6 +51,7 @@ from .resources.voice_changer import VoiceChanger
 from .resources.x402 import X402
 from .streaming import Stream
 from .utils import NOT_GIVEN, NotGiven, serialize_form_value
+from .utils.errors import read_body, resolve_timeout, wrap_aiohttp_errors
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +115,48 @@ class VeniceClient:
             return self._timeout.total
         return 60.0  # Default fallback
 
+    @property
+    def retry_options(self) -> RetryOptions | None:
+        """The retry policy requests from this task are sent with.
+
+        Inside a :meth:`with_retries` block this is the block's override, since
+        that is what those requests use; otherwise it is the construction-time
+        policy resolved from ``retry_options``, ``max_retries`` and
+        ``config.http_client``, with :class:`RetryOptions` defaults for anything
+        unset. ``None`` when the client was given its own ``http_client``
+        session: the SDK installs no retry middleware on a caller's session.
+        :class:`RetryOptions` is frozen, so the returned policy cannot be
+        changed; derive a variant with ``dataclasses.replace()``.
+        """
+        if self._venice_http_client is None:
+            return None
+        from .middleware.retry import _active_retry_options
+
+        active = _active_retry_options.get()
+        if active is not None:
+            return active
+        if isinstance(self._retry_options, RetryOptions):
+            return self._retry_options
+        return RetryOptions()
+
+    @property
+    def connection_limits(self) -> ConnectionLimits:
+        """The connection-pool limits of this client's HTTP session.
+
+        Read from the caller's session connector when an ``http_client`` was
+        given, otherwise resolved from ``http_transport_options`` (``limit``,
+        ``limit_per_host``), then ``connector_limit``,
+        ``connector_limit_per_host`` and ``config.http_client.max_connections``,
+        with the SDK defaults (1000 in total, no per-host cap).
+        """
+        if self._venice_http_client is not None:
+            return self._venice_http_client.connection_limits
+        connector = self._session.connector if self._session is not None else None
+        return ConnectionLimits(
+            limit=getattr(connector, "limit", 0) or 0,
+            limit_per_host=getattr(connector, "limit_per_host", 0) or 0,
+        )
+
     def get_headers(self) -> dict[str, str]:
         """Get default headers (ClientProtocol implementation)."""
         if self._headers is not NOT_GIVEN and isinstance(self._headers, dict):
@@ -172,10 +218,17 @@ class VeniceClient:
         all dependencies.
 
         Args:
-            api_key: The API key for authenticating with Venice AI. If not
-                provided, it is retrieved from the ``VENICE_API_KEY``
-                environment variable. When ``api_key`` and ``auth`` are
-                both unset, a :class:`ValueError` is raised.
+            api_key: The API key for authenticating with Venice AI. The key
+                is resolved in one order, the first value that is not ``None``
+                wins: this argument, then ``config.api_key`` when a ``config``
+                is passed, then the ``VENICE_API_KEY`` environment variable.
+                An explicit empty string means "no API key" and stops the
+                lookup, which lets a wallet ``auth`` take over even when
+                ``VENICE_API_KEY`` is set. When no key resolves and ``auth`` is
+                unset, a :class:`ValueError` is raised. The key is sent as ``Authorization: Bearer`` on every
+                API request, including requests made through a caller-supplied
+                ``http_client``. :meth:`fetch_external` sends it only to URLs on
+                the API's own origin, never to CDN or pre-signed media hosts.
             auth: Optional wallet auth for SIWE/SIWX-based authentication
                 (Mode 2 — no API key, prepaid balance) —
                 :class:`~venice_ai.auth.x402.X402Auth` for EVM wallets or
@@ -187,10 +240,22 @@ class VeniceClient:
                 for default request auth; the auth instance is stored
                 so callers can pass it explicitly to per-call ``auth=``
                 kwargs (e.g., ``client.x402.balance(auth=auth)``).
-            base_url: The base URL for the API. Defaults to the official
-                Venice AI API URL.
+            base_url: The API root, version path included
+                (``https://api.venice.ai/api/v1``). A bare host such as
+                ``https://api.venice.ai`` gets ``/api/v1`` appended; any other
+                path is used as given. A gateway must therefore expose the API
+                under a path (``https://gateway.example.com/venice``): a URL
+                without one, trailing slash or not, always gets ``/api/v1``
+                appended, so an API served at a host's root cannot be
+                addressed. Defaults to ``config.api_base_url`` when
+                a ``config`` is passed, else the ``VENICE_API_BASE_URL``
+                environment variable, else the official API.
             http_client: An optional pre-configured ``aiohttp.ClientSession``.
                 If provided, the client will not manage the session lifecycle.
+                The session is never modified: authentication headers are
+                attached to each API request rather than to the session, and
+                request URLs are absolute, so the session needs no
+                ``base_url`` of its own.
             timeout: The default request timeout in seconds.
             default_timeout: A pre-configured ``aiohttp.ClientTimeout`` object
                 that overrides the ``timeout`` setting.
@@ -202,10 +267,13 @@ class VeniceClient:
                 (injected by factory).
             config: A ``VeniceAIConfig`` object for configuring the central HTTP
                 client: timeout, connection pool size, User-Agent and the
-                retry policy (``max_retries`` / ``retry_backoff_factor``).
+                retry policy (``max_retries`` / ``retry_backoff_factor``), plus
+                the API key (``config.api_key``, used when ``api_key`` is not
+                passed) and the base URL (``config.api_base_url``).
             http_transport_options: Additional options for the
                 ``aiohttp.TCPConnector``, allowing fine-tuning of the HTTP
-                transport layer.
+                transport layer. A ``limit`` or ``limit_per_host`` here takes
+                precedence over ``connector_limit`` / ``connector_limit_per_host``.
             rate_limiter_config: A dictionary with rate limiter settings.
             rate_limiter_config_path: The file path to a rate limiter
                 configuration file.
@@ -220,7 +288,8 @@ class VeniceClient:
             auto_decompress: If ``True``, ``aiohttp`` will automatically
                 decompress response content.
             cookie_jar: A custom ``aiohttp.CookieJar`` for managing cookies.
-            headers: Default headers to include in every request.
+            headers: Default headers to include in every API request, including
+                requests sent through a caller-supplied ``http_client``.
             skip_auto_headers: A list of headers that ``aiohttp`` should not
                 automatically add.
             retry_options: Configuration for the request retry strategy. Takes
@@ -234,12 +303,7 @@ class VeniceClient:
         # SIWE/SIWX) is required. When both are set, the api_key wins for default
         # request auth; the auth instance is stored for explicit per-call use
         # (e.g., on x402 reads).
-        effective_api_key = api_key
-        if effective_api_key is None:
-            effective_api_key = os.environ.get("VENICE_API_KEY")
-
-        # Strip whitespace; treat empty/whitespace-only as absent.
-        self._api_key = (effective_api_key or "").strip()
+        self._api_key = resolve_api_key(api_key, config)
 
         # Store SIWE/SIWX auth (Mode 2) if provided. The auth classes are
         # lazily imported so neither the [x402] nor [x402-solana] extra is
@@ -248,17 +312,26 @@ class VeniceClient:
 
         if not self._api_key and self._auth is None:
             raise ValueError(
-                "No authentication provided. Set the VENICE_API_KEY environment "
-                "variable, pass api_key= to VeniceClient(), or pass a wallet "
+                "No authentication provided. Pass api_key= to VeniceClient(), set "
+                "api_key on the VeniceAIConfig passed as config=, set the "
+                "VENICE_API_KEY environment variable, or pass a wallet "
                 "auth for SIWE/SIWX authentication — auth=X402Auth(...) (EVM, "
                 "requires the [x402] extra) or auth=SolanaX402Auth(...) (Solana, "
                 "requires the [x402-solana] extra)."
             )
 
         # --- Base URL resolution ---
+        # One form everywhere: the API root (see venice_ai._base_url). An
+        # explicit base_url wins, then the config's api_base_url, then the
+        # VENICE_API_BASE_URL environment variable the config also reads.
         if base_url is None or base_url == "":
-            base_url = _constants.DEFAULT_BASE_URL
-        self._base_url = URL(str(base_url).rstrip("/") + "/")
+            if config is not None:
+                base_url = config.api_base_url
+            else:
+                base_url = os.environ.get("VENICE_API_BASE_URL") or _constants.DEFAULT_BASE_URL
+        api_version = config.api_version if config is not None else DEFAULT_API_VERSION
+        base_url = normalize_base_url(str(base_url), api_version)
+        self._base_url = URL(base_url + "/")
 
         # --- Timeout resolution ---
         effective_timeout = default_timeout if default_timeout is not None else timeout
@@ -326,7 +399,6 @@ class VeniceClient:
                     connector_limit_value = config.http_client.max_connections
                 self._venice_http_client = self._create_venice_http_client(
                     config=config,
-                    api_key=self._api_key,
                     base_url=base_url,
                     connector_limit=connector_limit_value,
                     connector_limit_per_host=self._resolve_not_given(
@@ -348,7 +420,6 @@ class VeniceClient:
 
                 self._venice_http_client = self._create_venice_http_client(
                     config=config,
-                    api_key=self._api_key,
                     base_url=base_url,
                     connector_limit=connector_limit_value,
                     connector_limit_per_host=connector_limit_per_host_value,
@@ -435,7 +506,6 @@ class VeniceClient:
     def _create_venice_http_client(
         self,
         config: VeniceAIConfig,
-        api_key: str | None,
         base_url: str | URL | None,
         connector_limit: int | None,
         connector_limit_per_host: int | None,
@@ -448,7 +518,6 @@ class VeniceClient:
 
         Args:
             config: The VeniceAIConfig instance
-            api_key: The API key for authentication
             base_url: The base URL for the API
             connector_limit: Maximum number of connections
             connector_limit_per_host: Maximum keepalive connections per host
@@ -458,9 +527,13 @@ class VeniceClient:
         """
         from .core.http_client import VeniceHTTPClient
 
+        # The session carries no credentials: _request_headers() attaches
+        # them to each API request, so media URLs on other hosts fetched
+        # through the same session (CDN, pre-signed storage) never receive
+        # the API key.
         return VeniceHTTPClient(
             config=config,
-            api_key=api_key,
+            api_key=None,
             base_url=str(base_url) if base_url is not None else None,
             headers=cast(
                 dict[str, str] | None,
@@ -565,17 +638,29 @@ class VeniceClient:
 
         Honors the client's connector, proxy, SSL, timeout, and retry configuration.
         Intended for asset downloads (e.g. video / image CDN URLs returned by API
-        responses). The session's auth headers ride along; CDN endpoints typically
-        ignore unrecognized auth.
+        responses). The client's credentials are attached only when ``url`` has
+        the same origin (scheme, host and port) as the API base URL; a URL on
+        any other host -- a CDN or a pre-signed storage URL -- is fetched
+        without them, so the API key never reaches a third party.
 
         :param url: Absolute URL to fetch.
         :return: Response body as ``bytes``.
         :raises aiohttp.ClientResponseError: If the response status is >= 400.
+        :raises APITimeoutError: If the request or its body does not arrive
+            within the session timeout.
+        :raises APIConnectionError: If the connection fails.
         """
         session = await self._get_session()
-        async with session.get(url) as resp:
+        headers = (
+            self._request_headers(session) if URL(url).origin() == self._base_url.origin() else None
+        )
+        async with wrap_aiohttp_errors():
+            resp = await session.get(url, headers=headers, timeout=self._timeout)
+        try:
             resp.raise_for_status()
-            return await resp.read()
+            return await read_body(resp)
+        finally:
+            resp.release()
 
     async def get[T: BaseModel](
         self,
@@ -853,15 +938,6 @@ class VeniceClient:
         full_path = f"{base_path}/{endpoint_path}"
         url = self._base_url.with_path(full_path)
 
-        # --- Timeout resolution ---
-        timeout_value = timeout if timeout is not None else self._timeout
-        if timeout_value is not None and isinstance(timeout_value, (int, float)):
-            final_timeout: aiohttp.ClientTimeout | None = aiohttp.ClientTimeout(total=timeout_value)
-        else:
-            final_timeout = (
-                timeout_value if isinstance(timeout_value, aiohttp.ClientTimeout) else None
-            )
-
         return {
             "method": method,
             "url": url,
@@ -869,7 +945,7 @@ class VeniceClient:
             "data": data,
             "params": params,
             "headers": headers,
-            "timeout": final_timeout,
+            "timeout": resolve_timeout(timeout, self._timeout),
         }
 
     def _default_siwe_header(self) -> str | None:
@@ -896,6 +972,75 @@ class VeniceClient:
             return None
 
         return self._auth.build_header()
+
+    def _request_headers(
+        self,
+        session: aiohttp.ClientSession,
+        headers: dict[str, str] | None = None,
+        siwe_auth: X402Auth | SolanaX402Auth | None = None,
+    ) -> dict[str, str]:
+        """Return the complete header set for one API request.
+
+        Every request to the Venice API builds its headers here, so
+        authentication is attached per request and reaches the server whether
+        the session was created by the SDK or supplied by the caller as
+        ``http_client``. The session itself is never given credentials: a
+        caller's session is left untouched, and :meth:`fetch_external` adds
+        these headers only for URLs on the API's own origin.
+
+        Later layers override earlier ones, with header names compared
+        case-insensitively:
+
+        1. The session's default headers.
+        2. The client's authentication: ``Authorization: Bearer <api_key>``
+           when an API key is set, otherwise a freshly signed
+           ``X-Sign-In-With-X`` envelope from the client's wallet ``auth``
+           (Venice accepts each nonce once, so an envelope is never reused).
+        3. The client's ``headers=`` constructor argument.
+        4. The per-call ``headers``.
+        5. A per-call wallet (``siwe_auth``), which signs this request's
+           ``X-Sign-In-With-X`` envelope in place of the client's own.
+
+        Args:
+            session: The session the request is sent through.
+            headers: Per-call headers.
+            siwe_auth: A per-call wallet that signs this request.
+
+        Returns:
+            A plain ``dict`` with one entry per header name.
+        """
+        merged: CIMultiDict[str] = CIMultiDict(session.headers)
+        if self._api_key:
+            merged.update(create_auth_headers(self._api_key))
+        elif siwe_auth is None:
+            siwe = self._default_siwe_header()
+            if siwe is not None:
+                merged[_SIWE_HEADER] = siwe
+        if isinstance(self._headers, dict):
+            merged.update(self._headers)
+        if headers:
+            merged.update(headers)
+        if siwe_auth is not None:
+            merged[_SIWE_HEADER] = siwe_auth.build_header()
+        return dict(merged)
+
+    @contextlib.contextmanager
+    def _siwe_resigning(
+        self,
+        headers: dict[str, str] | None = None,
+        siwe_auth: X402Auth | SolanaX402Auth | None = None,
+    ) -> Iterator[None]:
+        """Let the retry middleware re-sign the SIWE envelope of the request sent inside.
+
+        Publishes :meth:`_resolve_siwe_resigner` for the duration of the
+        block and resets it on the way out, so the signer never outlives the
+        request it belongs to. Wrap only the call that sends the request.
+        """
+        token = _active_siwe_resigner.set(self._resolve_siwe_resigner(headers, siwe_auth))
+        try:
+            yield
+        finally:
+            _active_siwe_resigner.reset(token)
 
     def _resolve_siwe_resigner(
         self,
@@ -1025,21 +1170,11 @@ class VeniceClient:
             # Wrap HTTP call in callable for scheduler
             async def execute_http_request() -> aiohttp.ClientResponse:
                 session = await self._get_session()
-                request_headers = dict(session.headers)
-                # Default SIWE auth (Mode 2) is signed per-request: Venice
-                # rejects a reused nonce, so an envelope is never shared.
-                if siwe_auth is None:
-                    _siwe = self._default_siwe_header()
-                    if _siwe is not None:
-                        request_headers[_SIWE_HEADER] = _siwe
-                if headers:
-                    request_headers.update(headers)
-                if siwe_auth is not None:
-                    # A per-call wallet signs here, not at the call site: the
-                    # rate limiter re-invokes this callable for each 429 retry,
-                    # so an envelope minted once and captured would be resent
-                    # after the server had already spent its nonce.
-                    request_headers[_SIWE_HEADER] = siwe_auth.build_header()
+                # Built inside the callable, not at the call site: the rate
+                # limiter re-invokes it for each 429 retry, so a SIWE envelope
+                # minted once and captured would be resent after the server
+                # had already spent its nonce.
+                request_headers = self._request_headers(session, headers, siwe_auth)
 
                 kwargs = self._build_request_kwargs(
                     method,
@@ -1054,11 +1189,8 @@ class VeniceClient:
                 # in a worker task created before this call, which would never
                 # see a value set outside; reset immediately so a long-lived
                 # worker cannot carry this wallet into the next request.
-                token = _active_siwe_resigner.set(self._resolve_siwe_resigner(headers, siwe_auth))
-                try:
-                    return await session.request(**kwargs)
-                finally:
-                    _active_siwe_resigner.reset(token)
+                with self._siwe_resigning(headers, siwe_auth):
+                    return await self._send(session, kwargs)
 
             # Submit through scheduler for queueing and rate limit management
             logger.debug(f"Routing request through scheduler. Path: {path}, Model: {model_id}")
@@ -1084,17 +1216,7 @@ class VeniceClient:
 
             # Get the session and prepare headers
             session = await self._get_session()
-            request_headers = dict(session.headers)
-            # Default SIWE auth (Mode 2) is signed per-request — see
-            # _default_siwe_header() for the single-use nonce requirement.
-            if siwe_auth is None:
-                _siwe = self._default_siwe_header()
-                if _siwe is not None:
-                    request_headers[_SIWE_HEADER] = _siwe
-            if headers:
-                request_headers.update(headers)
-            if siwe_auth is not None:
-                request_headers[_SIWE_HEADER] = siwe_auth.build_header()
+            request_headers = self._request_headers(session, headers, siwe_auth)
 
             # Redact sensitive headers before logging
             safe_headers = request_headers.copy()
@@ -1119,17 +1241,11 @@ class VeniceClient:
                 timeout,
             )
 
-            from .utils.errors import wrap_aiohttp_errors
-
             # Let the retry middleware re-sign this request's envelope; see
             # _resolve_siwe_resigner(). Reset on the way out so the signer
             # never outlives the request it belongs to.
-            token = _active_siwe_resigner.set(self._resolve_siwe_resigner(headers, siwe_auth))
-            try:
-                async with wrap_aiohttp_errors():
-                    response = await session.request(**kwargs)
-            finally:
-                _active_siwe_resigner.reset(token)
+            with self._siwe_resigning(headers, siwe_auth):
+                response = await self._send(session, kwargs)
 
         # Validate response status (common for both paths)
         if not response.ok:
@@ -1154,6 +1270,10 @@ class VeniceClient:
                     body = await response.text()
                 except (TimeoutError, aiohttp.ClientError) as text_error:
                     body = f"Failed to parse response: {e}, text parsing failed: {text_error}"
+            except (TimeoutError, aiohttp.ClientError) as read_error:
+                # The status line arrived but the body did not. The status
+                # error is still the one to raise: it is what the server said.
+                body = f"Failed to read response body: {type(read_error).__name__}: {read_error}"
 
             raise _make_status_error(
                 message=f"API request failed with status {response.status}",
@@ -1164,6 +1284,25 @@ class VeniceClient:
             )
 
         return response  # type: ignore[no-any-return]
+
+    @staticmethod
+    async def _send(
+        session: aiohttp.ClientSession, kwargs: dict[str, Any]
+    ) -> aiohttp.ClientResponse:
+        """Send one HTTP request, mapping transport failures to SDK errors.
+
+        Both the direct and the rate-limited path send through here, so a
+        timeout or connection failure surfaces as
+        :class:`~venice_ai.exceptions.APITimeoutError` or
+        :class:`~venice_ai.exceptions.APIConnectionError`, whichever path ran.
+        On the rate-limited path the mapping happens inside the callable the
+        limiter runs: a limiter never sees a bare ``TimeoutError`` from the
+        request (which a scheduler could mistake for its own deadline), and a
+        timeout the limiter itself raises is never relabelled as one from the
+        HTTP request.
+        """
+        async with wrap_aiohttp_errors():
+            return await session.request(**kwargs)
 
     # -------------------------------------------------------------------
     # Response handling helpers
@@ -1286,6 +1425,12 @@ class VeniceClient:
         if empty_result is not None or response.content_length == 0:
             return empty_result
 
+        # The body is still being transferred under the request's timeout, so
+        # a stall here surfaces as APITimeoutError like one before the
+        # headers. It is read under the mapping and parsed outside it, so a
+        # body that arrived but is not JSON is a parsing error, never mistaken
+        # for a connection failure.
+        await read_body(response)
         try:
             response_data = await response.json()
         except (aiohttp.ContentTypeError, ValueError) as e:

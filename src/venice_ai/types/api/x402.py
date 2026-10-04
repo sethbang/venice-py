@@ -21,11 +21,13 @@ class X402BalanceData(BaseModel):
         ..., description="Whether the balance is sufficient for the minimum API request."
     )
     minimumTopUpUsd: float | None = Field(
-        None, description="Suggested minimum top-up amount when balance is low."
+        default=None, description="Suggested minimum top-up amount when balance is low."
     )
-    suggestedTopUpUsd: float | None = Field(None, description="Suggested default top-up amount.")
+    suggestedTopUpUsd: float | None = Field(
+        default=None, description="Suggested default top-up amount."
+    )
     diemBalanceUsd: float | None = Field(
-        None, description="Diem (Venice internal) balance, if applicable."
+        default=None, description="Diem (Venice internal) balance, if applicable."
     )
 
 
@@ -66,8 +68,8 @@ class X402Transaction(BaseModel):
     balanceAfter: float = Field(..., description="Balance immediately after this entry.")
     type: str = Field(..., description='Entry type, e.g. "TOP_UP", "CHARGE".')
     createdAt: str = Field(..., description="ISO-8601 timestamp of the entry.")
-    requestId: str | None = Field(None, description="Associated API request, if any.")
-    modelId: str | None = Field(None, description="Model used, if the entry is usage.")
+    requestId: str | None = Field(default=None, description="Associated API request, if any.")
+    modelId: str | None = Field(default=None, description="Model used, if the entry is usage.")
 
 
 class X402TransactionsPagination(BaseModel):

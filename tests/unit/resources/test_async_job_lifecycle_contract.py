@@ -24,6 +24,9 @@ import pytest
 
 from venice_ai.exceptions import (
     InvalidRequestError,
+    MusicGenerationError,
+    RateLimitError,
+    UnprocessableEntityError,
     VeniceError,
     VideoGenerationError,
     _make_status_error,
@@ -60,17 +63,26 @@ class _Resp400:
     headers: dict[str, str] = {}
 
 
+# The resource method each job calls to release its stored media.
+_RELEASE_METHOD = {"video": "cancel", "music": "release", "voice_changer": "cancel"}
+
+
 def _client() -> Mock:
     client = Mock()
-    for name in ("video", "music", "voice_changer"):
+    for name, release in _RELEASE_METHOD.items():
         resource = Mock()
         resource.retrieve = AsyncMock()
-        resource.cancel = AsyncMock()
+        setattr(resource, release, AsyncMock())
         setattr(client, name, resource)
     client.video.cancel.return_value = VideoCompleteResponse(success=True)
-    client.music.cancel.return_value = MusicCompleteResponse(success=True)
+    client.music.release.return_value = MusicCompleteResponse(success=True)
     client.fetch_external = AsyncMock(return_value=b"BYTES")
     return client
+
+
+def _release_mock(client: Mock, kind: str) -> AsyncMock:
+    mock: AsyncMock = getattr(getattr(client, kind), _RELEASE_METHOD[kind])
+    return mock
 
 
 async def _passthrough_to_thread(fn, *args, **kwargs):
@@ -188,7 +200,7 @@ async def test_exit_before_terminal_status_warns(kind, state, release, caplog):
     client = _client()
     job = make_job(client)
     if release == "rejects_400":
-        getattr(client, kind).cancel.side_effect = InvalidRequestError(
+        _release_mock(client, kind).side_effect = InvalidRequestError(
             "Request ID is invalid", response=_Resp400()
         )
     with caplog.at_level(logging.DEBUG):
@@ -209,7 +221,7 @@ async def test_exit_after_wait_timeout_warns(kind, caplog):
     make_job, _, processing = JOB_KINDS[kind]
     client = _client()
     job = make_job(client)
-    getattr(client, kind).cancel.side_effect = InvalidRequestError(
+    _release_mock(client, kind).side_effect = InvalidRequestError(
         "Request ID is invalid", response=_Resp400()
     )
     with caplog.at_level(logging.DEBUG), pytest.raises(TimeoutError):
@@ -251,7 +263,7 @@ async def test_exit_after_terminal_status_does_not_warn(kind, terminal, release,
     client = _client()
     job = make_job(client)
     if release == "rejects_400":
-        getattr(client, kind).cancel.side_effect = InvalidRequestError(
+        _release_mock(client, kind).side_effect = InvalidRequestError(
             "Request ID is invalid", response=_Resp400()
         )
     with caplog.at_level(logging.DEBUG):
@@ -274,9 +286,9 @@ RELEASE_METHODS = [
     VideoJob.cancel,
     VideoJob.__aexit__,
     Video.cancel,
-    MusicJob.cancel,
+    MusicJob.release,
     MusicJob.__aexit__,
-    Music.cancel,
+    Music.release,
     VoiceChangerJob.cancel,
     VoiceChanger.cancel,
 ]
@@ -346,13 +358,229 @@ async def test_upscale_submit_without_prompt_omits_it_from_body():
         return_value=VideoQueueResponse(model="topaz-video-upscale", queue_id="q-up")
     )
     video = Video(client)
-    await video.submit(  # type: ignore[call-arg]
+    await video.submit(
         model="topaz-video-upscale",
-        duration_seconds="Auto",
         video_url="https://example.com/source.mp4",
         upscale_factor=2,
     )
     body = client.post.await_args.kwargs["json_data"]
     assert "prompt" not in body
+    assert "duration" not in body
     assert body["video_url"] == "https://example.com/source.mp4"
     assert body["upscale_factor"] == 2
+
+
+# ---------------------------------------------------------------------------
+# wait(): terminal retrieve-time rejections, for every queued media job
+# ---------------------------------------------------------------------------
+
+
+class _Resp422:
+    status = 422
+    headers: dict[str, str] = {}
+
+
+class _Resp429:
+    status = 429
+    headers: dict[str, str] = {}
+
+
+# Body of the HTTP 422 /video/retrieve returned when the provider refused a
+# queued job on content policy.
+REFUNDED_REJECTION = {
+    "error": "The request was rejected by the provider's content policy. "
+    "Credits have been refunded."
+}
+
+GENERATION_ERRORS = {"video": VideoGenerationError, "music": MusicGenerationError}
+REJECTING_JOBS = sorted(GENERATION_ERRORS)
+
+
+def _job_and_resource(kind: str, monkeypatch) -> tuple[VideoJob | MusicJob, Mock]:
+    make_job, _, _ = JOB_KINDS[kind]
+    client = _client()
+    monkeypatch.setattr(f"venice_ai.resources.{kind}.asyncio.sleep", _no_sleep)
+    return make_job(client), getattr(client, kind)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", REJECTING_JOBS)
+async def test_wait_maps_retrieve_422_to_generation_error(kind, monkeypatch):
+    job, resource = _job_and_resource(kind, monkeypatch)
+    rejection = _make_status_error(
+        "API request failed with status 422", body=REFUNDED_REJECTION, response=_Resp422()
+    )
+    assert isinstance(rejection, UnprocessableEntityError)
+    resource.retrieve.side_effect = rejection
+    with pytest.raises(GENERATION_ERRORS[kind]) as exc_info:
+        await job.wait()
+    assert "Credits have been refunded" in str(exc_info.value)
+    assert exc_info.value.__cause__ is rejection
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", REJECTING_JOBS)
+@pytest.mark.parametrize("status", [400, 422])
+async def test_retrieve_rejection_is_terminal_and_not_reported_as_billed(
+    kind, status, monkeypatch, caplog
+):
+    job, resource = _job_and_resource(kind, monkeypatch)
+    resource.retrieve.side_effect = _make_status_error(
+        f"API request failed with status {status}",
+        body=REFUNDED_REJECTION,
+        response=_Resp400() if status == 400 else _Resp422(),
+    )
+    with caplog.at_level(logging.DEBUG), pytest.raises(GENERATION_ERRORS[kind]):
+        async with job:
+            await job.wait()
+    assert not _warnings_for(caplog, job.queue_id), (
+        f"{type(job).__name__} was rejected at retrieve time (HTTP {status}) but "
+        "still warned that the job keeps running and is billed"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", REJECTING_JOBS)
+async def test_wait_maps_retrieve_400_to_generation_error(kind, monkeypatch):
+    job, resource = _job_and_resource(kind, monkeypatch)
+    rejection = _make_status_error(
+        "API request failed with status 400",
+        body={"error": "Invalid request parameters"},
+        response=_Resp400(),
+    )
+    resource.retrieve.side_effect = rejection
+    with pytest.raises(GENERATION_ERRORS[kind]) as exc_info:
+        await job.wait()
+    assert exc_info.value.__cause__ is rejection
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", REJECTING_JOBS)
+async def test_unknown_request_id_is_not_a_generation_failure(kind, monkeypatch, caplog):
+    job, resource = _job_and_resource(kind, monkeypatch)
+    resource.retrieve.side_effect = _make_status_error(
+        "API request failed with status 400",
+        body={"error": "Request ID is invalid."},
+        response=_Resp400(),
+    )
+    with caplog.at_level(logging.DEBUG), pytest.raises(InvalidRequestError) as exc_info:
+        async with job:
+            await job.wait()
+    assert not isinstance(exc_info.value, tuple(GENERATION_ERRORS.values()))
+    assert _warnings_for(caplog, job.queue_id), "an unknown queue id is not a job outcome"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", REJECTING_JOBS)
+async def test_rate_limit_at_retrieve_is_not_terminal(kind, monkeypatch, caplog):
+    job, resource = _job_and_resource(kind, monkeypatch)
+    resource.retrieve.side_effect = _make_status_error(
+        "API request failed with status 429",
+        body={"error": "Too many requests"},
+        response=_Resp429(),
+    )
+    with caplog.at_level(logging.DEBUG), pytest.raises(RateLimitError):
+        async with job:
+            await job.wait()
+    assert _warnings_for(caplog, job.queue_id), "a rate-limited poll leaves the job running"
+
+
+# ---------------------------------------------------------------------------
+# submit() / run() / quote(): duration is optional for source-timed models
+# ---------------------------------------------------------------------------
+
+
+def _video_catalog_entry(model_id: str, durations: list[str]):
+    from venice_ai.types.api.models import (
+        ModelResponse,
+        VideoModelConstraints,
+        VideoModelSpec,
+    )
+
+    spec = VideoModelSpec(
+        name=model_id,
+        constraints=VideoModelConstraints(model_type="video", durations=durations),
+    )
+    return ModelResponse.model_validate(
+        {
+            "id": model_id,
+            "type": "video",
+            "object": "model",
+            "owned_by": "venice.ai",
+            "model_spec": spec.model_dump(),
+        }
+    )
+
+
+def _video_resource(durations: list[str] | None, response) -> tuple[Video, MagicMock]:
+    client = MagicMock()
+    if durations is None:
+        client.models.get = AsyncMock(side_effect=LookupError("offline"))
+    else:
+        client.models.get = AsyncMock(return_value=_video_catalog_entry("m", durations))
+    client.post = AsyncMock(return_value=response)
+    return Video(client), client
+
+
+UPSCALE_QUEUED = VideoQueueResponse(model="topaz-video-upscale", queue_id="q-up")
+
+
+@pytest.mark.asyncio
+async def test_upscale_run_without_duration_queues_without_it():
+    video, client = _video_resource(["Auto"], UPSCALE_QUEUED)
+    job = await video.run(
+        model="topaz-video-upscale",
+        video_url="https://example.com/source.mp4",
+        upscale_factor=2,
+    )
+    assert isinstance(job, VideoJob)
+    body = client.post.await_args.kwargs["json_data"]
+    assert "duration" not in body
+
+
+@pytest.mark.asyncio
+async def test_upscale_quote_without_duration_omits_it():
+    from venice_ai.types.api.video import VideoQuoteResponse
+
+    video, client = _video_resource(["Auto"], VideoQuoteResponse(quote=1.1))
+    quote = await video.quote(
+        model="topaz-video-upscale", video_url="https://example.com/source.mp4"
+    )
+    assert quote.quote == 1.1
+    body = client.post.await_args.kwargs["json_data"]
+    assert "duration" not in body
+    assert body["video_url"] == "https://example.com/source.mp4"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["submit", "run", "quote"])
+async def test_generation_model_without_duration_fails_before_the_request(method):
+    video, client = _video_resource(["5s", "10s"], UPSCALE_QUEUED)
+    kwargs = {"model": "wan-2-7-text-to-video"}
+    if method != "quote":
+        kwargs["prompt"] = "a lighthouse at dusk"
+    with pytest.raises(ValueError, match=r"duration_seconds is required.*5s"):
+        await getattr(video, method)(**kwargs)
+    client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_duration_with_unknown_catalog_is_left_to_the_server():
+    video, client = _video_resource(None, UPSCALE_QUEUED)
+    await video.submit(model="topaz-video-upscale", video_url="https://example.com/s.mp4")
+    body = client.post.await_args.kwargs["json_data"]
+    assert "duration" not in body
+
+
+@pytest.mark.asyncio
+async def test_provided_duration_is_still_checked_against_the_catalog():
+    video, client = _video_resource(["5s", "10s"], UPSCALE_QUEUED)
+    with pytest.raises(ValueError, match="not supported"):
+        await video.submit(model="wan-2-7-text-to-video", prompt="x", duration_seconds=7)
+    client.post.assert_not_awaited()
+
+
+def test_duration_is_optional_on_every_video_entry_point():
+    for method in (Video.submit, Video.run, Video.quote):
+        param = inspect.signature(method).parameters["duration_seconds"]
+        assert param.default is None, f"Video.{method.__name__} still requires duration_seconds"

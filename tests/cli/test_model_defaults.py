@@ -54,6 +54,15 @@ async def test_stt_maps_to_asr():
 
 
 @pytest.mark.asyncio
+async def test_decision_resolves_decision_type():
+    client = MagicMock()
+    client.models.resolve = AsyncMock(return_value="decision-model")
+    result = await resolve_default_model(client, {"defaults": {}}, "decision", explicit=None)
+    assert result == "decision-model"
+    client.models.resolve.assert_awaited_once_with(type="decision")
+
+
+@pytest.mark.asyncio
 async def test_offline_raises_clickexception():
     client = MagicMock()
     client.models.resolve = AsyncMock(side_effect=RuntimeError("network down"))

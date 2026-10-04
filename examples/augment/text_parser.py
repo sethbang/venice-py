@@ -4,8 +4,10 @@ Venice AI SDK - Augment: Text Parser
 ====================================
 
 Demonstrates ``client.augment.parse_text(file=..., response_format=...)`` —
-Venice's multipart document-parsing endpoint. Accepts PDF, DOCX, XLSX, and
-plain text files up to 25 MB.
+Venice's multipart document-parsing endpoint. The endpoint accepts PDF, DOCX,
+XLSX, and plain text files up to 25 MB; this example uploads plain text so the
+extracted text can be checked against the input exactly. For other formats,
+pass the file path (or bytes plus the matching ``content_type``) the same way.
 
 Two return shapes:
 
@@ -24,79 +26,67 @@ and response shapes may change without notice.
 
 import asyncio
 import sys
+import tempfile
 from pathlib import Path
 
 from venice_ai import VeniceClient
-from venice_ai.exceptions import APIError, VeniceError
-
-RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-
+from venice_ai.exceptions import VeniceError
 
 # ---------------------------------------------------------------------------
 # 1. Parse a plain text file (JSON response)
 # ---------------------------------------------------------------------------
 
 
-async def parse_plain_text() -> None:
+def round_trips(original: str, extracted: str) -> bool:
+    """Plain text should come back unchanged (ignoring surrounding whitespace)."""
+    if extracted.strip() == original.strip():
+        print("✅ Extracted text matches the uploaded text exactly")
+        return True
+    print("❌ Extracted text differs from the uploaded text")
+    return False
+
+
+async def parse_plain_text() -> bool:
     """Upload a small .txt file and get back text + token count."""
     print("📄 Parse Plain Text → JSON")
     print("-" * 30)
 
-    # Create a small sample file
-    sample = RESULTS_DIR / "augment_sample.txt"
-    sample.write_text(
+    original = (
         "Venice AI is a privacy-first inference platform.\n"
         "It exposes a Python SDK at venice-py on PyPI.\n"
         "The Augment API lets you scrape, search, and parse documents.\n"
     )
-    print(f"📎 Uploading: {sample}")
 
-    async with VeniceClient() as client:
-        result = await client.augment.parse_text(file=str(sample))
+    # Write a small sample file to a temporary directory and upload it by path.
+    with tempfile.TemporaryDirectory() as tmp:
+        sample = Path(tmp) / "augment_sample.txt"
+        sample.write_text(original)
+        print(f"📎 Uploading: {sample}")
 
-        print(f"✅ Tokens: {result.tokens}")
-        print(f"📝 Extracted text ({len(result.text)} chars):")
-        print("-" * 30)
-        print(result.text)
+        async with VeniceClient() as client:
+            result = await client.augment.parse_text(file=str(sample))
 
-
-# ---------------------------------------------------------------------------
-# 2. Parse via raw bytes (no file path)
-# ---------------------------------------------------------------------------
-
-
-async def parse_raw_bytes() -> None:
-    """Upload raw bytes directly — no temp file needed."""
-    print("\n💾 Parse Raw Bytes")
+    print(f"🔢 Tokens: {result.tokens}")
+    print(f"📝 Extracted text ({len(result.text)} chars):")
     print("-" * 30)
-
-    content = b"The quick brown fox jumps over the lazy dog.\n" * 10
-
-    async with VeniceClient() as client:
-        result = await client.augment.parse_text(
-            file=content,
-            content_type="text/plain",
-            filename="fox.txt",
-        )
-
-        print(f"✅ Tokens: {result.tokens}")
-        print(f"📝 Extracted text (first 80 chars): {result.text[:80]}")
+    print(result.text)
+    return round_trips(original, result.text)
 
 
 # ---------------------------------------------------------------------------
-# 3. Plain text response format
+# 2. Raw bytes upload with the plain text response format
 # ---------------------------------------------------------------------------
 
 
-async def parse_with_text_response() -> None:
-    """Use ``response_format='text'`` to get a plain ``str`` back.
+async def parse_with_text_response() -> bool:
+    """Upload raw bytes and use ``response_format='text'`` to get a plain ``str`` back.
 
+    Passing bytes plus ``content_type`` and ``filename`` needs no file on disk.
     Unlike the default ``response_format='json'`` (which returns an
     ``AugmentTextParserResponse`` with ``.text``/``.tokens``), the ``"text"``
     format returns the extracted text directly as a ``str``.
     """
-    print("\n🧾 Parse with response_format='text'")
+    print("\n🧾 Parse raw bytes with response_format='text'")
     print("-" * 30)
 
     content = (
@@ -112,10 +102,11 @@ async def parse_with_text_response() -> None:
             filename="demo.txt",
         )
 
-        # response_format="text" returns a plain str (no .text / .tokens).
-        print(f"✅ Got plain str ({len(text)} chars):")
-        print("-" * 30)
-        print(text)
+    # response_format="text" returns a plain str (no .text / .tokens).
+    print(f"📝 Got {type(text).__name__} ({len(text)} chars):")
+    print("-" * 30)
+    print(text)
+    return isinstance(text, str) and round_trips(content.decode(), text)
 
 
 # ---------------------------------------------------------------------------
@@ -130,34 +121,33 @@ async def main() -> int:
 
     sub_examples = [
         ("parse_plain_text", parse_plain_text),
-        ("parse_raw_bytes", parse_raw_bytes),
         ("parse_with_text_response", parse_with_text_response),
     ]
 
     results: list[tuple[str, bool]] = []
     for name, fn in sub_examples:
         try:
-            await fn()
-            results.append((name, True))
-        except (VeniceError, APIError) as e:
-            print(f"❌ {name} failed: {e}")
+            results.append((name, await fn()))
+        except VeniceError as e:
+            print(f"❌ {name} failed: {type(e).__name__}: {e}")
             results.append((name, False))
 
     print("\n" + "=" * 50)
     passed = sum(1 for _, ok in results if ok)
     total = len(results)
-    print(f"✨ {passed}/{total} text-parser sub-examples completed")
     for name, ok in results:
         status = "✅" if ok else "❌"
         print(f"   {status} {name}")
+
+    if passed != total:
+        print(f"\n❌ {total - passed} of {total} text-parser sub-examples failed")
+        return 1
+
+    print(f"\n✨ {passed}/{total} text-parser sub-examples completed")
     print("\n💡 Key concepts demonstrated:")
     print("   - File-path upload with JSON response")
-    print("   - Raw-bytes upload (no temp file)")
-    print("   - response_format='text' for plain-string return")
-    print("\n📁 Temp files in examples/results/:")
-    print("   - augment_sample.txt (small plain-text sample)")
-
-    return 0 if passed == total else 1
+    print("   - Raw-bytes upload (no file on disk) with response_format='text'")
+    return 0
 
 
 if __name__ == "__main__":

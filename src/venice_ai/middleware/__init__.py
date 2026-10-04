@@ -8,10 +8,9 @@ or handle requests and responses during the API communication lifecycle.
 ## Available Middleware
 
 ### Retry Middleware
-The retry middleware implements intelligent request retry logic with exponential backoff
-and jitter to handle transient failures gracefully. It automatically retries failed
-requests based on configurable conditions such as HTTP status codes, exception types,
-and request methods.
+The retry middleware resends a failed request only when the first attempt was not
+processed or when processing it twice is free. Paid generation requests are never
+resent once the server may have received them; see ``venice_ai.middleware.retry``.
 
 ## Integration with Venice AI Client
 
@@ -33,13 +32,17 @@ behavior through the RetryOptions configuration.
 """
 
 from .retry import (
+    RetryClass,
     RetryOptions,
     calculate_backoff_delay,
+    classify_request,
     create_retry_middleware,
 )
 
 __all__ = [
+    "RetryClass",
     "RetryOptions",
+    "classify_request",
     "create_retry_middleware",
     "calculate_backoff_delay",
 ]

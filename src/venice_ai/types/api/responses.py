@@ -75,6 +75,14 @@ class ResponsesUsage(BaseModel):
     input_tokens_details: ResponsesUsageInputDetails | None = None
     output_tokens_details: ResponsesUsageOutputDetails | None = None
 
+    @property
+    def cached_tokens(self) -> int:
+        """Input tokens served from the prompt cache, ``0`` when none are reported."""
+        details = self.input_tokens_details
+        if details is None or details.cached_tokens is None:
+            return 0
+        return details.cached_tokens
+
 
 class ResponsesError(BaseModel):
     """Error block populated when ``status='failed'``."""
