@@ -9,113 +9,137 @@ reasoning capabilities, web search integration, and system prompt behavior.
 
 Venice Parameters Covered:
     • character_slug: Use public Venice character personalities
-    • strip_thinking_response: Control display of reasoning <think> blocks
+    • strip_thinking_response: Hide the reasoning trace from the response
     • disable_thinking: Disable reasoning on reasoning-capable models
     • enable_web_search: Enable web search for current knowledge
     • enable_web_citations: Request citation formatting in responses
-    • include_search_results_in_stream: Stream search results as first chunk
-    • return_search_results_as_documents: Surface search as tool calls
+    • return_search_results_as_documents: Surface search results as a tool call
     • include_venice_system_prompt: Control Venice system prompt inclusion
+
+Each section checks that its parameter had the effect it claims (citations
+returned, reasoning tokens gone, prompt tokens changed, ...) and that the
+answer was not cut off at ``max_completion_tokens``. Any failed check makes the
+script exit 1. A section whose model or character is missing from the catalog
+prints ``Section skipped:`` and the others still run; the script exits 77 only
+if every section was skipped.
 
 Requirements:
     - Venice AI API key (set as VENICE_API_KEY environment variable)
     - Python 3.13+
     - venice-py SDK
 
-Features Demonstrated:
-    - Dynamic character discovery and usage
-    - Reasoning model detection and thinking control
-    - Web search integration with citations
-    - Search result streaming and document formatting
-    - System prompt behavior control
-    - Real-world parameter combinations
-
 Performance note:
-    To keep this showcase fast and within typical rate limits, completions are
-    capped at modest ``max_completion_tokens`` and the independent calls inside a
-    demo are dispatched concurrently via ``client.gather(max_concurrency=...)``.
+    Independent calls inside a demo are dispatched concurrently with
+    ``asyncio.gather``; a failure in either call propagates and stops the run.
 """
 
 import asyncio
-import re
+import json
+import math
 import sys
-from typing import Any
 
-from venice_ai import VeniceClient, extract_thinking_blocks
-from venice_ai.types.api import SystemMessage, UserMessage
+from venice_ai import NoMatchingModelError, VeniceClient, model_price
+from venice_ai.types.api import ChatCompletionResponse, SystemMessage, TextModelSpec, UserMessage
 from venice_ai.types.api.requests import VeniceParameters
+
+# Leaving Venice's system prompt out (or adding a character prompt) must move
+# the prompt size by at least this many tokens to count as an effect.
+MIN_PROMPT_DELTA = 100
+
+# Room for a reasoning model to think and still answer. Small reasoning models
+# vary widely in how long they think, even on easy questions, so the cap leaves
+# several thousand tokens of headroom over a typical run.
+REASONING_CAP = 16384
+
+# Enough for a short in-character introduction from a non-reasoning model.
+CHARACTER_CAP = 300
+
+# Ample for a two-or-three-sentence answer with citation markers.
+WEB_ANSWER_CAP = 800
+
+# Ample for a two-or-three-sentence explanation from a non-reasoning model.
+SHORT_ANSWER_CAP = 400
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
 
 
-def _print_usage(response: Any) -> None:
-    """Print token usage from a response, or note when usage is unavailable."""
-    usage = getattr(response, "usage", None)
+def print_usage(response: ChatCompletionResponse) -> None:
+    """Print token usage from a response, including reasoning tokens."""
+    usage = response.usage
     if usage is None:
         print("\n📊 Token Usage: not provided by the API", flush=True)
         return
+    details = usage.completion_tokens_details
     print(
-        f"\n📊 Token Usage: Input={usage.prompt_tokens}, "
-        f"Output={usage.completion_tokens}, Total={usage.total_tokens}",
+        f"\n📊 Token Usage: Input={usage.prompt_tokens}, Output={usage.completion_tokens} "
+        f"(reasoning={details.reasoning_tokens if details else None}), "
+        f"Total={usage.total_tokens}",
         flush=True,
     )
 
 
-def display_body(response: Any, visible: str) -> None:
-    """Print a response body, falling back to ``reasoning_content`` when empty.
+def print_answer(response: ChatCompletionResponse, cap: int) -> bool:
+    """Print the visible answer and ``finish_reason``; ``False`` if unusable.
 
-    Reasoning/web-search models on a tight ``max_completion_tokens`` budget often
-    spend it entirely on the dedicated ``reasoning_content`` field and emit empty
-    user-visible ``content``. To keep the demo's output substantive we surface the
-    reasoning trace (truncated) rather than printing a blank section.
+    An empty answer is a failure: the reasoning trace is never a substitute
+    for the answer. ``finish_reason`` alone cannot rule out truncation: some
+    models report an answer cut off at the cap as ``"stop"`` (or as
+    ``"tool_calls"`` when ``return_search_results_as_documents`` is on). So a
+    completion count that reached ``cap`` (the request's
+    ``max_completion_tokens``) also counts as cut off, and so does a response
+    with no usage to check.
     """
-    if visible.strip():
-        print(visible, flush=True)
-        return
+    text = (response.text or "").strip()
+    finish_reason = response.choices[0].finish_reason if response.choices else None
+    used = response.usage.completion_tokens if response.usage else None
+    print(text or "(empty response)", flush=True)
+    print(f"↳ finish_reason: {finish_reason} ({used} of {cap} completion tokens)", flush=True)
+    if finish_reason == "length" or used is None or used >= cap:
+        print("❌ The answer may be cut off at max_completion_tokens", flush=True)
+        return False
+    if not text:
+        print("❌ The model returned no visible answer", flush=True)
+        return False
+    return True
 
-    message = None
-    choices = getattr(response, "choices", None)
-    if choices:
-        message = getattr(choices[0], "message", None)
-    reasoning = (getattr(message, "reasoning_content", None) or "").strip()
-    if reasoning:
-        print("ℹ️ (visible content empty — showing reasoning_content trace)", flush=True)
-        print(reasoning[:1200] + ("…" if len(reasoning) > 1200 else ""), flush=True)
-    else:
-        print("[no visible content — token budget consumed by reasoning]", flush=True)
+
+def check(condition: bool, success: str, failure: str) -> bool:
+    """Print a ✅/❌ line for one verified effect and return the condition."""
+    print(f"{'✅' if condition else '❌'} {success if condition else failure}", flush=True)
+    return condition
+
+
+def reasoning_tokens(response: ChatCompletionResponse) -> int | None:
+    """Reasoning tokens reported for a response, if any."""
+    if response.usage is None or response.usage.completion_tokens_details is None:
+        return None
+    return response.usage.completion_tokens_details.reasoning_tokens
+
+
+def prompt_tokens(response: ChatCompletionResponse) -> int:
+    """Prompt tokens for a response (0 if usage is missing)."""
+    return response.usage.prompt_tokens if response.usage else 0
 
 
 def display_parameters(params: VeniceParameters, title: str = "VeniceParameters") -> None:
-    """Display VeniceParameters in a formatted way."""
-    print(f"\n🔧 {title}:", flush=True)
-    params_dict = params.model_dump()
-
-    # Show all non-default values
-    for key, value in params_dict.items():
-        if value is not None and value is not False and value != "off":
-            print(f"   {key}: {value}", flush=True)
+    """Display the fields that were set explicitly, including False/"off" values."""
+    print(f"\n🔧 {title} (set explicitly):", flush=True)
+    for key, value in params.model_dump(exclude_unset=True).items():
+        print(f"   {key}: {value}", flush=True)
 
 
-def format_web_citations(response) -> list[str]:
-    """Extract and format web citations from response."""
-    citations = []
-
-    vp = getattr(response, "venice_parameters", None)
-    web_citations = getattr(vp, "web_search_citations", None) if vp else None
-    if web_citations:
-        for i, citation in enumerate(web_citations, 1):
-            # Handle both object attributes and dict keys
-            if isinstance(citation, dict):
-                title = citation.get("title", "Unknown")
-                url = citation.get("url", "")
-            else:
-                title = getattr(citation, "title", "Unknown")
-                url = getattr(citation, "url", "")
-            citations.append(f"[{i}] {title} - {url}")
-
-    return citations
+def print_citations(response: ChatCompletionResponse, title: str, limit: int = 5) -> int:
+    """Print the first few web citations and return how many there were."""
+    citations = response.web_search_citations
+    if citations:
+        print_subsection(title, "📚")
+        for i, citation in enumerate(citations[:limit], 1):
+            print(f"   [{i}] {citation.title} - {citation.url}", flush=True)
+        if len(citations) > limit:
+            print(f"   ... and {len(citations) - limit} more", flush=True)
+    return len(citations)
 
 
 def print_section_header(title: str, emoji: str = "📋") -> None:
@@ -131,625 +155,447 @@ def print_subsection(title: str, emoji: str = "📍") -> None:
 
 
 # =============================================================================
-# Model and Resource Discovery Functions
-# =============================================================================
-
-
-async def find_web_search_model(client: VeniceClient) -> str | None:
-    """
-    Find a model that supports web search capabilities.
-
-    The resolver has no ``require_web_search`` flag, so we inspect the text
-    model specs directly.
-
-    Args:
-        client: Venice AI client instance
-
-    Returns:
-        Model ID that supports web search, or None if not found
-    """
-    from venice_ai.types.api import TextModelSpec
-
-    try:
-        models_response = await client.models.list(type="text")
-
-        for model in models_response.data:
-            spec = model.model_spec
-            if (
-                isinstance(spec, TextModelSpec)
-                and spec.capabilities
-                and spec.capabilities.supportsWebSearch
-            ):
-                return model.id
-
-    except Exception as e:
-        print(f"⚠️ Error finding web search model: {e}", flush=True)
-
-    return None
-
-
-async def find_available_characters(client: VeniceClient) -> list[Any]:
-    """
-    Fetch available characters from the Venice API.
-
-    Args:
-        client: Venice AI client instance
-
-    Returns:
-        List of character objects, or empty list if unavailable
-    """
-    try:
-        characters_response = await client.characters.list()
-        return characters_response.data if characters_response.data else []
-    except Exception as e:
-        print(f"⚠️ Error fetching characters: {e}", flush=True)
-        return []
-
-
-# =============================================================================
 # Example Functions
 # =============================================================================
 
 
-async def character_example(client: VeniceClient) -> bool:
-    """Demonstrate character_slug parameter with real Venice characters.
+async def character_example(client: VeniceClient) -> bool | None:
+    """Demonstrate ``character_slug`` with a real Venice character.
 
-    Returns ``True`` on success, ``False`` if the API call failed.
+    A character carries its own persona prompt and names the model it was
+    built for (``modelId``); chatting with it on that model gives the persona
+    as designed. Venice sends the persona prompt in place of its own default
+    system prompt, so the persona's size shows up against the bare question
+    sent without Venice's system prompt (``include_venice_system_prompt=False``).
+
+    Characters run on whatever model their author chose, so check the price
+    first: this picks the character whose model is cheapest, preferring one
+    that does not reason (a short reply then needs only a small token cap).
+    Returns ``None`` (section skipped) when no listed character names a model
+    from the current catalog.
     """
     print_section_header("Character-Based Chat Example", "🎭")
 
-    # Fetch available characters
-    characters = await find_available_characters(client)
+    characters = (await client.characters.list()).data or []
+    text_models = {model.id: model for model in (await client.models.list(type="text")).data}
 
-    if not characters:
-        print("⚠️ No characters available, skipping character example", flush=True)
-        return True  # Not a failure: account simply has no characters.
+    def cost_rank(model_id: str) -> tuple[bool, float]:
+        entry = text_models[model_id]
+        spec = entry.model_spec
+        caps = spec.capabilities if isinstance(spec, TextModelSpec) else None
+        price = model_price(entry.model_dump())
+        reasons = bool(caps and caps.supportsReasoning)
+        return reasons, price if price is not None else math.inf
 
-    # Use the first available character
-    character = characters[0]
+    # A character is only usable if the model it names is in the current catalog.
+    usable = [c for c in characters if not c.adult and c.modelId in text_models]
+    if not usable:
+        print(
+            "Section skipped: no listed character names a text model from the current catalog",
+            flush=True,
+        )
+        return None
+
+    character = min(usable, key=lambda c: cost_rank(c.modelId))
+    model = character.modelId
+    reasons, blended = cost_rank(model)
+    cap = REASONING_CAP if reasons else CHARACTER_CAP
     print(f"📍 Using character: {character.slug} ({character.name})", flush=True)
-    if hasattr(character, "description") and character.description:
-        print(f"   Description: {character.description}", flush=True)
-    if hasattr(character, "tags") and character.tags:
-        print(f"   Tags: {character.tags}", flush=True)
-
-    # Get a suitable model
-    model = await client.models.resolve_chat()
-    print(f"📍 Using model: {model}", flush=True)
-
-    # Create VeniceParameters with character
-    venice_params = VeniceParameters(
-        character_slug=character.slug,
-        enable_web_search="off",
-        include_venice_system_prompt=True,
+    if character.description:
+        print(f"   Description: {character.description[:200]}", flush=True)
+    price_note = (
+        f"~${blended:.3f} per 1M tokens, blended" if math.isfinite(blended) else "no catalog price"
     )
+    print(f"📍 Using the character's model: {model} ({price_note})", flush=True)
 
+    venice_params = VeniceParameters(character_slug=character.slug)
     display_parameters(venice_params)
 
-    # Ask a question that showcases the character's personality
-    question = "In one short paragraph, what's your perspective on the nature of reality?"
+    # An in-character question: the persona decides how it is answered.
+    question = "Introduce yourself in two or three sentences: who are you and what do you do?"
     print(f"\n💬 Question: {question}", flush=True)
 
-    try:
-        response = await client.chat.completions.create(
+    async def ask(params: VeniceParameters | None) -> ChatCompletionResponse:
+        return await client.chat.completions.create(
             model=model,
             messages=[UserMessage(content=question)],
-            venice_parameters=venice_params,
-            max_completion_tokens=256,
+            venice_parameters=params,
+            max_completion_tokens=cap,
             temperature=0.7,
         )
 
-        content = response.text or ""
-        thinking_blocks, clean_response = extract_thinking_blocks(content)
+    # The bare question, without Venice's system prompt, shows how much prompt
+    # the persona adds.
+    bare = VeniceParameters(include_venice_system_prompt=False)
+    response, plain = await asyncio.gather(ask(venice_params), ask(bare))
 
-        if thinking_blocks:
-            print("\n💭 Thinking Process:", flush=True)
-            for i, block in enumerate(thinking_blocks, 1):
-                print(f"   Block {i}: {block[:100]}...", flush=True)
+    print_subsection("Character Response", "📝")
+    ok = print_answer(response, cap)
+    print_usage(response)
 
-        print_subsection("Character Response", "📝")
-        print(clean_response, flush=True)
+    # The bare request is not near zero: the model's chat template, and any
+    # prompt its provider adds, are in both requests even with Venice's system
+    # prompt off. The difference is what selecting the character changed.
+    delta = prompt_tokens(response) - prompt_tokens(plain)
+    print(
+        f"📏 Prompt tokens: character {prompt_tokens(response)}, bare question "
+        f"{prompt_tokens(plain)}",
+        flush=True,
+    )
+    ok = (
+        check(
+            delta >= MIN_PROMPT_DELTA,
+            f"Character persona injected: +{delta} prompt tokens vs the bare question",
+            f"Prompt grew by only {delta} tokens, so no character prompt was added",
+        )
+        and ok
+    )
+    echoed = response.venice_parameters.character_slug if response.venice_parameters else None
+    print(f"📡 Server echoed character_slug: {echoed}", flush=True)
+    return ok
 
-        _print_usage(response)
-        return True
 
-    except Exception as e:
-        print(f"❌ Error in character example: {e}", flush=True)
-        return False
+async def thinking_control_example(client: VeniceClient) -> bool | None:
+    """Compare thinking on, ``disable_thinking=True`` and ``strip_thinking_response=True``.
 
+    Disabling thinking skips reasoning; stripping still reasons but leaves the
+    trace out of the response.
 
-async def thinking_control_example(client: VeniceClient) -> bool:
-    """Demonstrate thinking control parameters with a reasoning-capable model.
-
-    Runs the two test completions concurrently via ``client.gather``.
-
-    Returns ``True`` on success, ``False`` if a request failed.
+    The catalog has no flag for ``disable_thinking``; a model that accepts
+    ``reasoning_effort="none"`` is one whose reasoning can be switched off.
     """
     print_section_header("Thinking Control Example", "🧠")
 
-    # Pick a reasoning model. Venice reasoning models surface chain-of-thought
-    # via the dedicated `reasoning_content` field on the assistant message,
-    # alongside the user-visible `content`. We compare the two test runs by
-    # length of those fields plus a check for `<think>` tags inside content.
     try:
-        reasoning_model = await client.models.resolve_chat(require_reasoning=True)
-    except Exception as e:
-        print(f"⚠️ Could not resolve a reasoning model: {e}", flush=True)
-        reasoning_model = await client.models.resolve_chat()
+        model = await client.models.resolve_chat(
+            require_reasoning=True, require_reasoning_effort="none", prefer="cheapest"
+        )
+    except NoMatchingModelError:
+        print("Section skipped: no reasoning model can switch reasoning off", flush=True)
+        return None
+    print(f"📍 Using model: {model}", flush=True)
 
-    print(f"📍 Using model: {reasoning_model}", flush=True)
-
-    # A logic puzzle pushes the model into chain-of-thought reasoning.
+    # The clues admit exactly one solution: Alice=blue, Bob=green, Carol=red.
     puzzle = (
-        "Three friends — Alice, Bob, and Carol — each picked one of red, "
-        "green, or blue. Alice did not pick red. Bob's color comes "
-        "alphabetically before Carol's. What did each person pick? "
-        "Answer in one or two sentences."
+        "Alice, Bob, and Carol each picked a different color: red, green, or blue. "
+        "Alice picked neither red nor green. Bob's color comes alphabetically before "
+        "Carol's. What did each person pick? Reply with one line of the form "
+        "'Alice=<color>, Bob=<color>, Carol=<color>'."
     )
-
+    expected = ("alice=blue", "bob=green", "carol=red")
     print(f"\n💭 Question: {puzzle}", flush=True)
 
-    # Test 1 config: Show thinking blocks (disable_thinking=False)
-    venice_params_show = VeniceParameters(
-        strip_thinking_response=False,  # Keep thinking blocks visible
-        disable_thinking=False,  # Enable thinking
-        enable_web_search="off",
-        include_venice_system_prompt=True,
+    # Venice's system prompt is left out of all three, so they differ only in
+    # the thinking settings.
+    params_on = VeniceParameters(disable_thinking=False, include_venice_system_prompt=False)
+    params_off = VeniceParameters(disable_thinking=True, include_venice_system_prompt=False)
+    params_stripped = VeniceParameters(
+        strip_thinking_response=True, include_venice_system_prompt=False
+    )
+    print_subsection("Test 1: Thinking on", "🔍")
+    display_parameters(params_on)
+    print_subsection("Test 2: Thinking disabled", "✂️")
+    display_parameters(params_off)
+    print_subsection("Test 3: Thinking on, trace stripped from the response", "🙈")
+    display_parameters(params_stripped)
+    print("\n⏳ Dispatching all three completions concurrently...", flush=True)
+
+    response_on, response_off, response_stripped = await asyncio.gather(
+        *[
+            client.chat.completions.create(
+                model=model,
+                messages=[UserMessage(content=puzzle)],
+                venice_parameters=params,
+                # No temperature override: model publishers recommend their own
+                # sampling settings for thinking mode, and they differ from
+                # model to model, so the server default applies.
+                max_completion_tokens=REASONING_CAP,
+            )
+            for params in (params_on, params_off, params_stripped)
+        ]
     )
 
-    # Test 2 config: Disable thinking entirely (disable_thinking=True)
-    venice_params_strip = VeniceParameters(
-        strip_thinking_response=True,  # Strip <think> tags if any leak into content
-        disable_thinking=True,  # Tell server to skip the reasoning step
-        enable_web_search="off",
-        include_venice_system_prompt=True,
-    )
-
-    print_subsection("Test 1: Show Thinking Process", "🔍")
-    display_parameters(venice_params_show)
-    print_subsection("Test 2: Disable Thinking", "✂️")
-    display_parameters(venice_params_strip)
-    print("\n⏳ Dispatching both completions concurrently...", flush=True)
-
-    try:
-        response_show, response_strip = await client.gather(
-            [
-                client.chat.completions.create(
-                    model=reasoning_model,
-                    messages=[UserMessage(content=puzzle)],
-                    venice_parameters=venice_params_show,
-                    max_completion_tokens=512,
-                    temperature=0.1,
-                ),
-                client.chat.completions.create(
-                    model=reasoning_model,
-                    messages=[UserMessage(content=puzzle)],
-                    venice_parameters=venice_params_strip,
-                    max_completion_tokens=512,
-                    temperature=0.1,
-                ),
-            ],
-            max_concurrency=2,
-            return_exceptions=False,
+    ok = True
+    for label, response in (
+        ("thinking on", response_on),
+        ("thinking off", response_off),
+        ("trace stripped", response_stripped),
+    ):
+        print_subsection(f"Model Response ({label})", "📝")
+        if response.thinking_blocks:
+            trace = response.thinking_blocks[0].strip().splitlines()
+            print(f"💭 Reasoning trace ({len(trace)} lines), first line: {trace[0]}", flush=True)
+        ok = print_answer(response, REASONING_CAP) and ok
+        print_usage(response)
+        answer = "".join((response.text or "").lower().replace("*", "").split())
+        correct = all(pair in answer for pair in expected)
+        if response is response_off:
+            # Without reasoning a small model may guess wrong; what this run
+            # verifies for the "off" variant is that no reasoning happened.
+            print(
+                f"ℹ️ Without reasoning the answer is {'correct' if correct else 'wrong'}",
+                flush=True,
+            )
+            continue
+        ok = (
+            check(
+                correct,
+                "Correct solution: Alice=blue, Bob=green, Carol=red",
+                "The answer does not state the correct solution",
+            )
+            and ok
         )
-    except Exception as e:
-        print(f"❌ Error in thinking control example: {e}", flush=True)
-        return False
 
-    # --- Test 1 output ---
-    content_show = response_show.text or ""
-    thinking_blocks_show, clean_show = extract_thinking_blocks(content_show)
-    print_subsection("Test 1: Model Response (thinking on)", "📝")
-    if thinking_blocks_show:
-        print("💭 Thinking Process (visible):", flush=True)
-        for block in thinking_blocks_show:
-            lines = block.strip().split("\n")
-            for line in lines[:2]:
-                print(f"   {line}", flush=True)
-            if len(lines) > 2:
-                print(f"   ... ({len(lines) - 2} more lines of reasoning)", flush=True)
-    display_body(response_show, clean_show if clean_show else content_show)
-    _print_usage(response_show)
-
-    # --- Test 2 output ---
-    content_strip = response_strip.text or ""
-    thinking_blocks_strip, clean_strip = extract_thinking_blocks(content_strip)
-    print_subsection("Test 2: Model Response (thinking off)", "📝")
-    if thinking_blocks_strip:
-        print(
-            f"ℹ️ Note: Found {len(thinking_blocks_strip)} thinking block(s) in response", flush=True
-        )
-        print("   (strip_thinking_response may not be supported by this model)", flush=True)
-    else:
-        print("✅ Response contains no thinking blocks", flush=True)
-    print(content_strip if not thinking_blocks_strip else clean_strip, flush=True)
-    _print_usage(response_strip)
-
-    # --- Verify the two outputs actually differ ---
     print_subsection("Reasoning On vs Off Comparison", "🔬")
-    with_msg = response_show.choices[0].message
-    without_msg = response_strip.choices[0].message
-    with_reason = getattr(with_msg, "reasoning_content", None) or ""
-    without_reason = getattr(without_msg, "reasoning_content", None) or ""
-    with_content = with_msg.content or ""
-    without_content = without_msg.content or ""
-    with_tags = "<think" in str(with_content).lower()
-    without_tags = "<think" in str(without_content).lower()
-
-    print(
-        f"   Test 1 (disable_thinking=False): "
-        f"reasoning_content={len(with_reason)} chars, "
-        f"content={len(with_content)} chars, "
-        f"<think> tags in content: {with_tags}",
-        flush=True,
-    )
-    print(
-        f"   Test 2 (disable_thinking=True):  "
-        f"reasoning_content={len(without_reason)} chars, "
-        f"content={len(without_content)} chars, "
-        f"<think> tags in content: {without_tags}",
-        flush=True,
-    )
-
-    if len(with_reason) > 0 and len(without_reason) == 0:
-        print("   ✅ disable_thinking eliminated the reasoning_content field", flush=True)
-    elif len(with_reason) > len(without_reason) * 2:
-        print("   ✅ disable_thinking substantially reduced the reasoning trace", flush=True)
-    elif with_tags and not without_tags:
-        print("   ✅ strip_thinking_response removed <think> tags", flush=True)
-    else:
-        print(
-            "   ⚠️ The two outputs are similar — flags had little visible effect on this model",
-            flush=True,
+    on_tokens, off_tokens = reasoning_tokens(response_on), reasoning_tokens(response_off)
+    print(f"   reasoning_tokens: on={on_tokens}, off={off_tokens}", flush=True)
+    ok = (
+        check(
+            bool(on_tokens) and off_tokens == 0 and not response_off.thinking_blocks,
+            "disable_thinking skipped reasoning entirely (0 reasoning tokens, no trace)",
+            "disable_thinking did not stop reasoning on this model",
         )
+        and ok
+    )
+    stripped_tokens = reasoning_tokens(response_stripped)
+    print(f"   reasoning_tokens with the trace stripped: {stripped_tokens}", flush=True)
+    ok = (
+        check(
+            bool(stripped_tokens) and not response_stripped.thinking_blocks,
+            "strip_thinking_response kept the reasoning but left the trace out of the response",
+            "strip_thinking_response did not reason with a hidden trace on this model",
+        )
+        and ok
+    )
+    return ok
 
-    return True
 
+async def web_search_example(client: VeniceClient) -> bool | None:
+    """Search the web, get citations, and also get the raw results as documents.
 
-async def web_search_example(client: VeniceClient) -> bool:
-    """Demonstrate web search parameters for current information.
-
-    Returns ``True`` on success, ``False`` if the API call failed.
+    ``enable_web_search`` runs the search and ``enable_web_citations`` returns
+    the sources as ``response.web_search_citations``. With
+    ``return_search_results_as_documents=True`` the response also carries a
+    ``web_search`` tool call whose arguments hold the documents the answer was
+    grounded on, so your own code can reuse or display them.
     """
     print_section_header("Web Search Example", "🌐")
 
-    # Find a web search capable model
-    web_model = await find_web_search_model(client)
-
-    if not web_model:
-        print("⚠️ No web search models found, using standard model", flush=True)
-        web_model = await client.models.resolve_chat()
-
+    # A model that answers directly, so the cap goes to the answer, not to reasoning.
+    try:
+        web_model = await client.models.resolve_chat(
+            require_web_search=True, exclude_reasoning=True, prefer="cheapest"
+        )
+    except NoMatchingModelError:
+        print("Section skipped: no non-reasoning model supports web search", flush=True)
+        return None
     print(f"📍 Using model: {web_model}", flush=True)
 
-    # Question requiring current information
-    question = "Briefly, what are notable recent developments in artificial intelligence?"
+    question = "In two or three sentences, what is the current status of renewable energy adoption?"
     print(f"\n🔍 Question requiring current info: {question}", flush=True)
 
-    # Create VeniceParameters with web search enabled
     venice_params = VeniceParameters(
-        enable_web_search="on",  # Enable web search
-        enable_web_citations=True,  # Request citations
-        include_venice_system_prompt=True,
+        enable_web_search="on",  # Always search ("auto" lets the model decide)
+        enable_web_citations=True,  # Ask for [REF] citation markers in the answer
+        return_search_results_as_documents=True,  # Raw results as a tool call
+        include_venice_system_prompt=False,  # Our system message is enough
     )
-
     display_parameters(venice_params)
 
-    try:
-        response = await client.chat.completions.create(
-            model=web_model,
-            messages=[
-                SystemMessage(
-                    content="Provide current, accurate information and cite your sources."
-                ),
-                UserMessage(content=question),
-            ],
-            venice_parameters=venice_params,
-            max_completion_tokens=384,
-            temperature=0.3,
-        )
-
-        content = response.text or ""
-        thinking_blocks, clean_response = extract_thinking_blocks(content)
-
-        if thinking_blocks:
-            print_subsection("Search Reasoning", "💭")
-            for block in thinking_blocks:
-                print(f"   {block[:200]}...", flush=True)
-
-        print_subsection("Response with Web Search", "📝")
-        display_body(response, clean_response)
-
-        # Show citations if available
-        citations = format_web_citations(response)
-        if citations:
-            print_subsection("Web Citations", "📚")
-            for citation in citations:
-                print(f"   {citation}", flush=True)
-
-        # Check for REF citations in content
-        content_str = str(content) if not isinstance(content, str) else content
-        ref_citations = re.findall(r"\[REF\](\d+)\[/REF\]", content_str)
-        if ref_citations:
-            print_subsection("Inline Citations Found", "🔗")
-            print(f"   Found {len(ref_citations)} inline citations: {ref_citations}", flush=True)
-
-        _print_usage(response)
-        return True
-
-    except Exception as e:
-        print(f"❌ Error in web search example: {e}", flush=True)
-        return False
-
-
-async def search_results_streaming_example(client: VeniceClient) -> bool:
-    """Demonstrate search results streaming and document formatting.
-
-    Runs the two test completions concurrently via ``client.gather``.
-
-    Returns ``True`` on success, ``False`` if a request failed.
-    """
-    print_section_header("Search Results Streaming Example", "📊")
-
-    # Find a web search capable model
-    web_model = await find_web_search_model(client)
-
-    if not web_model:
-        print("⚠️ No web search models found, using standard model", flush=True)
-        web_model = await client.models.resolve_chat()
-
-    print(f"📍 Using model: {web_model}", flush=True)
-
-    question = "Briefly, what is the current status of renewable energy adoption globally?"
-    print(f"\n🔍 Question: {question}", flush=True)
-
-    # Test 1 config: Include search results in stream
-    venice_params_stream = VeniceParameters(
-        enable_web_search="on",
-        enable_web_citations=True,
-        include_search_results_in_stream=True,  # Include in stream
-        include_venice_system_prompt=True,
+    response = await client.chat.completions.create(
+        model=web_model,
+        messages=[
+            SystemMessage(content="Provide current, accurate information and cite your sources."),
+            UserMessage(content=question),
+        ],
+        venice_parameters=venice_params,
+        max_completion_tokens=WEB_ANSWER_CAP,
+        temperature=0.3,
     )
 
-    # Test 2 config: Return search results as documents (OpenAI tool call format)
-    venice_params_docs = VeniceParameters(
-        enable_web_search="on",
-        enable_web_citations=True,
-        return_search_results_as_documents=True,  # Return as tool calls
-        include_venice_system_prompt=True,
+    print_subsection("Response with Web Search", "📝")
+    # With return_search_results_as_documents the documents arrive as a tool
+    # call, so a complete answer can end with finish_reason "tool_calls", and
+    # some models report a truncated one that way too. print_answer therefore
+    # also checks the completion count against the cap.
+    ok = print_answer(response, WEB_ANSWER_CAP)
+    count = print_citations(response, "Web Citations")
+    print_usage(response)
+    ok = (
+        check(
+            count > 0,
+            f"Web search ran: {count} citations returned",
+            "No citations returned, so no web search happened",
+        )
+        and ok
     )
 
-    print_subsection("Test 1: Search Results in Stream", "📡")
-    display_parameters(venice_params_stream)
-    print_subsection("Test 2: Search Results as Documents", "📄")
-    display_parameters(venice_params_docs)
-    print("\n⏳ Dispatching both completions concurrently...", flush=True)
+    tool_calls = (response.choices[0].message.tool_calls or []) if response.choices else []
+    documents: list[dict] = []
+    print_subsection("Search Results as Tool Calls", "🔧")
+    for tool_call in tool_calls:
+        arguments = json.loads(tool_call.function.arguments or "{}")
+        docs = arguments.get("documents") or []
+        documents.extend(docs)
+        print(f"   {tool_call.function.name}: {len(docs)} documents", flush=True)
+    for doc in documents[:5]:
+        print(f"   [{doc.get('id')}] {doc.get('title')} - {doc.get('url')}", flush=True)
 
-    try:
-        response_stream, response_docs = await client.gather(
-            [
-                client.chat.completions.create(
-                    model=web_model,
-                    messages=[UserMessage(content=question)],
-                    venice_parameters=venice_params_stream,
-                    max_completion_tokens=384,
-                    temperature=0.3,
-                ),
-                client.chat.completions.create(
-                    model=web_model,
-                    messages=[UserMessage(content=question)],
-                    venice_parameters=venice_params_docs,
-                    max_completion_tokens=384,
-                    temperature=0.3,
-                ),
-            ],
-            max_concurrency=2,
-            return_exceptions=False,
+    return (
+        check(
+            len(documents) > 0,
+            f"{len(documents)} search documents returned as a tool call",
+            "No search documents came back as a tool call",
         )
-    except Exception as e:
-        print(f"❌ Error in search results streaming example: {e}", flush=True)
-        return False
-
-    # --- Test 1 output ---
-    content_stream = response_stream.text or ""
-    print_subsection("Test 1: Response with Streamed Search Results", "📝")
-    display_body(response_stream, content_stream)
-    _print_usage(response_stream)
-
-    # --- Test 2 output ---
-    content_docs = response_docs.text or ""
-    print_subsection("Test 2: Response with Document Results", "📝")
-    display_body(response_docs, content_docs)
-
-    # Check for tool calls in response
-    message = response_docs.choices[0].message
-    if hasattr(message, "tool_calls") and message.tool_calls:
-        print_subsection("Search Results as Tool Calls", "🔧")
-        for i, tool_call in enumerate(message.tool_calls, 1):
-            print(f"   Tool Call {i}: {tool_call}", flush=True)
-    _print_usage(response_docs)
-
-    return True
+        and ok
+    )
 
 
-async def system_prompt_control_example(client: VeniceClient) -> bool:
-    """Demonstrate include_venice_system_prompt parameter.
+async def system_prompt_control_example(client: VeniceClient) -> bool | None:
+    """Demonstrate ``include_venice_system_prompt``.
 
-    Runs the with/without completions concurrently via ``client.gather``.
-
-    Returns ``True`` on success, ``False`` if a request failed.
+    Venice adds its own system prompt to every request unless told not to.
+    The clearest evidence is the prompt size.
     """
     print_section_header("System Prompt Control Example", "🔧")
 
-    # Get a suitable model
-    model = await client.models.resolve_chat()
+    # A model that answers directly, so the prompt-token comparison is not
+    # mixed up with reasoning output.
+    try:
+        model = await client.models.resolve_chat(exclude_reasoning=True, prefer="cheapest")
+    except NoMatchingModelError:
+        print("Section skipped: the catalog lists no non-reasoning chat model", flush=True)
+        return None
     print(f"📍 Using model: {model}", flush=True)
 
     question = "Explain quantum computing in two or three simple sentences."
     print(f"\n❓ Question: {question}", flush=True)
 
-    # Test 1 config: With Venice system prompts
-    venice_params_with = VeniceParameters(
-        enable_web_search="off",
-        include_venice_system_prompt=True,  # Include Venice prompts
-    )
+    params_with = VeniceParameters(include_venice_system_prompt=True)
+    params_without = VeniceParameters(include_venice_system_prompt=False)
 
-    # Test 2 config: Without Venice system prompts
-    venice_params_without = VeniceParameters(
-        enable_web_search="off",
-        include_venice_system_prompt=False,  # Exclude Venice prompts
-    )
-
-    print_subsection("Test 1: With Venice System Prompts", "✅")
-    display_parameters(venice_params_with)
-    print_subsection("Test 2: Without Venice System Prompts", "❌")
-    display_parameters(venice_params_without)
+    print_subsection("Test 1: With Venice System Prompt", "📥")
+    display_parameters(params_with)
+    print_subsection("Test 2: Without Venice System Prompt", "🚫")
+    display_parameters(params_without)
     print("\n⏳ Dispatching both completions concurrently...", flush=True)
 
     system_msg = SystemMessage(content="You are a helpful technical assistant.")
+    response_with, response_without = await asyncio.gather(
+        *[
+            client.chat.completions.create(
+                model=model,
+                messages=[system_msg, UserMessage(content=question)],
+                venice_parameters=params,
+                max_completion_tokens=SHORT_ANSWER_CAP,
+                temperature=0.7,
+            )
+            for params in (params_with, params_without)
+        ]
+    )
+
+    print_subsection("Response With Venice System Prompt", "📝")
+    ok = print_answer(response_with, SHORT_ANSWER_CAP)
+    print_usage(response_with)
+
+    print_subsection("Response Without Venice System Prompt", "📝")
+    ok = print_answer(response_without, SHORT_ANSWER_CAP) and ok
+    print_usage(response_without)
+
+    print_subsection("Comparison", "📏")
+    with_tokens, without_tokens = prompt_tokens(response_with), prompt_tokens(response_without)
+    print(f"   Prompt tokens with Venice system prompt:    {with_tokens}", flush=True)
+    print(f"   Prompt tokens without Venice system prompt: {without_tokens}", flush=True)
+    return (
+        check(
+            with_tokens - without_tokens >= MIN_PROMPT_DELTA,
+            f"The Venice system prompt accounts for {with_tokens - without_tokens} prompt tokens",
+            "Prompt size barely changed, so the flag had no visible effect",
+        )
+        and ok
+    )
+
+
+async def comprehensive_example(client: VeniceClient) -> bool | None:
+    """Combine web search, citations and a visible reasoning trace in one call."""
+    print_section_header("Comprehensive Example - Combined Parameters", "🎯")
 
     try:
-        response_with, response_without = await client.gather(
-            [
-                client.chat.completions.create(
-                    model=model,
-                    messages=[system_msg, UserMessage(content=question)],
-                    venice_parameters=venice_params_with,
-                    max_completion_tokens=256,
-                    temperature=0.7,
-                ),
-                client.chat.completions.create(
-                    model=model,
-                    messages=[system_msg, UserMessage(content=question)],
-                    venice_parameters=venice_params_without,
-                    max_completion_tokens=256,
-                    temperature=0.7,
-                ),
-            ],
-            max_concurrency=2,
-            return_exceptions=False,
+        model = await client.models.resolve_chat(
+            require_web_search=True, require_reasoning=True, prefer="cheapest"
         )
-    except Exception as e:
-        print(f"❌ Error in system prompt control example: {e}", flush=True)
-        return False
-
-    content_with = response_with.text or ""
-    print_subsection("Response With Venice Prompts", "📝")
-    print(content_with, flush=True)
-    _print_usage(response_with)
-
-    content_without = response_without.text or ""
-    print_subsection("Response Without Venice Prompts", "📝")
-    print(content_without, flush=True)
-    _print_usage(response_without)
-
-    # Compare response lengths
-    print_subsection("Comparison", "📏")
-    print(f"   With Venice prompts: {len(content_with)} characters", flush=True)
-    print(f"   Without Venice prompts: {len(content_without)} characters", flush=True)
-    print(f"   Difference: {abs(len(content_with) - len(content_without))} characters", flush=True)
-
-    return True
-
-
-async def comprehensive_example(client: VeniceClient) -> bool:
-    """Demonstrate multiple VeniceParameters working together in a single call.
-
-    Returns ``True`` on success, ``False`` if the API call failed.
-    """
-    print_section_header("Comprehensive Example - All Parameters", "🎯")
-
-    # Get available resources (prefer a web-search model for this example).
-    characters = await find_available_characters(client)
-    web_model = await find_web_search_model(client)
-    model = web_model if web_model else await client.models.resolve_chat()
-
+    except NoMatchingModelError:
+        print("Section skipped: no reasoning model supports web search", flush=True)
+        return None
     print(f"📍 Using model: {model}", flush=True)
 
-    # Choose character if available
-    character_slug = characters[0].slug if characters else None
-    if character_slug:
-        print(f"📍 Using character: {character_slug} ({characters[0].name})", flush=True)
-
-    # Complex question that benefits from multiple features
     question = (
-        "I'm planning to start a renewable energy company. In a few sentences, "
-        "what are the key technologies to focus on and what makes a successful "
-        "clean energy startup?"
+        "I'm planning to start a renewable energy company. In three short bullet "
+        "points, what are the key technologies to focus on and what makes a "
+        "successful clean energy startup?"
     )
-
     print(f"\n💼 Business Question:\n{question}", flush=True)
 
-    # Comprehensive VeniceParameters configuration
     venice_params = VeniceParameters(
-        character_slug=character_slug,  # Use character if available
-        strip_thinking_response=False,  # Show reasoning process
-        disable_thinking=False,  # Enable thinking for complex analysis
+        strip_thinking_response=False,  # Keep the reasoning trace in the response
+        disable_thinking=False,  # Let the model reason
         enable_web_search="on",  # Get current market data
         enable_web_citations=True,  # Cite sources
-        include_venice_system_prompt=True,  # Full capabilities
+        include_venice_system_prompt=False,  # Our system message sets the role
     )
-
     display_parameters(venice_params, "Comprehensive Configuration")
 
-    try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                SystemMessage(
-                    content=(
-                        "You are an expert business consultant specializing in clean "
-                        "energy and startups. Be concise."
-                    )
-                ),
-                UserMessage(content=question),
-            ],
-            venice_parameters=venice_params,
-            max_completion_tokens=512,
-            temperature=0.4,
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            SystemMessage(
+                content=(
+                    "You are an expert business consultant specializing in clean "
+                    "energy and startups. Be concise."
+                )
+            ),
+            UserMessage(content=question),
+        ],
+        venice_parameters=venice_params,
+        # Server-default sampling for the reasoning model (see thinking_control_example).
+        max_completion_tokens=REASONING_CAP,
+    )
+
+    ok = True
+    # Reasoning models return the trace in reasoning_content (or as <think> tags);
+    # thinking_blocks reads either shape.
+    if response.thinking_blocks:
+        print_subsection("Reasoning Trace (first lines)", "🧠")
+        lines = response.thinking_blocks[0].strip().splitlines()
+        for line in lines[:4]:
+            print(f"     {line}", flush=True)
+        if len(lines) > 4:
+            print(f"     ... ({len(lines) - 4} more lines)", flush=True)
+    else:
+        print("❌ No reasoning trace despite strip_thinking_response=False", flush=True)
+        ok = False
+
+    print_subsection("Comprehensive Business Analysis", "📊")
+    ok = print_answer(response, REASONING_CAP) and ok
+    count = print_citations(response, "Market Research Sources")
+    ok = (
+        check(
+            count > 0,
+            f"Web search ran: {count} citations returned",
+            "No citations returned, so no web search happened",
         )
+        and ok
+    )
 
-        content = response.text or ""
-        thinking_blocks, clean_response = extract_thinking_blocks(content)
+    if response.venice_parameters:
+        applied = response.venice_parameters
+        print_subsection("Response Metadata", "📋")
+        print(f"   Web search used: {applied.enable_web_search}", flush=True)
+        print(f"   Citations enabled: {applied.enable_web_citations}", flush=True)
+        print(f"   Venice prompts: {applied.include_venice_system_prompt}", flush=True)
 
-        # Show thinking process if present
-        if thinking_blocks:
-            print_subsection("Strategic Analysis Process", "🧠")
-            for i, block in enumerate(thinking_blocks, 1):
-                lines = block.strip().split("\n")
-                print(f"   Analysis Step {i}:", flush=True)
-                for line in lines[:4]:  # Show first 4 lines
-                    print(f"     {line}", flush=True)
-                if len(lines) > 4:
-                    print(f"     ... ({len(lines) - 4} more lines)", flush=True)
-                print(flush=True)
-
-        print_subsection("Comprehensive Business Analysis", "📊")
-        print(clean_response, flush=True)
-
-        # Show citations if present
-        citations = format_web_citations(response)
-        if citations:
-            print_subsection("Market Research Sources", "📚")
-            for citation in citations:
-                print(f"   {citation}", flush=True)
-
-        # Show response metadata
-        if hasattr(response, "venice_parameters") and response.venice_parameters:
-            params_response = response.venice_parameters
-            print_subsection("Response Metadata", "📋")
-            print(f"   Web search used: {params_response.enable_web_search}", flush=True)
-            print(f"   Citations enabled: {params_response.enable_web_citations}", flush=True)
-            if character_slug:
-                print(f"   Character used: {params_response.character_slug}", flush=True)
-            print(f"   Venice prompts: {params_response.include_venice_system_prompt}", flush=True)
-
-        _print_usage(response)
-        return True
-
-    except Exception as e:
-        print(f"❌ Error in comprehensive example: {e}", flush=True)
-        return False
+    print_usage(response)
+    return ok
 
 
 # =============================================================================
@@ -758,46 +604,42 @@ async def comprehensive_example(client: VeniceClient) -> bool:
 
 
 async def main() -> int:
-    """Run all Venice Parameters examples.
-
-    Returns ``0`` only if every demo succeeded, ``1`` otherwise, so a real API
-    failure surfaces as a non-zero process exit instead of being masked by the
-    success banner.
-    """
+    """Run all Venice Parameters examples; return a process exit code."""
     print("🚀 Venice AI Parameters Showcase", flush=True)
     print("=" * 70, flush=True)
     print("Demonstrating Venice-specific parameters with real API data\n", flush=True)
 
     async with VeniceClient() as client:
-        results: list[tuple[str, bool]] = [
+        results: list[tuple[str, bool | None]] = [
             ("character_example", await character_example(client)),
             ("thinking_control_example", await thinking_control_example(client)),
             ("web_search_example", await web_search_example(client)),
-            ("search_results_streaming_example", await search_results_streaming_example(client)),
             ("system_prompt_control_example", await system_prompt_control_example(client)),
             ("comprehensive_example", await comprehensive_example(client)),
         ]
 
-    failed = [name for name, ok in results if not ok]
-
+    failed = [name for name, ok in results if ok is False]
+    skipped = [name for name, ok in results if ok is None]
     if failed:
-        print_section_header(f"{len(failed)} of {len(results)} demos failed", "⚠️")
+        print_section_header(f"{len(failed)} of {len(results)} demos failed", "❌")
         print(f"   Failed: {', '.join(failed)}", flush=True)
-    else:
-        print_section_header("Examples Completed Successfully! ✨", "🎉")
+        return 1
+    if len(skipped) == len(results):
+        print("SKIPPED: the catalog has no model or character for any section", flush=True)
+        return 77
+    if skipped:
+        print(f"\nℹ️ {len(skipped)} section(s) skipped: {', '.join(skipped)}", flush=True)
 
+    print_section_header("Examples Completed Successfully! ✨", "🎉")
     print("\n💡 Key Venice Parameters demonstrated:", flush=True)
     print("   • character_slug: Leverage pre-built AI personalities", flush=True)
     print("   • strip_thinking_response: Control reasoning visibility", flush=True)
     print("   • disable_thinking: Toggle reasoning capabilities", flush=True)
     print("   • enable_web_search: Access current information", flush=True)
     print("   • enable_web_citations: Get source attribution", flush=True)
-    print("   • include_search_results_in_stream: Control search display", flush=True)
     print("   • return_search_results_as_documents: OpenAI-compatible tools", flush=True)
     print("   • include_venice_system_prompt: Fine-tune system behavior", flush=True)
-    print("\n🔗 Combine these parameters for powerful, customized AI interactions!", flush=True)
-
-    return 1 if failed else 0
+    return 0
 
 
 if __name__ == "__main__":
@@ -807,5 +649,5 @@ if __name__ == "__main__":
         print("\n👋 Goodbye!")
         sys.exit(130)
     except Exception as e:
-        print(f"\n❌ Error: {e}", file=sys.stderr)
+        print(f"\n❌ Error: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

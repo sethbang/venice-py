@@ -21,6 +21,7 @@ Optional monitoring tools (shown conceptually):
 """
 
 import asyncio
+import json
 import logging
 import sys
 import time
@@ -29,16 +30,16 @@ from pathlib import Path
 from typing import Any
 
 from venice_ai import VeniceClient
-from venice_ai.core.config import VeniceAIConfig
-from venice_ai.exceptions import VeniceError
-from venice_ai.factory import VeniceClientFactory
-from venice_ai.types.api.requests import UserMessage
+from venice_ai.exceptions import NoMatchingModelError, VeniceError
+from venice_ai.types.api.requests import UserMessage, VeniceParameters
+
+# Bill only the prompts shown here, not the system prompt Venice adds by default.
+OWN_PROMPT_ONLY = VeniceParameters(include_venice_system_prompt=False)
 
 # Resolve results dir relative to this file's location so log files land under
 # examples/results/ instead of polluting whatever directory the example is run
 # from.
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # =============================================================================
@@ -47,35 +48,32 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class StructuredFormatter(logging.Formatter):
-    """Custom formatter for structured logging with context."""
+    """Emit one JSON object per record, including every ``extra=`` field."""
+
+    # Attributes every LogRecord carries. Anything else on the record came from
+    # ``extra=`` and belongs in the structured output.
+    _STANDARD_ATTRS = frozenset(
+        vars(logging.LogRecord("", logging.INFO, "", 0, "", None, None)).keys()
+    ) | {"message", "asctime", "taskName"}
 
     def format(self, record: logging.LogRecord) -> str:
-        """Format log record with structured context."""
-        # Base log data
+        """Format a record as a single JSON line."""
         log_data: dict[str, Any] = {
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
         }
 
-        # Add context from record (using getattr for custom attributes)
-        if hasattr(record, "request_id"):
-            log_data["request_id"] = getattr(record, "request_id", None)
-        if hasattr(record, "model"):
-            log_data["model"] = getattr(record, "model", None)
-        if hasattr(record, "duration_ms"):
-            log_data["duration_ms"] = getattr(record, "duration_ms", None)
-        if hasattr(record, "status_code"):
-            log_data["status_code"] = getattr(record, "status_code", None)
+        for key, value in vars(record).items():
+            if key not in self._STANDARD_ATTRS and not key.startswith("_"):
+                log_data[key] = value
 
-        # Add exception info if present
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
 
-        # Format as key=value pairs for easy parsing
-        parts = [f"{k}={v}" for k, v in log_data.items()]
-        return " ".join(parts)
+        # default=str keeps non-JSON values (Decimal, datetime) from breaking a line
+        return json.dumps(log_data, default=str)
 
 
 class ColoredFormatter(logging.Formatter):
@@ -106,6 +104,13 @@ class ColoredFormatter(logging.Formatter):
 # =============================================================================
 
 
+def _reset_handlers(logger: logging.Logger) -> None:
+    """Remove and close existing handlers so repeated setup never stacks them."""
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
+
 def setup_development_logging() -> logging.Logger:
     """
     Setup logging for development environment.
@@ -116,6 +121,7 @@ def setup_development_logging() -> logging.Logger:
     - Detailed formatting
     """
     logger = logging.getLogger("venice_ai")
+    _reset_handlers(logger)
     logger.setLevel(logging.DEBUG)
 
     # Console handler with colors
@@ -147,19 +153,23 @@ def setup_production_logging(log_file: str | None = None) -> logging.Logger:
         log_file: Path to main log file. Defaults to ``examples/results/venice_ai.log``
             so the example never writes into the caller's current directory.
     """
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     main_path = Path(log_file) if log_file is not None else RESULTS_DIR / "venice_ai.log"
     error_path = RESULTS_DIR / "venice_ai_errors.log"
 
     logger = logging.getLogger("venice_ai")
+    _reset_handlers(logger)
     logger.setLevel(logging.INFO)
 
-    # Main log file handler (all logs)
-    file_handler = logging.FileHandler(main_path)
+    # Main log file handler (all logs). mode="w" starts a fresh file per run so
+    # the log only holds this run's records; production would use a rotating
+    # handler instead (see the best-practices section).
+    file_handler = logging.FileHandler(main_path, mode="w")
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(StructuredFormatter())
 
     # Error log file handler (errors only)
-    error_handler = logging.FileHandler(error_path)
+    error_handler = logging.FileHandler(error_path, mode="w")
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(StructuredFormatter())
 
@@ -173,6 +183,17 @@ def setup_production_logging(log_file: str | None = None) -> logging.Logger:
     logger.addHandler(console_handler)
 
     return logger
+
+
+class RecordCollector(logging.Handler):
+    """Keep every record it receives, so a run can check what was logged."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
 
 
 # =============================================================================
@@ -235,7 +256,9 @@ class RequestLogger:
             duration_ms = int((time.time() - start_time) * 1000)
 
             # Surface Venice production signals carried on response headers.
-            # balance_info exposes remaining diem/usd credit; response_rate_limits
+            # balance_info is what this API key could still spend before the
+            # request (the lesser of the account balance and the key's
+            # remaining spend limit), not the account balance; response_rate_limits
             # exposes the request/token budget windows. Both are None when the
             # corresponding headers are absent (e.g. recorded fixtures), so guard.
             balance = response.balance_info
@@ -294,16 +317,19 @@ class PerformanceMonitor:
         }
 
     def record_request(
-        self, duration_ms: int, tokens: int | None = None, error: str | None = None
+        self,
+        duration_ms: int,
+        tokens: int | None = None,
+        error: BaseException | None = None,
     ) -> None:
-        """Record metrics for a request."""
+        """Record metrics for a request; errors are counted by exception class."""
         self.metrics["request_durations"].append(duration_ms)
 
         if tokens:
             self.metrics["token_usage"].append(tokens)
 
-        if error:
-            error_type = error.__class__.__name__ if hasattr(error, "__class__") else str(error)
+        if error is not None:
+            error_type = type(error).__name__
             self.metrics["error_counts"][error_type] = (
                 self.metrics["error_counts"].get(error_type, 0) + 1
             )
@@ -384,21 +410,35 @@ class ErrorTracker:
             exc_info=True,
         )
 
-        # Send to external service (if enabled)
+        # Forward to an external error tracker (if enabled). This example has
+        # none wired up; a real integration (for example Sentry's
+        # capture_exception) would send the error and its context here.
         if self.enable_external:
-            # Example Sentry integration:
-            # import sentry_sdk
-            # with sentry_sdk.push_scope() as scope:
-            #     for key, value in (context or {}).items():
-            #         scope.set_extra(key, value)
-            #     sentry_sdk.capture_exception(error)
-
-            self.logger.debug("Error sent to external tracking service")
+            self.logger.debug("Would forward the error to an external error tracker here")
 
 
 # =============================================================================
 # Example Usage
 # =============================================================================
+
+
+def _format_balance(response: Any) -> str:
+    """Render what the API key could spend, in the currencies the response carried.
+
+    This is the key's spendable balance (the lesser of the account balance and
+    the key's remaining spend limit), not the account balance, which
+    ``client.billing.get_balance()`` returns.
+    """
+    balance = response.balance_info
+    if balance is None:
+        return "n/a (no balance headers)"
+    parts = []
+    if balance.usd is not None:
+        parts.append(f"${balance.usd} USD")
+    if balance.diem is not None:
+        parts.append(f"{balance.diem} DIEM")
+    # The header is read before this request was charged.
+    return " / ".join(parts) + " (before this request)" if parts else "n/a"
 
 
 async def example_development_logging() -> bool:
@@ -407,37 +447,45 @@ async def example_development_logging() -> bool:
     print("Development Logging Example")
     print("=" * 60)
 
-    # Setup development logging
+    # The SDK logs through the standard ``venice_ai`` logger hierarchy, so a
+    # DEBUG-level handler on that logger is all it takes to see SDK internals
+    # (model selection, request routing, header redaction).
     logger = setup_development_logging()
-
-    # Create client with debug logging enabled
-    from venice_ai.core.config import SchedulerConfig, SchedulerMode
-
-    config = VeniceAIConfig(
-        debug=True,
-        scheduler=SchedulerConfig(mode=SchedulerMode.BASIC),
-    )
-
-    client = VeniceClientFactory.create_client(config=config)
+    # A second handler that keeps the records, to check SDK output arrived.
+    collector = RecordCollector()
+    logger.addHandler(collector)
 
     try:
-        # Create request logger
-        request_logger = RequestLogger(logger)
+        async with VeniceClient() as client:
+            request_logger = RequestLogger(logger)
 
-        # Make request with logging
-        model = await client.models.resolve_chat()
-        response = await request_logger.log_chat_request(
-            client=client,
-            model=model,
-            messages=[UserMessage(content="Say 'Hello from Venice AI!'")],
-            max_completion_tokens=50,
-        )
-
-        print(f"\n✅ Response: {response.text}")
-        return bool(response.text)
-
+            model = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
+            response = await request_logger.log_chat_request(
+                client=client,
+                model=model,
+                messages=[UserMessage(content="Reply with exactly: Hello from Venice AI!")],
+                max_completion_tokens=100,
+                venice_parameters=OWN_PROMPT_ONLY,
+            )
     finally:
-        await client.close()
+        logger.removeHandler(collector)
+
+    finish_reason = response.choices[0].finish_reason if response.choices else None
+    print(f"\n   Response: {response.text}")
+    print(f"   finish_reason: {finish_reason}")
+    if finish_reason == "length" or not response.text:
+        print("❌ Response was truncated or empty")
+        return False
+
+    # RequestLogger logs at INFO, so every DEBUG record came from the SDK itself.
+    sdk_debug = [r for r in collector.records if r.levelno == logging.DEBUG]
+    sources = sorted({r.name for r in sdk_debug})
+    print(f"   SDK DEBUG records: {len(sdk_debug)} from {', '.join(sources) or 'no logger'}")
+    if not sdk_debug:
+        print("❌ No SDK DEBUG record reached the venice_ai logger")
+        return False
+    print("✅ Development logging captured the SDK debug output above")
+    return True
 
 
 async def example_production_logging() -> bool:
@@ -449,123 +497,144 @@ async def example_production_logging() -> bool:
     main_log = RESULTS_DIR / "venice_ai.log"
     error_log = RESULTS_DIR / "venice_ai_errors.log"
 
-    # Setup production logging (writes under examples/results/, never the cwd)
+    # Structured records go to files; only ERROR and above reach the console.
     logger = setup_production_logging(str(main_log))
 
-    # Create client with production config
-    from venice_ai.core.config import SchedulerConfig, SchedulerMode
-
-    config = VeniceAIConfig(
-        scheduler=SchedulerConfig(mode=SchedulerMode.BASIC),
-    )
-
-    client = VeniceClientFactory.create_client(config=config)
-
+    attempts = 2
     succeeded = 0
-    try:
-        # Initialize monitoring
+    async with VeniceClient() as client:
         request_logger = RequestLogger(logger)
         perf_monitor = PerformanceMonitor(logger)
         error_tracker = ErrorTracker(logger, enable_external=False)
 
-        # Make multiple requests against a dynamically resolved model
-        model = await client.models.resolve_chat()
-        for i in range(2):
+        model = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
+        for i in range(attempts):
+            start = time.time()
             try:
-                start = time.time()
-
                 response = await request_logger.log_chat_request(
                     client=client,
                     model=model,
-                    messages=[UserMessage(content=f"Request #{i + 1}: Quick response")],
-                    max_completion_tokens=20,
+                    messages=[
+                        UserMessage(content=f"Request #{i + 1}: reply with one short sentence.")
+                    ],
+                    max_completion_tokens=100,
+                    venice_parameters=OWN_PROMPT_ONLY,
                 )
-
-                duration_ms = int((time.time() - start) * 1000)
-                tokens = response.usage.total_tokens if response.usage else None
-
-                # Record metrics
-                perf_monitor.record_request(duration_ms, tokens)
-
-                # Surface the Venice header-derived production signals.
-                balance = response.balance_info
-                rate_limits = response.response_rate_limits
-                balance_str = (
-                    f"{balance.diem} diem / ${balance.usd} usd"
-                    if balance
-                    else "n/a (no balance headers)"
-                )
-                rl_str = (
-                    f"{rate_limits.remaining_requests} req / "
-                    f"{rate_limits.remaining_tokens} tok remaining"
-                    if rate_limits
-                    else "n/a (no rate-limit headers)"
-                )
-                succeeded += 1
-                print(f"✅ Request {i + 1} completed in {duration_ms}ms")
-                print(f"   balance: {balance_str}")
-                print(f"   rate limits: {rl_str}")
-
             except VeniceError as e:
-                # Track error
                 await error_tracker.track_error(
                     e,
-                    context={
-                        "model": model,
-                        "request_number": i + 1,
-                    },
+                    context={"model": model, "request_number": i + 1},
                 )
-                perf_monitor.record_request(0, error=str(e))
+                perf_monitor.record_request(int((time.time() - start) * 1000), error=e)
+                print(f"❌ Request {i + 1} failed: {type(e).__name__}: {e}")
+                continue
 
-        # Log performance summary
+            duration_ms = int((time.time() - start) * 1000)
+            tokens = response.usage.total_tokens if response.usage else None
+            perf_monitor.record_request(duration_ms, tokens)
+
+            finish_reason = response.choices[0].finish_reason if response.choices else None
+            rate_limits = response.response_rate_limits
+            rl_str = (
+                f"{rate_limits.remaining_requests} req / "
+                f"{rate_limits.remaining_tokens} tok remaining"
+                if rate_limits
+                else "n/a (no rate-limit headers)"
+            )
+            print(f"Request {i + 1}: {duration_ms}ms, finish_reason={finish_reason}")
+            print(f"   key can spend: {_format_balance(response)}")
+            print(f"   rate limits: {rl_str}")
+            if finish_reason == "length" or not response.text:
+                print("   ❌ Response was truncated or empty")
+                continue
+            succeeded += 1
+
         perf_monitor.log_summary()
 
-        print("\n✅ Logs written to:")
-        print(f"   - {main_log} (all logs)")
-        print(f"   - {error_log} (errors only)")
+    # Close the file handlers so the log is flushed and later SDK activity in
+    # this process stays out of it.
+    _reset_handlers(logger)
 
-    finally:
-        await client.close()
+    print("\n   Logs written to:")
+    print(f"   - {main_log} (all logs)")
+    print(f"   - {error_log} (errors only)")
 
-    return succeeded > 0
+    ok = succeeded == attempts and _verify_structured_log(main_log, attempts)
+    print(f"{'✅' if ok else '❌'} {succeeded}/{attempts} production requests succeeded")
+    return ok
 
 
-async def example_structured_logging():
-    """Example: Structured logging for log aggregation."""
+def _verify_structured_log(path: Path, expected_requests: int) -> bool:
+    """Read the log back and check it holds the metrics the monitor produced."""
+    records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    completed = [r for r in records if r["message"] == "Chat request completed"]
+    summaries = {r["message"]: r for r in records if r["message"].endswith("summary")}
+
+    problems = []
+    if len(completed) != expected_requests:
+        problems.append(f"{len(completed)} completion records, expected {expected_requests}")
+    for record in completed:
+        missing = [k for k in ("tokens_used", "finish_reason", "duration_ms") if k not in record]
+        if missing:
+            problems.append(f"completion record missing {missing}")
+    perf = summaries.get("Performance summary", {})
+    if perf.get("total_requests") != expected_requests:
+        problems.append("performance summary missing or wrong request count")
+    if "total_tokens" not in summaries.get("Token usage summary", {}):
+        problems.append("token usage summary missing totals")
+    if len(records) != len({json.dumps(r, sort_keys=True) for r in records}):
+        problems.append("duplicate records")
+
+    print(f"\n   Read back {len(records)} JSON records from {path.name}")
+    if perf:
+        print(
+            f"   Performance summary: {perf['total_requests']} requests, "
+            f"avg {perf['avg_duration_ms']}ms"
+        )
+    for problem in problems:
+        print(f"   ❌ {problem}")
+    return not problems
+
+
+async def example_structured_logging(production_log: Path) -> bool:
+    """Example: Structured logging for log aggregation.
+
+    Re-emits the metadata of the last real request from the production log
+    through an application logger, to show what one structured line holds.
+    """
     print("\n" + "=" * 60)
     print("Structured Logging Example")
     print("=" * 60)
 
-    # Setup with structured formatter
-    logger = logging.getLogger("venice_ai.structured")
+    # A dedicated logger for application events. propagate=False keeps these
+    # records out of the ``venice_ai`` handlers (and the production log file).
+    logger = logging.getLogger("app.structured")
+    _reset_handlers(logger)
+    logger.propagate = False
     logger.setLevel(logging.INFO)
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(StructuredFormatter())
     logger.addHandler(handler)
 
-    # Demonstrate structured logging
-    logger.info(
-        "Client initialized",
-        extra={
-            "environment": "production",
-            "api_version": "v1",
-            "features": ["rate_limiting", "retry"],
-        },
-    )
+    records = [json.loads(line) for line in production_log.read_text().splitlines() if line]
+    completed = [r for r in records if r.get("message") == "Chat request completed"]
+    if not completed:
+        print("❌ No completed request in the production log to report on")
+        return False
+    last = completed[-1]
 
     logger.info(
         "Request completed",
         extra={
-            "request_id": "req_123456",
-            "model": "llama-3.3-70b",
-            "duration_ms": 1234,
-            "tokens_used": 150,
+            key: last[key]
+            for key in ("request_id", "model", "duration_ms", "tokens_used", "finish_reason")
         },
     )
 
-    print("\n💡 Structured logs are easily parsed by log aggregation tools")
-    print("   (e.g., ELK Stack, Splunk, CloudWatch Logs Insights)")
+    print("\n💡 Each line is one JSON object, so ELK, Splunk or CloudWatch Logs")
+    print("   Insights can index every field without a custom parser.")
+    return True
 
 
 async def example_monitoring_best_practices():
@@ -592,8 +661,8 @@ async def example_monitoring_best_practices():
                 "✅ Errors with full context and stack traces",
                 "✅ Performance metrics (latency, throughput)",
                 "✅ Rate limit status and warnings",
-                "❌ Never log API keys or sensitive data",
-                "❌ Don't log full request/response content in production",
+                "🚫 Never log API keys or sensitive data",
+                "🚫 Don't log full request/response content in production",
             ],
         ),
         (
@@ -636,22 +705,21 @@ async def main() -> int:
     print("Venice AI SDK - Production Logging & Monitoring")
     print("=" * 60)
 
-    # Run examples. The two live examples are tracked honestly so the process
-    # exit code reflects whether the Venice calls actually succeeded; the
-    # structured-logging and best-practices demos are informational only.
     results: list[tuple[str, bool]] = []
     results.append(("Development Logging", await example_development_logging()))
     results.append(("Production Logging", await example_production_logging()))
-    await example_structured_logging()
+    results.append(
+        ("Structured Logging", await example_structured_logging(RESULTS_DIR / "venice_ai.log"))
+    )
     await example_monitoring_best_practices()
 
     print("\n" + "=" * 60)
     passed = sum(1 for _, ok in results if ok)
     failed = len(results) - passed
     if failed == 0:
-        print(f"✅ All {passed}/{len(results)} live logging examples succeeded!")
+        print(f"✅ All {passed}/{len(results)} logging examples succeeded!")
     else:
-        print(f"⚠️ {passed}/{len(results)} live examples succeeded; {failed} failed")
+        print(f"❌ {passed}/{len(results)} examples succeeded; {failed} failed")
         for name, ok in results:
             status = "✓" if ok else "✗"
             print(f"   {status} {name}")
@@ -672,11 +740,14 @@ async def main() -> int:
 
 if __name__ == "__main__":
     try:
-        exit_code = asyncio.run(main())
+        sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
         print("\n👋 Goodbye!")
         sys.exit(130)
-    except Exception as e:
-        print(f"\n❌ Error: {e}", file=sys.stderr)
+    except NoMatchingModelError as e:
+        # The catalog has no model of the kind this example needs.
+        print(f"SKIPPED: {e}")
+        sys.exit(77)
+    except (VeniceError, OSError) as e:
+        print(f"\n❌ {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)
-    sys.exit(exit_code)

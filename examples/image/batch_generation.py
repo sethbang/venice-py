@@ -5,537 +5,377 @@ Venice AI SDK - Batch Image Generation
 
 This example demonstrates efficient batch generation of multiple images.
 Learn how to generate multiple images concurrently and manage batch workflows.
+
+Each returned image's pixel size is read from its header and checked against
+the request. The concurrent demo counts requests in flight to show that
+``client.gather(max_concurrency=N)`` holds the cap, and the seed demo renders
+one seed twice and a second seed once to show that the seed reproduces an
+image and that a new seed gives a new one (comparing pixels needs Pillow).
+
+Image generation is billed per request, so the client's default retry policy
+never resends one that the server may have processed. It retries a failed
+connection and a 503 meaning "model at capacity"; a 429 or any other error is
+recorded as that image's failure and the rest of the batch carries on. Each
+run makes 13 paid generations. Outputs are written to ``examples/results/``.
 """
 
 import asyncio
-import base64
+import hashlib
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
-from venice_ai import RateLimitError, VeniceClient, detect_image_format
+from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
 from venice_ai.types.api import ImageGenerationResponse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _helpers import SKIPPED, image_dimensions, mean_pixel_difference  # noqa: E402
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Seed check thresholds, on the mean absolute RGB difference (0-255). Renders of
+# two seeds must differ by at least DIFFERENT_SEED_MIN_DIFF. Two renders of one
+# seed must differ by at most SAME_SEED_MAX_RATIO of that, which allows the small
+# numeric noise some GPU pipelines add while still requiring the same picture.
+DIFFERENT_SEED_MIN_DIFF = 10.0
+SAME_SEED_MAX_RATIO = 0.10
 
 
-async def simple_batch_generation() -> bool:
-    """Generate multiple images from different prompts.
+class InFlight:
+    """Count requests in flight and remember the peak."""
 
-    Returns ``True`` only if every image generated successfully, ``False`` if
-    any image failed (so the caller can surface a non-zero exit).
+    def __init__(self) -> None:
+        self.current = 0
+        self.peak = 0
+
+    def __enter__(self) -> "InFlight":
+        self.current += 1
+        self.peak = max(self.peak, self.current)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.current -= 1
+
+
+async def generate_one(
+    client: VeniceClient,
+    model: str,
+    prompt: str,
+    stem: str,
+    written: list[Path],
+    *,
+    width: int = 512,
+    height: int = 512,
+    seed: int | None = None,
+    in_flight: InFlight | None = None,
+) -> dict[str, Any]:
+    """Generate and save one image, returning a result record.
+
+    API errors are captured in the record (``success=False``) so one failed
+    image does not abort the rest of the batch. A size mismatch between the
+    request and the returned image also counts as a failure.
     """
+    record: dict[str, Any] = {"prompt": prompt, "stem": stem, "success": False}
+    try:
+        with in_flight or InFlight():
+            response: ImageGenerationResponse = await client.image.create(
+                model=model,
+                prompt=prompt,
+                width=width,
+                height=height,
+                num_images=1,
+                seed=seed,
+                hide_watermark=True,
+                return_binary=False,
+            )
+    except VeniceError as e:
+        record["error"] = f"{type(e).__name__}: {e}"
+        return record
+
+    data = response.bytes(0)
+    size = image_dimensions(data)
+    path = response.save(RESULTS_DIR / stem, overwrite=True)
+    written.append(path)
+    record.update(
+        path=path,
+        data=data,
+        bytes=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        size=size,
+        timing=response.timing.inferenceDuration if response.timing else None,
+    )
+    if size != (width, height):
+        record["error"] = f"requested {width}x{height}, received {size[0]}x{size[1]}"
+        return record
+    record["success"] = True
+    return record
+
+
+def report(results: list[dict[str, Any] | BaseException]) -> int:
+    """Print one line per result and return the number of failures.
+
+    ``client.gather`` returns exceptions in their result slot, so anything that
+    is not a successful record (an exception or a failed record) is a failure.
+    """
+    failures = 0
+    for result in results:
+        if isinstance(result, BaseException):
+            failures += 1
+            print(f"   ❌ {type(result).__name__}: {result}")
+        elif result["success"]:
+            w, h = result["size"]
+            timing = f", {result['timing']}ms" if result["timing"] else ""
+            print(f"   ✅ {result['path'].name}: {w}x{h}, {result['bytes']} bytes{timing}")
+        else:
+            failures += 1
+            print(f"   ❌ {result['stem']} ('{result['prompt'][:40]}'): {result['error']}")
+    return failures
+
+
+async def simple_batch_generation(client: VeniceClient, model: str, written: list[Path]) -> bool:
+    """Generate several prompts one after another."""
     print("📦 Simple Batch Generation")
     print("-" * 40)
 
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            # Get image model
-            image_model = await client.models.resolve_image()
-            print(f"📍 Using image model: {image_model}")
+    prompts = [
+        "A futuristic city with flying cars",
+        "A cozy coffee shop interior",
+    ]
 
-            # Different prompts to generate
-            prompts = [
-                "A futuristic city with flying cars",
-                "A peaceful mountain landscape",
-                "An abstract art piece with vibrant colors",
-                "A cozy coffee shop interior",
-                "A magical forest with glowing mushrooms",
-            ]
+    print(f"🎨 Generating {len(prompts)} images sequentially...")
+    start = time.monotonic()
+    results: list[dict[str, Any] | BaseException] = []
+    for i, prompt in enumerate(prompts, 1):
+        results.append(await generate_one(client, model, prompt, f"batch_seq_{i}", written))
+    elapsed = time.monotonic() - start
 
-            print(f"\n🎨 Generating {len(prompts)} images sequentially...")
-            start_time = time.time()
-
-            for i, prompt in enumerate(prompts, 1):
-                print(f"\n📝 Image {i}/{len(prompts)}: {prompt[:40]}...")
-
-                try:
-                    response: ImageGenerationResponse = await client.image.create(
-                        model=image_model,
-                        prompt=prompt,
-                        width=512,
-                        height=512,
-                        num_images=1,
-                        return_binary=False,
-                    )
-
-                    # Save image
-                    image_data = response.images[0]
-                    image_bytes = base64.b64decode(image_data)
-
-                    filename = RESULTS_DIR / f"batch_seq_{i}.{detect_image_format(image_bytes)[0]}"
-                    with open(filename, "wb") as f:
-                        f.write(image_bytes)
-
-                    print(f"   ✅ Generated: {filename}")
-                    print(f"   📏 Size: {len(image_bytes)} bytes")
-
-                    if response.timing:
-                        print(f"   ⏱️ Time: {response.timing.inferenceDuration}ms")
-
-                except RateLimitError as e:
-                    print(f"   ❌ Rate limited (retry after {e.retry_after_seconds}s): {e}")
-                    ok = False
-                except Exception as e:
-                    print(f"   ❌ Failed: {e}")
-                    ok = False
-
-                # Rate limit delay between sequential requests
-                await asyncio.sleep(1.5)
-
-            elapsed = time.time() - start_time
-            print(f"\n⏱️ Total time: {elapsed:.2f}s ({elapsed / len(prompts):.2f}s per image)")
-
-        except Exception as e:
-            print(f"❌ Error in batch generation: {e}")
-            ok = False
-
-    return ok
+    failures = report(results)
+    print(f"⏱️ Total time: {elapsed:.2f}s ({elapsed / len(prompts):.2f}s per image)")
+    return failures == 0
 
 
-async def concurrent_batch_generation() -> bool:
-    """Generate multiple images concurrently for better performance.
-
-    Uses ``client.gather`` with a concurrency cap so the batch does not
-    self-inflict 429s. Returns ``True`` only if every image succeeded.
-    """
+async def concurrent_batch_generation(
+    client: VeniceClient, model: str, written: list[Path]
+) -> bool:
+    """Generate several prompts concurrently with a concurrency cap."""
     print("\n⚡ Concurrent Batch Generation")
     print("-" * 40)
 
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            # Get image model
-            image_model = await client.models.resolve_image()
-            print(f"📍 Using image model: {image_model}")
+    prompts = [
+        "A cyberpunk street scene at night",
+        "A serene Japanese zen garden",
+        "A steampunk airship in the clouds",
+    ]
 
-            # Different prompts
-            prompts = [
-                "A cyberpunk street scene at night",
-                "A serene Japanese zen garden",
-                "A steampunk airship in the clouds",
-                "A tropical beach at sunset",
-            ]
+    max_concurrency = 2
+    print(f"🚀 Generating {len(prompts)} images, at most {max_concurrency} in flight...")
+    in_flight = InFlight()
+    start = time.monotonic()
+    results = await client.gather(
+        [
+            generate_one(
+                client, model, prompt, f"batch_concurrent_{i}", written, in_flight=in_flight
+            )
+            for i, prompt in enumerate(prompts, 1)
+        ],
+        max_concurrency=max_concurrency,
+    )
+    elapsed = time.monotonic() - start
 
-            async def generate_and_save(prompt: str, index: int) -> dict:
-                """Generate a single image and save it."""
-                try:
-                    response: ImageGenerationResponse = await client.image.create(
-                        model=image_model,
-                        prompt=prompt,
-                        width=512,
-                        height=512,
-                        num_images=1,
-                        return_binary=False,
-                    )
-
-                    image_data = response.images[0]
-                    image_bytes = base64.b64decode(image_data)
-
-                    filename = (
-                        RESULTS_DIR
-                        / f"batch_concurrent_{index}.{detect_image_format(image_bytes)[0]}"
-                    )
-                    with open(filename, "wb") as f:
-                        f.write(image_bytes)
-
-                    return {
-                        "index": index,
-                        "prompt": prompt,
-                        "filename": str(filename),
-                        "size": len(image_bytes),
-                        "success": True,
-                        "timing": response.timing.inferenceDuration if response.timing else None,
-                    }
-
-                except RateLimitError as e:
-                    return {
-                        "index": index,
-                        "prompt": prompt,
-                        "success": False,
-                        "error": f"rate limited (retry after {e.retry_after_seconds}s): {e}",
-                    }
-                except Exception as e:
-                    return {"index": index, "prompt": prompt, "success": False, "error": str(e)}
-
-            print(f"\n🚀 Generating {len(prompts)} images concurrently...")
-            start_time = time.time()
-
-            # Create awaitables for concurrent generation
-            tasks = [generate_and_save(prompt, i + 1) for i, prompt in enumerate(prompts)]
-
-            # Execute with a bounded concurrency cap to avoid self-inflicted 429s.
-            # The inner helper already returns dicts (never raises), so results
-            # are dicts in input order.
-            results = await client.gather(tasks, max_concurrency=2)
-
-            elapsed = time.time() - start_time
-
-            # Display results
-            print("\n📊 Results:")
-            successful = 0
-            failed = 0
-
-            for result in results:
-                if result["success"]:
-                    successful += 1
-                    print(f"\n✅ Image {result['index']}")
-                    print(f"   Prompt: {result['prompt'][:40]}...")
-                    print(f"   File: {result['filename']}")
-                    print(f"   Size: {result['size']} bytes")
-                    if result["timing"]:
-                        print(f"   Time: {result['timing']}ms")
-                else:
-                    failed += 1
-                    print(f"\n❌ Image {result['index']}")
-                    print(f"   Prompt: {result['prompt'][:40]}...")
-                    print(f"   Error: {result['error']}")
-
-            print(f"\n⏱️ Total time: {elapsed:.2f}s")
-            print(f"📈 Average: {elapsed / len(prompts):.2f}s per image (with concurrency)")
-            print(f"✅ Successful: {successful}/{len(prompts)}")
-            if failed > 0:
-                print(f"❌ Failed: {failed}/{len(prompts)}")
-                ok = False
-
-        except Exception as e:
-            print(f"❌ Error in concurrent generation: {e}")
-            ok = False
-
-    return ok
+    failures = report(results)
+    print(f"⏱️ Total time: {elapsed:.2f}s ({elapsed / len(prompts):.2f}s per image)")
+    print(f"✅ Successful: {len(prompts) - failures}/{len(prompts)}")
+    print(f"🔢 Peak requests in flight: {in_flight.peak} (cap {max_concurrency})")
+    if in_flight.peak != max_concurrency:
+        print(f"   ❌ Expected the peak to reach the cap of {max_concurrency}")
+        return False
+    return failures == 0
 
 
-async def batch_with_variations() -> bool:
-    """Generate multiple variations of the same prompt.
+async def batch_with_variations(
+    client: VeniceClient, model: str, written: list[Path]
+) -> bool | None:
+    """Show that the seed controls the image.
 
-    Returns ``True`` only if every variation succeeded.
+    Renders the prompt with seed A twice and with seed B once. The seed-B
+    render must clearly differ from seed A (``DIFFERENT_SEED_MIN_DIFF``), and
+    the two seed-A renders must match: identical, or differing by no more than
+    ``SAME_SEED_MAX_RATIO`` of the seed-A/seed-B difference.
+    Distinct images alone would prove nothing: a server that ignored the seed
+    and sampled randomly would return distinct images too.
+
+    Returns ``True`` if the renders succeeded and, when Pillow is installed to
+    compare pixels, both checks passed. Without Pillow the seed checks cannot
+    run: the demo prints ``Section skipped:`` after the renders and returns
+    ``None``.
     """
-    print("\n🎲 Batch Variations of Same Prompt")
+    print("\n🎲 Seed Reproducibility and Variation")
     print("-" * 40)
 
+    base_prompt = "A majestic dragon perched on a mountain peak"
+    seed_a, seed_b = 42, 123
+    runs = [(seed_a, "a"), (seed_a, "b"), (seed_b, "a")]
+    print(f"🎨 Rendering '{base_prompt}' with seed {seed_a} twice and seed {seed_b} once")
+
+    results = await client.gather(
+        [
+            generate_one(
+                client, model, base_prompt, f"variation_seed{seed}_{tag}", written, seed=seed
+            )
+            for seed, tag in runs
+        ],
+        max_concurrency=3,
+    )
+    if report(results) > 0:
+        return False
+    first, repeat, other = (r["data"] for r in results if isinstance(r, dict))
+
+    same = mean_pixel_difference(first, repeat)
+    different = mean_pixel_difference(first, other)
+    if same is None or different is None:
+        print(
+            "Section skipped: the seed checks compare pixels and need Pillow (pip install Pillow)"
+        )
+        return None
+
+    print(f"   Seed {seed_a} vs seed {seed_a}: mean pixel difference {same:.2f}")
+    print(f"   Seed {seed_a} vs seed {seed_b}: mean pixel difference {different:.2f}")
     ok = True
-    async with VeniceClient() as client:
-        try:
-            # Get image model
-            image_model = await client.models.resolve_image()
-            print(f"📍 Using image model: {image_model}")
-
-            base_prompt = "A majestic dragon perched on a mountain peak"
-            num_variations = 4
-
-            print(f"\n🎨 Generating {num_variations} variations of:")
-            print(f"   '{base_prompt}'")
-
-            async def generate_variation(seed: int, index: int) -> dict:
-                """Generate a variation with a specific seed."""
-                try:
-                    response: ImageGenerationResponse = await client.image.create(
-                        model=image_model,
-                        prompt=base_prompt,
-                        width=512,
-                        height=512,
-                        num_images=1,
-                        seed=seed,  # Different seed for variation
-                        return_binary=False,
-                    )
-
-                    image_data = response.images[0]
-                    image_bytes = base64.b64decode(image_data)
-
-                    filename = (
-                        RESULTS_DIR
-                        / f"variation_{index}_seed{seed}.{detect_image_format(image_bytes)[0]}"
-                    )
-                    with open(filename, "wb") as f:
-                        f.write(image_bytes)
-
-                    return {
-                        "index": index,
-                        "seed": seed,
-                        "filename": str(filename),
-                        "success": True,
-                    }
-
-                except RateLimitError as e:
-                    return {
-                        "index": index,
-                        "seed": seed,
-                        "success": False,
-                        "error": f"rate limited (retry after {e.retry_after_seconds}s): {e}",
-                    }
-                except Exception as e:
-                    return {"index": index, "seed": seed, "success": False, "error": str(e)}
-
-            # Generate with different seeds concurrently, capped to avoid 429s
-            seeds = [42, 123, 456, 789]
-            tasks = [generate_variation(seed, i + 1) for i, seed in enumerate(seeds)]
-
-            results = await client.gather(tasks, max_concurrency=2)
-
-            # Display results
-            print("\n📊 Variations generated:")
-            for result in results:
-                if result["success"]:
-                    print(
-                        f"   ✅ Variation {result['index']} (seed: {result['seed']}): {result['filename']}"
-                    )
-                else:
-                    print(f"   ❌ Variation {result['index']} failed: {result['error']}")
-                    ok = False
-
-        except Exception as e:
-            print(f"❌ Error in variation generation: {e}")
-            ok = False
-
+    limit = SAME_SEED_MAX_RATIO * different
+    if same > limit:
+        print(f"   ❌ Seed {seed_a} did not reproduce its image (limit {limit:.2f})")
+        ok = False
+    else:
+        exact = "pixel for pixel" if same == 0 else f"within {limit:.2f}"
+        print(f"   ✅ Seed {seed_a} reproduced its image ({exact})")
+    if different < DIFFERENT_SEED_MIN_DIFF:
+        print(f"   ❌ Seed {seed_b} did not change the image (needs {DIFFERENT_SEED_MIN_DIFF})")
+        ok = False
+    else:
+        print(f"   ✅ Seed {seed_b} produced a different image")
     return ok
 
 
-async def progressive_batch_generation() -> bool:
-    """Generate images in progressive batches with feedback.
-
-    Returns ``True`` only if every image across all batches succeeded.
-    """
+async def progressive_batch_generation(
+    client: VeniceClient, model: str, written: list[Path]
+) -> bool:
+    """Generate prompts in fixed-size batches, reporting after each batch."""
     print("\n📈 Progressive Batch Generation")
     print("-" * 40)
 
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            # Get image model
-            image_model = await client.models.resolve_image()
-            print(f"📍 Using image model: {image_model}")
+    all_prompts = [
+        "A red sports car",
+        "A blue ocean wave",
+        "A green forest path",
+    ]
+    batch_size = 2
+    total_batches = (len(all_prompts) + batch_size - 1) // batch_size
+    print(
+        f"📦 Processing {len(all_prompts)} prompts in {total_batches} batches of up to {batch_size}"
+    )
 
-            # All prompts to generate
-            all_prompts = [
-                "A red sports car",
-                "A blue ocean wave",
-                "A green forest path",
-                "A yellow sunflower field",
-                "A purple sunset sky",
-                "A white snowy mountain",
-            ]
+    failures = 0
+    for batch_num in range(total_batches):
+        start_idx = batch_num * batch_size
+        batch_prompts = all_prompts[start_idx : start_idx + batch_size]
+        print(f"\n🔄 Batch {batch_num + 1}/{total_batches}")
 
-            batch_size = 2
-            total_batches = (len(all_prompts) + batch_size - 1) // batch_size
+        batch_results = await client.gather(
+            [
+                generate_one(client, model, prompt, f"progressive_{start_idx + i}", written)
+                for i, prompt in enumerate(batch_prompts)
+            ],
+            max_concurrency=batch_size,
+        )
+        batch_failures = report(batch_results)
+        failures += batch_failures
+        print(f"   Completed: {len(batch_results) - batch_failures}/{len(batch_results)}")
 
-            print(f"\n📦 Processing {len(all_prompts)} prompts in batches of {batch_size}")
-            print(f"   Total batches: {total_batches}")
-
-            all_results = []
-
-            for batch_num in range(total_batches):
-                start_idx = batch_num * batch_size
-                end_idx = min(start_idx + batch_size, len(all_prompts))
-                batch_prompts = all_prompts[start_idx:end_idx]
-
-                print(f"\n🔄 Batch {batch_num + 1}/{total_batches} ({len(batch_prompts)} images)")
-
-                async def generate_in_batch(prompt: str, global_idx: int) -> dict:
-                    """Generate image for this batch."""
-                    try:
-                        response: ImageGenerationResponse = await client.image.create(
-                            model=image_model,
-                            prompt=prompt,
-                            width=512,
-                            height=512,
-                            num_images=1,
-                            return_binary=False,
-                        )
-
-                        image_data = response.images[0]
-                        image_bytes = base64.b64decode(image_data)
-
-                        filename = (
-                            RESULTS_DIR
-                            / f"progressive_{global_idx}.{detect_image_format(image_bytes)[0]}"
-                        )
-                        with open(filename, "wb") as f:
-                            f.write(image_bytes)
-
-                        return {"success": True, "prompt": prompt, "filename": str(filename)}
-
-                    except RateLimitError as e:
-                        return {
-                            "success": False,
-                            "prompt": prompt,
-                            "error": f"rate limited (retry after {e.retry_after_seconds}s): {e}",
-                        }
-                    except Exception as e:
-                        return {"success": False, "prompt": prompt, "error": str(e)}
-
-                # Generate this batch concurrently, capped to avoid 429s
-                tasks = [
-                    generate_in_batch(prompt, start_idx + i)
-                    for i, prompt in enumerate(batch_prompts)
-                ]
-
-                batch_results = await client.gather(tasks, max_concurrency=2)
-                all_results.extend(batch_results)
-
-                # Show progress
-                successful = sum(1 for r in batch_results if r["success"])
-                print(f"   ✅ Completed: {successful}/{len(batch_results)}")
-
-            # Final summary
-            total_success = sum(1 for r in all_results if r["success"])
-            total_failed = len(all_results) - total_success
-
-            print("\n📊 Final Summary:")
-            print(f"   Total images: {len(all_results)}")
-            print(f"   ✅ Successful: {total_success}")
-            if total_failed > 0:
-                print(f"   ❌ Failed: {total_failed}")
-                ok = False
-
-        except Exception as e:
-            print(f"❌ Error in progressive generation: {e}")
-            ok = False
-
-    return ok
+    print(f"\n📊 Final: {len(all_prompts) - failures}/{len(all_prompts)} succeeded")
+    return failures == 0
 
 
-async def batch_with_mixed_parameters() -> bool:
-    """Generate batch with different parameters per image.
-
-    Returns ``True`` only if every configured image succeeded.
-    """
+async def batch_with_mixed_parameters(
+    client: VeniceClient, model: str, written: list[Path]
+) -> bool:
+    """Generate a batch where each image has its own size."""
     print("\n⚙️ Batch with Mixed Parameters")
     print("-" * 40)
 
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            # Get image model
-            image_model = await client.models.resolve_image()
-            print(f"📍 Using image model: {image_model}")
+    configs = [
+        ("A portrait photograph", 512, 768, "portrait"),
+        ("A panoramic view", 768, 512, "landscape"),
+    ]
+    print(f"🎨 Generating {len(configs)} images with different sizes (measured below)...")
 
-            # Different configurations
-            configs = [
-                {"prompt": "A landscape painting", "width": 512, "height": 512, "name": "square"},
-                {
-                    "prompt": "A portrait photograph",
-                    "width": 512,
-                    "height": 768,
-                    "name": "portrait",
-                },
-                {"prompt": "A panoramic view", "width": 768, "height": 512, "name": "landscape"},
-            ]
-
-            print(f"\n🎨 Generating {len(configs)} images with different parameters...")
-
-            async def generate_with_config(config: dict, index: int) -> dict:
-                """Generate image with specific configuration."""
-                try:
-                    response: ImageGenerationResponse = await client.image.create(
-                        model=image_model,
-                        prompt=config["prompt"],
-                        width=config["width"],
-                        height=config["height"],
-                        num_images=1,
-                        return_binary=False,
-                    )
-
-                    image_data = response.images[0]
-                    image_bytes = base64.b64decode(image_data)
-
-                    filename = (
-                        RESULTS_DIR
-                        / f"mixed_{config['name']}.{detect_image_format(image_bytes)[0]}"
-                    )
-                    with open(filename, "wb") as f:
-                        f.write(image_bytes)
-
-                    return {
-                        "success": True,
-                        "config": config,
-                        "filename": str(filename),
-                        "size": len(image_bytes),
-                    }
-
-                except RateLimitError as e:
-                    return {
-                        "success": False,
-                        "config": config,
-                        "error": f"rate limited (retry after {e.retry_after_seconds}s): {e}",
-                    }
-                except Exception as e:
-                    return {"success": False, "config": config, "error": str(e)}
-
-            results = []
-            for i, config in enumerate(configs):
-                result = await generate_with_config(config, i)
-                results.append(result)
-                # Rate limit delay between sequential requests
-                await asyncio.sleep(1.5)
-
-            # Display results
-            print("\n📊 Results:")
-            for result in results:
-                if result["success"]:
-                    config = result["config"]
-                    print(f"\n✅ {config['name'].capitalize()} format")
-                    print(f"   Dimensions: {config['width']}x{config['height']}")
-                    print(f"   File: {result['filename']}")
-                    print(f"   Size: {result['size']} bytes")
-                else:
-                    print(f"\n❌ {result['config']['name']} failed: {result['error']}")
-                    ok = False
-
-        except Exception as e:
-            print(f"❌ Error in mixed parameter generation: {e}")
-            ok = False
-
-    return ok
+    results: list[dict[str, Any] | BaseException] = []
+    for prompt, width, height, name in configs:
+        results.append(
+            await generate_one(
+                client, model, prompt, f"mixed_{name}", written, width=width, height=height
+            )
+        )
+    return report(results) == 0
 
 
 async def main() -> int:
     """Run all batch generation examples.
 
-    Returns ``0`` only if every demo succeeded, ``1`` otherwise, so a real API
-    failure (including a partial batch where some images failed) surfaces as a
-    non-zero process exit instead of being masked by the success banner.
+    Returns ``0`` if every demo that ran succeeded (without Pillow the seed
+    checks are skipped), ``1`` if any failed, and ``77`` if no catalog image
+    model is sized by width/height.
     """
     print("🚀 Venice AI Batch Image Generation Examples")
     print("=" * 50)
 
-    # Aggregate per-demo results. The inter-demo sleeps are anti-429 pacing.
-    results: list[tuple[str, bool]] = []
-    results.append(("simple_batch_generation", await simple_batch_generation()))
-    await asyncio.sleep(5)
-    results.append(("concurrent_batch_generation", await concurrent_batch_generation()))
-    await asyncio.sleep(5)
-    results.append(("batch_with_variations", await batch_with_variations()))
-    await asyncio.sleep(5)
-    results.append(("progressive_batch_generation", await progressive_batch_generation()))
-    await asyncio.sleep(5)
-    results.append(("batch_with_mixed_parameters", await batch_with_mixed_parameters()))
+    written: list[Path] = []
+    async with VeniceClient() as client:
+        # Resolve the model once; every demo below reuses it.
+        # Pixel sizes are requested below, so pick among models sized by width/height.
+        try:
+            image_model = await client.models.resolve_image(
+                prefer="cheapest", require_custom_size=True
+            )
+        except NoMatchingModelError as e:
+            print(f"SKIPPED: no image model in the catalog takes width/height ({e})")
+            return SKIPPED
+        print(f"📍 Using image model: {image_model}\n")
 
-    failed = [name for name, ok in results if not ok]
+        results: list[tuple[str, bool | None]] = []
+        for name, demo in [
+            ("simple_batch_generation", simple_batch_generation),
+            ("concurrent_batch_generation", concurrent_batch_generation),
+            ("batch_with_variations", batch_with_variations),
+            ("progressive_batch_generation", progressive_batch_generation),
+            ("batch_with_mixed_parameters", batch_with_mixed_parameters),
+        ]:
+            results.append((name, await demo(client, image_model, written)))
+
+    failed = [name for name, ok in results if ok is False]
+    skipped = [name for name, ok in results if ok is None]
 
     if failed:
         print(f"\n⚠️ {len(failed)} of {len(results)} demos failed: {', '.join(failed)}")
     else:
         print("\n✨ Batch generation examples completed!")
+        print("\n💡 Key concepts demonstrated:")
+        print("   - Sequential batch generation")
+        print("   - Concurrent generation with client.gather(max_concurrency=N)")
+        if "batch_with_variations" not in skipped:
+            print("   - Reproducing an image with a seed, and varying it with another")
+        print("   - Checking the concurrency cap by counting requests in flight")
+        print("   - Progressive batch processing")
+        print("   - Mixed output sizes, checked against the returned images")
+        print("   - Counting per-item failures, including exceptions returned by gather")
 
-    print("\n💡 Key concepts demonstrated:")
-    print("   - Sequential batch generation")
-    print("   - Concurrent generation for performance")
-    print("   - Generating variations with different seeds")
-    print("   - Progressive batch processing")
-    print("   - Mixed parameters in batches")
-    print("   - Bounded concurrency via client.gather(max_concurrency=N)")
-    print("   - Error handling in batch operations")
-
-    print("\n📁 Generated files in examples/results/:")
-    print("   - batch_seq_*.png (sequential)")
-    print("   - batch_concurrent_*.png (concurrent)")
-    print("   - variation_*.png (same prompt variations)")
-    print("   - progressive_*.png (progressive batches)")
-    print("   - mixed_*.png (different parameters)")
+    print(f"\n📁 Files written by this run ({len(written)}):")
+    for path in written:
+        print(f"   - {path.name}")
+    if not written:
+        print("   (none)")
 
     return 1 if failed else 0
 

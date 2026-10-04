@@ -4,342 +4,326 @@ Venice AI SDK - Character Discovery and Integration
 ===================================================
 
 This example demonstrates how to discover and work with AI characters in the Venice AI SDK:
-- Listing available AI characters and personalities
-- Understanding character metadata and capabilities
-- Categorizing characters by specialization and use case
-- Analyzing character statistics and popularity
-- Learning how to integrate characters into chat applications
+- Walking the whole character catalog with ``characters.iter_all()`` (``list()``
+  returns a single page)
+- Analyzing tags and popularity statistics across the catalog
+- Filtering server-side with ``search``, ``tags`` and ``sort_by``
+- Choosing the chat model to pair with a character
+
+Characters are user-created, and most carry no content tags at all, so the
+rankings and the integration walkthrough draw from the featured, web-enabled
+set rather than from the raw catalog.
+
+All calls here are read-only catalog lookups — running this example costs nothing.
+
+Note on content: the server-side ``adult`` flag is not reliable on its own —
+characters tagged "Adult" can still report ``adult=False``. This example
+therefore also leaves out characters whose tags mark them as adult or NSFW.
 """
 
 import asyncio
+import re
 import sys
-from collections import defaultdict
+from collections import Counter
 
-from venice_ai import VeniceClient
+from venice_ai import NoMatchingModelError, VeniceClient
+from venice_ai.exceptions import VeniceError
+from venice_ai.types import Character
+
+#: Tags (after normalization) that mark a character as adult content.
+ADULT_TAGS = {"adult", "nsfw", "18"}
+
+#: Minimum number of ratings before an average rating is worth ranking on.
+MIN_RATINGS = 3
+
+#: Use cases mapped to the normalized tags that identify them.
+USE_CASE_TAGS = {
+    "Education & Tutoring": {"education", "teacher", "tutor", "learning"},
+    "Programming & Tech": {"programming", "coding", "linux", "developer"},
+    "Storytelling": {"storyteller", "interactivestorytelling", "storytelling"},
+    "Philosophy & Psychology": {"philosophy", "psychology"},
+    "Comedy": {"comedy", "funny", "humor"},
+}
 
 
-async def discover_characters():
-    """Discover and explore available AI characters."""
+def normalize_tag(tag: str) -> str:
+    """Case-fold and drop punctuation so 'Role-play', 'roleplay' and 'Roleplay' match."""
+    return re.sub(r"[^a-z0-9]", "", tag.casefold())
+
+
+def is_adult(character: Character) -> bool:
+    """Adult by the server flag or by an adult/NSFW tag."""
+    return character.adult or any(normalize_tag(t) in ADULT_TAGS for t in character.tags)
+
+
+def _short(text: str | None, limit: int) -> str:
+    text = " ".join((text or "No description available").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def showcase_set(characters: list[Character]) -> list[Character]:
+    """The featured, web-enabled characters, most imported first."""
+    featured = [c for c in characters if c.featured and c.webEnabled]
+    return sorted(featured, key=lambda c: c.stats.imports, reverse=True)
+
+
+async def discover_characters(client: VeniceClient) -> list[Character] | None:
+    """Walk the whole catalog. Returns the non-adult characters, or None on failure."""
     print("🎭 Character Discovery")
     print("-" * 40)
 
-    async with VeniceClient() as client:
+    try:
+        everything = [c async for c in client.characters.iter_all(is_adult=False)]
+    except VeniceError as e:
+        print(f"❌ Error discovering characters: {e}")
+        return None
+
+    if not everything:
+        print("❌ The character catalog came back empty.")
+        return None
+
+    characters = [c for c in everything if not is_adult(c)]
+    print(f"🎪 {len(everything)} characters returned by iter_all(is_adult=False)")
+    print(f"   {len(everything) - len(characters)} more are left out because their tags mark them")
+    print(f"   as adult, so the analysis below covers {len(characters)} characters.")
+
+    web = sum(1 for c in characters if c.webEnabled)
+    featured = showcase_set(characters)
+    print(f"   {web} are web-enabled; {sum(1 for c in characters if c.featured)} are featured.")
+    print("   Characters are user-created; descriptions appear as the catalog returns them.")
+
+    print("\n📋 Featured, web-enabled characters:")
+    for i, character in enumerate(featured[:6], 1):
+        print(f"\n   {i}. {character.name}  ({character.stats.imports:,} imports)")
+        print(f"      🔗 Slug: {character.slug}")
+        print(f"      📝 {_short(character.description, 100)}")
+        if character.tags:
+            print(f"      🏷️ Tags: {', '.join(character.tags[:5])}")
+    if not featured:
+        print("   ℹ️ No featured, web-enabled characters right now.")
+
+    return characters
+
+
+def analyze_tags(characters: list[Character]) -> None:
+    """Count tags across the catalog, merging spelling variants."""
+    print("\n📊 Tag Analysis")
+    print("-" * 40)
+
+    counts: Counter[str] = Counter()
+    spellings: dict[str, Counter[str]] = {}
+    for character in characters:
+        for tag in {normalize_tag(t): t for t in character.tags}.items():
+            key, original = tag
+            if not key:
+                continue
+            counts[key] += 1
+            spellings.setdefault(key, Counter())[original] += 1
+
+    print(f"🏷️ {len(counts)} distinct tags after merging case and punctuation variants")
+    print("   Most common:")
+    for key, count in counts.most_common(12):
+        variants = ", ".join(v for v, _ in spellings[key].most_common(3))
+        print(f"   📌 {count:4d}  {key}  (written as: {variants})")
+
+
+def analyze_statistics(showcase: list[Character]) -> bool:
+    """Rank the showcase set by imports and by rating, with a minimum rating count."""
+    print("\n📈 Character Statistics (featured, web-enabled characters)")
+    print("-" * 40)
+
+    if not showcase:
+        print("❌ No featured, web-enabled characters to rank.")
+        return False
+
+    print("🏆 Top by imports:")
+    for i, c in enumerate(showcase[:5], 1):
+        print(f"   {i}. {c.name}: {c.stats.imports:,}")
+
+    rated = [
+        c
+        for c in showcase
+        if c.stats.averageRating is not None and (c.stats.ratingCount or 0) >= MIN_RATINGS
+    ]
+    print(f"\n⭐ Top by average rating (at least {MIN_RATINGS} ratings; {len(rated)} qualify):")
+    rated.sort(key=lambda c: (c.stats.averageRating or 0.0, c.stats.ratingCount or 0), reverse=True)
+    for i, c in enumerate(rated[:5], 1):
+        print(f"   {i}. {c.name}: {c.stats.averageRating:.2f} from {c.stats.ratingCount} ratings")
+    if not rated:
+        print("   ℹ️ No character has enough ratings to rank yet.")
+    return True
+
+
+def character_selection_guide(characters: list[Character]) -> None:
+    """Recommend characters per use case by exact (normalized) tag match."""
+    print("\n🎯 Character Selection Guide (by tag)")
+    print("-" * 40)
+
+    for use_case, wanted in USE_CASE_TAGS.items():
+        matches = [c for c in characters if wanted & {normalize_tag(t) for t in c.tags}]
+        matches.sort(key=lambda c: c.stats.imports, reverse=True)
+        print(f"\n🎯 {use_case} ({len(matches)} tagged):")
+        for c in matches[:3]:
+            print(f"   • {c.name}  [{', '.join(c.tags[:4])}]")
+        if not matches:
+            print("   ℹ️ No characters carry these tags today.")
+
+
+async def server_side_filtering(client: VeniceClient) -> bool:
+    """Let the server filter and sort instead of downloading everything."""
+    print("\n🔎 Server-side Filtering")
+    print("-" * 40)
+
+    queries = [
+        (
+            "search='teacher', sort_by='highlyRated'",
+            {"search": "teacher", "sort_by": "highlyRated"},
+        ),
+        ("tags=['Philosophy'], sort_by='imports'", {"tags": ["Philosophy"], "sort_by": "imports"}),
+    ]
+    for label, kwargs in queries:
         try:
-            # Get all available characters
-            characters_response = await client.characters.list()
-
-            characters = characters_response.data
-
-            if characters:
-                print(f"🎪 Found {len(characters)} available characters")
-
-                # Show basic character information
-                print("\n📋 Character Catalog:")
-                for i, character in enumerate(characters[:10], 1):  # Show first 10
-                    name = character.name
-                    slug = character.slug
-                    description = character.description or "No description available"
-
-                    print(f"\n   {i}. {name}")
-                    print(f"      🔗 Slug: {slug}")
-                    print(
-                        f"      📝 Description: {description[:100]}{'...' if len(description) > 100 else ''}"
-                    )
-
-                    # Show additional metadata if available
-                    if character.tags:
-                        tags = character.tags[:5]  # Show first 5 tags
-                        print(
-                            f"      🏷️ Tags: {', '.join(tags)}{'...' if len(character.tags) > 5 else ''}"
-                        )
-
-                    # Show web availability
-                    web_status = "✅ Web Enabled" if character.webEnabled else "🌐 Web Restricted"
-                    print(f"      {web_status}")
-
-                if len(characters) > 10:
-                    print(f"\n   ... and {len(characters) - 10} more characters")
-
-                return characters
-
-            else:
-                print("ℹ️ No characters found")
-                print(
-                    "💡 This might be due to API access limitations or the service being unavailable"
-                )
-                return []
-
-        except Exception as e:
-            print(f"❌ Error discovering characters: {e}")
-            print("💡 Note: Characters API is in Preview and requires appropriate access")
-            return []
+            page = await client.characters.list(limit=10, is_adult=False, **kwargs)  # type: ignore[arg-type]
+        except VeniceError as e:
+            print(f"❌ {label}: {e}")
+            return False
+        shown = [c for c in page.data if not is_adult(c)][:3]
+        print(f"\n   characters.list({label}) → {len(page.data)} results (server order):")
+        for c in shown:
+            print(f"   • {c.name}  [{', '.join(c.tags[:4])}]")
+    return True
 
 
-async def analyze_character_categories(characters):
-    """Analyze and categorize characters by their specializations."""
-    if not characters:
-        return
+async def demonstrate_character_integration(
+    client: VeniceClient, characters: list[Character], showcase: list[Character]
+) -> bool | None:
+    """Pair a character with a chat model that the API actually serves.
 
-    print("\n📊 Character Analysis & Categorization")
-    print("-" * 40)
-
-    # Categorize by tags
-    tag_counts = defaultdict(int)
-    category_characters = defaultdict(list)
-
-    for character in characters:
-        name = character.name
-        description = (character.description or "").lower()
-        tags = character.tags or []
-
-        # Count tags
-        for tag in tags:
-            tag_counts[tag] += 1
-
-        # Categorize by common themes
-        if any(keyword in description for keyword in ["assistant", "help", "support"]):
-            category_characters["Assistants"].append(name)
-        elif any(keyword in description for keyword in ["creative", "story", "writing", "art"]):
-            category_characters["Creative"].append(name)
-        elif any(keyword in description for keyword in ["teacher", "tutor", "education", "learn"]):
-            category_characters["Educational"].append(name)
-        elif any(
-            keyword in description for keyword in ["game", "roleplay", "adventure", "fantasy"]
-        ):
-            category_characters["Gaming & Roleplay"].append(name)
-        elif any(keyword in description for keyword in ["professional", "business", "work"]):
-            category_characters["Professional"].append(name)
-        else:
-            category_characters["General"].append(name)
-
-    # Show most popular tags
-    if tag_counts:
-        print("🏷️ Most Popular Character Tags:")
-        sorted_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)
-        for tag, count in sorted_tags[:10]:
-            print(f"   📌 {tag}: {count} characters")
-
-    # Show character categories
-    print("\n📂 Character Categories:")
-    for category, char_names in category_characters.items():
-        if char_names:
-            print(f"\n   🎯 {category} ({len(char_names)} characters):")
-            for name in char_names[:5]:  # Show first 5 per category
-                print(f"      • {name}")
-            if len(char_names) > 5:
-                print(f"      ... and {len(char_names) - 5} more")
-
-
-async def analyze_character_statistics(characters):
-    """Analyze character statistics and popularity metrics."""
-    if not characters:
-        return
-
-    print("\n📈 Character Statistics Analysis")
-    print("-" * 40)
-
-    characters_with_stats = []
-
-    for character in characters:
-        name = character.name
-        stats = character.stats
-
-        if stats:
-            characters_with_stats.append((name, stats))
-
-    if characters_with_stats:
-        print(f"📊 Found statistics for {len(characters_with_stats)} characters")
-
-        def _stats_to_dict(stats):
-            """Convert stats Pydantic model to dict."""
-            return stats.model_dump()
-
-        # Analyze available statistics
-        stat_keys = set()
-        for _name, stats in characters_with_stats:
-            stats_dict = _stats_to_dict(stats)
-            stat_keys.update(stats_dict.keys())
-
-        if stat_keys:
-            print("\n📋 Available Statistics Types:")
-            for stat_type in sorted(stat_keys):
-                print(f"   📊 {stat_type}")
-
-            # Show top characters by different metrics
-            for stat_type in sorted(stat_keys)[:3]:  # Show first 3 stat types
-                print(f"\n🏆 Top Characters by {stat_type}:")
-
-                # Extract values for this stat type
-                char_values = []
-                for name, stats in characters_with_stats:
-                    stats_dict = _stats_to_dict(stats)
-                    if stat_type in stats_dict:
-                        value = stats_dict[stat_type]
-                        if isinstance(value, (int, float)):
-                            char_values.append((name, value))
-
-                # Sort and show top characters
-                char_values.sort(key=lambda x: x[1], reverse=True)
-                for i, (name, value) in enumerate(char_values[:5], 1):
-                    print(f"   {i}. {name}: {value}")
-
-        else:
-            print("📊 Statistics data format not recognized")
-
-    else:
-        print("ℹ️ No character statistics available")
-        print("💡 Statistics may be available in the future or require special access")
-
-
-async def demonstrate_character_integration():
-    """Demonstrate how to integrate characters into chat applications."""
+    Returns ``None`` (section skipped) when the catalog has no chat model to
+    fall back on.
+    """
     print("\n🔗 Character Integration Guide")
     print("-" * 40)
 
-    async with VeniceClient() as client:
-        try:
-            # Get characters for demonstration
-            characters_response = await client.characters.list()
-            characters = characters_response.data
+    try:
+        listing = await client.models.list(type="text")
+        # Listed is not enough: a deprecated model is routed to its replacement
+        # and an offline one is not served, so only routable models count.
+        text_models = {
+            m.id
+            for m in listing.data
+            if not m.model_spec.offline and m.model_spec.deprecation is None
+        }
+        fallback = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
+    except NoMatchingModelError as e:
+        print(f"Section skipped: no chat model in the catalog to fall back on ({e})")
+        return None
+    except VeniceError as e:
+        print(f"❌ Error loading the text model catalog: {e}")
+        return False
 
-            if characters:
-                # Pick a few example characters
-                example_chars = characters[:3]
+    off_catalog = sum(1 for c in characters if c.modelId not in text_models)
+    print(f"📊 {off_catalog} of {len(characters)} characters name a modelId that is not a")
+    print("   routable model in models.list(type='text') (unlisted, deprecated or offline).")
+    print("   The server remaps some of those IDs and rejects others, and the remaps are")
+    print("   not published, so validate against the catalog before passing a")
+    print("   character's modelId as model=.")
 
-                print("💡 Character Integration Examples:")
-                print(
-                    "\nTo use characters in chat completions, reference their slug in your chat request:"
-                )
+    top = showcase[:3]
+    if not top:
+        print("❌ No featured, web-enabled character to walk through.")
+        return False
+    print("\n   Worked examples (featured, web-enabled characters):")
+    for character in top:
+        usable = character.modelId in text_models
+        model = character.modelId if usable else fallback
+        source = (
+            "character's own model, if the request fits your budget"
+            if usable
+            else "not routable; cheapest direct-answer model instead"
+        )
+        print(f"\n   {character.name} ({character.slug})")
+        print(f"   modelId {character.modelId} → use {model} ({source})")
 
-                for i, character in enumerate(example_chars, 1):
-                    name = character.name
-                    slug = character.slug
-                    description = character.description or "No description"
-
-                    print(f"\n{i}. {name}")
-                    print(f"   Slug: '{slug}'")
-                    print(
-                        f"   Use case: {description[:80]}{'...' if len(description) > 80 else ''}"
-                    )
-                    print("   Integration example:")
-                    print("   ```python")
-                    print("   model = await client.models.resolve_chat()")
-                    print("   response = await client.chat.completions.create(")
-                    print("       model=model,")
-                    print(f"       venice_parameters={{'character_slug': '{slug}'}},")
-                    print("       messages=[")
-                    print("           {'role': 'user', 'content': 'Hello! Can you help me?'}")
-                    print("       ]")
-                    print("   )")
-                    print("   ```")
-
-                print("\n🔧 Integration Best Practices:")
-                print("   ✅ Always use the character's slug (not name) for API calls")
-                print("   ✅ Test character responses to understand their personality")
-                print("   ✅ Choose characters that match your application's purpose")
-                print("   ✅ Consider character tags when filtering for specific needs")
-                print("   ✅ Handle cases where characters might not be available")
-                print("   ⚠️ Remember that Characters API is in Preview")
-
-            else:
-                print("ℹ️ No characters available for integration examples")
-
-        except Exception as e:
-            print(f"❌ Error demonstrating integration: {e}")
-
-
-async def character_selection_guide(characters):
-    """Provide guidance on selecting appropriate characters for different use cases."""
-    if not characters:
-        return
-
-    print("\n🎯 Character Selection Guide")
-    print("-" * 40)
-
-    use_cases = {
-        "Customer Support": ["helpful", "assistant", "support", "professional"],
-        "Creative Writing": ["creative", "storytelling", "writing", "narrative"],
-        "Education & Tutoring": ["teacher", "tutor", "educational", "learning"],
-        "Entertainment": ["fun", "entertaining", "humor", "comedy"],
-        "Technical Help": ["technical", "coding", "programming", "developer"],
-        "Personal Assistant": ["assistant", "productivity", "organization"],
-        "Gaming": ["game", "roleplay", "adventure", "fantasy", "rpg"],
-    }
-
-    print("📋 Recommended Characters by Use Case:")
-
-    for use_case, keywords in use_cases.items():
-        print(f"\n🎯 {use_case}:")
-
-        # Find characters matching keywords
-        matching_chars = []
-        for character in characters:
-            name = character.name
-            description = (character.description or "").lower()
-            tags = [tag.lower() for tag in (character.tags or [])]
-
-            # Check if any keywords match description or tags
-            if any(keyword in description for keyword in keywords) or any(
-                keyword in tag for keyword in keywords for tag in tags
-            ):
-                matching_chars.append(name)
-
-        if matching_chars:
-            for char_name in matching_chars[:3]:  # Show top 3 matches
-                print(f"   • {char_name}")
-            if len(matching_chars) > 3:
-                print(f"   ... and {len(matching_chars) - 3} more")
-        else:
-            print("   ℹ️ No specific matches found (use general characters)")
-
-    print("\n💡 Selection Tips:")
-    print("   🔍 Review character descriptions carefully")
-    print("   🏷️ Use tags to filter characters by capability")
-    print("   📊 Consider character statistics for popularity indicators")
-    print("   🧪 Test interactions before production deployment")
-    print("   📱 Check web enablement for browser-based applications")
+    print("\n   Integration pattern (characters/character_details.py runs it live):")
+    print("   ```python")
+    print("   MAX_REQUEST_USD = Decimal('0.01')  # your spending policy for one request")
+    print("   listing = await client.models.list(type='text')")
+    print("   routable = {m.id for m in listing.data")
+    print("               if not m.model_spec.offline and m.model_spec.deprecation is None}")
+    print("   messages = [UserMessage(content='Hello! Can you help me?')]")
+    print("   model = await client.models.resolve_chat(prefer='cheapest', exclude_reasoning=True)")
+    print("   if char.modelId in routable:")
+    print("       # A character can name any model, so price the request first.")
+    print("       estimate = await client.chat.completions.estimate_cost(")
+    print("           model=char.modelId, messages=messages, expected_completion_tokens=1500")
+    print("       )")
+    print("       if estimate.total_cost_usd <= MAX_REQUEST_USD:")
+    print("           model = char.modelId")
+    print("   response = await client.chat.completions.create(")
+    print("       model=model,")
+    print("       venice_parameters={'character_slug': char.slug},")
+    print("       messages=messages,")
+    print("       max_completion_tokens=1500,")
+    print("   )")
+    print("   ```")
+    return True
 
 
-async def main():
-    """Run all character discovery and analysis examples."""
+async def main() -> int:
+    """Run all character discovery and analysis examples.
+
+    Returns ``0`` only if every section succeeded, ``1`` otherwise.
+    """
     print("🚀 Venice AI Character Discovery & Integration Examples")
     print("=" * 70)
 
-    # Discover characters
-    characters = await discover_characters()
+    async with VeniceClient() as client:
+        characters = await discover_characters(client)
+        if characters is None:
+            print("\n❌ Character discovery failed; skipping the analysis sections.")
+            return 1
 
-    # Analyze the discovered characters
-    if characters:
-        await analyze_character_categories(characters)
-        await analyze_character_statistics(characters)
-        await character_selection_guide(characters)
+        showcase = showcase_set(characters)
+        analyze_tags(characters)
+        results: list[tuple[str, bool | None]] = [
+            ("analyze_statistics", analyze_statistics(showcase))
+        ]
+        character_selection_guide(characters)
+        results += [
+            ("server_side_filtering", await server_side_filtering(client)),
+            (
+                "demonstrate_character_integration",
+                await demonstrate_character_integration(client, characters, showcase),
+            ),
+        ]
 
-    # Show integration examples
-    await demonstrate_character_integration()
+    failed = [name for name, ok in results if ok is False]
+    skipped = [name for name, ok in results if ok is None]
+    if failed:
+        print(f"\n❌ {len(failed)} section(s) failed: {', '.join(failed)}")
+        return 1
+    if skipped:
+        print(f"\n✅ Character discovery verified; skipped: {', '.join(skipped)}")
+        return 0
 
     print("\n✨ Character discovery examples completed!")
     print("\n💡 Key concepts demonstrated:")
-    print("   - Discovering available AI characters and personalities")
-    print("   - Understanding character metadata and capabilities")
-    print("   - Categorizing characters by specialization and use case")
-    print("   - Analyzing character statistics and popularity metrics")
-    print("   - Integrating characters into chat applications")
-    print("   - Selecting appropriate characters for different scenarios")
+    print("   - Walking the whole catalog with characters.iter_all()")
+    print("   - Merging tag spelling variants before counting")
+    print("   - Ranking by rating only with enough ratings behind it")
+    print("   - Server-side search, tag filters and sorting")
+    print("   - Pairing a character with a model the API serves")
     print("\n⚠️ Important Notes:")
     print("   - Characters API is currently in Preview")
-    print("   - Features and availability may change in future releases")
-    print("   - Always test character interactions before production use")
     print("   - Use character slugs (not names) for API integration")
-    print("\n🎭 Character Benefits:")
-    print("   - Pre-configured AI personalities without custom prompts")
-    print("   - Consistent behavior patterns and knowledge domains")
-    print("   - Enhanced user engagement through distinct personas")
-    print("   - Specialized assistants for various use cases")
+    print("   - Don't rely on the adult flag alone to filter content")
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
         print("\n👋 Goodbye!")
         sys.exit(130)

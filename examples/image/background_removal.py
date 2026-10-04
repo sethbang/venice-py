@@ -6,345 +6,177 @@ Venice AI SDK - Background Removal
 This example demonstrates how to remove backgrounds from images using the Venice AI SDK.
 Learn how to isolate subjects, create transparent PNGs, and build compositing workflows
 with AI-powered background removal.
+
+One source image is generated without the Venice watermark, so no watermark
+fragment survives into the cutouts, and every demo reuses it. Each cutout's
+pixels are decoded (this needs Pillow) and checked: at least
+``MIN_CLEAR_FRACTION`` of the image must be see-through, so a background was
+removed, and at least ``MIN_SOLID_FRACTION`` must stay solid, so the subject
+was kept. A cutout must also keep its source's pixel size. Without Pillow the
+example exits with code 77 before making any paid call.
+
+Each run makes one paid generation and five background removals. Outputs are
+written to ``examples/results/``.
 """
 
 import asyncio
-import base64
 import sys
 from io import BytesIO
 from pathlib import Path
 
-from venice_ai import VeniceClient, detect_image_format
-from venice_ai.types.api import ImageGenerationResponse
+from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _helpers import (  # noqa: E402
+    SKIPPED,
+    alpha_coverage,
+    generate_base_image,
+    image_dimensions,
+    pillow_available,
+    save_image,
+)
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# A publicly reachable, direct image link for the URL input demo.
+SAMPLE_IMAGE_URL = "https://images.unsplash.com/photo-1543466835-00a7907e9de1?w=400"
+
+# A cutout must be at least this see-through (background gone) and this solid
+# (subject kept), as fractions of its pixels.
+MIN_CLEAR_FRACTION = 0.10
+MIN_SOLID_FRACTION = 0.05
 
 
-async def basic_background_removal() -> bool:
-    """Generate an image of an object and remove its background.
+def _save_cutout(
+    cutout: bytes, stem: str, written: list[Path], source_size: tuple[int, int] | None
+) -> bool:
+    """Save a cutout and check its transparency (and the source's size)."""
+    path = save_image(RESULTS_DIR / stem, cutout)
+    written.append(path)
+    width, height = image_dimensions(cutout)
+    print(f"   💾 {path.name}: {width}x{height}, {len(cutout)} bytes")
+    coverage = alpha_coverage(cutout)
+    if coverage is None:
+        raise RuntimeError("Pillow is required to check cutouts")
+    clear, solid = coverage
+    print(f"   🔍 {clear:.1%} see-through, {solid:.1%} solid")
+    if clear < MIN_CLEAR_FRACTION:
+        print(f"   ❌ Under {MIN_CLEAR_FRACTION:.0%} see-through, so no background was removed")
+        return False
+    if solid < MIN_SOLID_FRACTION:
+        print(f"   ❌ Under {MIN_SOLID_FRACTION:.0%} solid, so the subject was removed too")
+        return False
+    if source_size is not None and (width, height) != source_size:
+        print(f"   ❌ Size changed from {source_size[0]}x{source_size[1]}")
+        return False
+    return True
 
-    Returns ``True`` on success, ``False`` if the API call failed.
-    """
+
+async def basic_background_removal(
+    client: VeniceClient, original: bytes, written: list[Path]
+) -> bool:
+    """Remove the background from image bytes held in memory."""
     print("✂️ Basic Background Removal")
     print("-" * 40)
 
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            # Step 1: Generate an image with a clear subject
-            image_model = await client.models.resolve_image()
-            print(f"📍 Using image model: {image_model}")
+    try:
+        print("✂️ Removing background...")
+        cutout = await client.image.background_remove(image=original)
+    except VeniceError as e:
+        print(f"❌ Error during background removal: {e}")
+        return False
 
-            print("🎨 Generating image of a red sports car on a city street...")
-            response: ImageGenerationResponse = await client.image.create(
-                model=image_model,
-                prompt="A red sports car parked on a city street, clear subject, studio lighting",
-                width=512,
-                height=512,
-                num_images=1,
-                return_binary=False,
-            )
-
-            # Decode and save the original image
-            image_data = response.images[0]
-            original_bytes = base64.b64decode(image_data)
-            original_path = (
-                RESULTS_DIR / f"bg_removal_original.{detect_image_format(original_bytes)[0]}"
-            )
-            with open(original_path, "wb") as f:
-                f.write(original_bytes)
-            print(f"💾 Original image saved: {original_path}")
-            print(f"📏 Original size: {len(original_bytes)} bytes")
-
-            # Step 2: Remove the background
-            print("✂️ Removing background...")
-            result = await client.image.background_remove(
-                image=original_bytes,
-            )
-
-            # Save the transparent PNG
-            output_path = RESULTS_DIR / f"bg_removal_transparent.{detect_image_format(result)[0]}"
-            with open(output_path, "wb") as f:
-                f.write(result)
-
-            print("✅ Background removed successfully!")
-            print(f"💾 Transparent PNG saved: {output_path}")
-            print(f"📏 Result size: {len(result)} bytes")
-
-        except Exception as e:
-            print(f"❌ Error during background removal: {e}")
-            ok = False
-
-    return ok
+    return _save_cutout(cutout, "bg_removal_transparent", written, image_dimensions(original))
 
 
-async def background_removal_from_url() -> bool:
-    """Remove background from an image using a URL.
-
-    Returns ``True`` on success, ``False`` if the API call failed.
-    """
+async def background_removal_from_url(client: VeniceClient, written: list[Path]) -> bool:
+    """Remove the background from an image the server downloads from a URL."""
     print("\n🌐 Background Removal from URL")
     print("-" * 40)
+    print(f"🔗 Image URL: {SAMPLE_IMAGE_URL}")
 
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            # Use a publicly accessible image URL (must be a direct image link)
-            image_url = "https://images.unsplash.com/photo-1543466835-00a7907e9de1?w=400"
-            print(f"🔗 Image URL: {image_url[:60]}...")
+    try:
+        cutout = await client.image.background_remove(image_url=SAMPLE_IMAGE_URL)
+    except VeniceError as e:
+        print(f"❌ Error removing background from URL: {e}")
+        print("💡 The URL must be a publicly reachable, direct image link")
+        return False
 
-            print("✂️ Removing background from URL image...")
-            result = await client.image.background_remove(
-                image_url=image_url,
-            )
-
-            # Save the result
-            output_path = RESULTS_DIR / f"bg_removal_from_url.{detect_image_format(result)[0]}"
-            with open(output_path, "wb") as f:
-                f.write(result)
-
-            print("✅ Background removed from URL image!")
-            print(f"💾 Saved to: {output_path}")
-            print(f"📏 Result size: {len(result)} bytes")
-
-        except Exception as e:
-            print(f"❌ Error removing background from URL: {e}")
-            print("💡 Note: The URL must be publicly accessible")
-            ok = False
-
-    return ok
+    return _save_cutout(cutout, "bg_removal_from_url", written, None)
 
 
-async def different_input_methods() -> bool:
-    """Demonstrate different ways to provide images for background removal.
+async def different_input_methods(
+    client: VeniceClient, sample: bytes, sample_path: Path, written: list[Path]
+) -> bool:
+    """Pass the image as a path string, a file-like object and a Path.
 
-    Returns ``True`` on success, ``False`` if any input method failed.
+    The basic demo above already sends raw bytes.
     """
     print("\n📂 Different Input Methods")
     print("-" * 40)
+    sample_size = image_dimensions(sample)
+
+    methods: list[tuple[str, str, str | BytesIO | Path]] = [
+        ("📁 Method 1: File path (string)", "path", str(sample_path)),
+        ("📖 Method 2: File-like object (BinaryIO)", "fileobj", BytesIO(sample)),
+        ("🗂️ Method 3: Path object", "pathobj", sample_path),
+    ]
 
     ok = True
-    async with VeniceClient() as client:
+    for label, tag, image in methods:
+        print(f"\n{label}")
         try:
-            # First, generate a sample image to work with
-            image_model = await client.models.resolve_image()
-
-            print("🎨 Generating sample image...")
-            response: ImageGenerationResponse = await client.image.create(
-                model=image_model,
-                prompt="A golden retriever sitting on grass, clear subject",
-                width=512,
-                height=512,
-                num_images=1,
-                return_binary=False,
-            )
-
-            image_data = response.images[0]
-            sample_bytes = base64.b64decode(image_data)
-            sample_path = (
-                RESULTS_DIR / f"bg_removal_sample_dog.{detect_image_format(sample_bytes)[0]}"
-            )
-            with open(sample_path, "wb") as f:
-                f.write(sample_bytes)
-            print(f"✅ Sample image saved: {sample_path}")
-
-            # Method 1: File path (string)
-            print("\n📁 Method 1: File path (string)")
-            result = await client.image.background_remove(
-                image=str(sample_path),
-            )
-            output_path = RESULTS_DIR / f"bg_removal_from_path.{detect_image_format(result)[0]}"
-            with open(output_path, "wb") as f:
-                f.write(result)
-            print(f"   ✅ Saved: {output_path} ({len(result)} bytes)")
-
-            # Method 2: Raw bytes
-            print("🔢 Method 2: Raw bytes")
-            result = await client.image.background_remove(
-                image=sample_bytes,
-            )
-            output_path = RESULTS_DIR / f"bg_removal_from_bytes.{detect_image_format(result)[0]}"
-            with open(output_path, "wb") as f:
-                f.write(result)
-            print(f"   ✅ Saved: {output_path} ({len(result)} bytes)")
-
-            # Method 3: File-like object (BinaryIO)
-            print("📖 Method 3: File-like object (BinaryIO)")
-            bio = BytesIO(sample_bytes)
-            result = await client.image.background_remove(
-                image=bio,
-            )
-            output_path = RESULTS_DIR / f"bg_removal_from_fileobj.{detect_image_format(result)[0]}"
-            with open(output_path, "wb") as f:
-                f.write(result)
-            print(f"   ✅ Saved: {output_path} ({len(result)} bytes)")
-
-            # Method 4: Path object
-            print("🗂️ Method 4: Path object")
-            result = await client.image.background_remove(
-                image=sample_path,
-            )
-            output_path = RESULTS_DIR / f"bg_removal_from_pathobj.{detect_image_format(result)[0]}"
-            with open(output_path, "wb") as f:
-                f.write(result)
-            print(f"   ✅ Saved: {output_path} ({len(result)} bytes)")
-
-            print("\n✅ All input methods work correctly!")
-
-        except Exception as e:
-            print(f"❌ Error testing input methods: {e}")
+            cutout = await client.image.background_remove(image=image)
+        except VeniceError as e:
+            print(f"   ❌ Failed: {e}")
             ok = False
-
-    return ok
-
-
-async def practical_use_cases() -> bool:
-    """Show practical workflows using background removal.
-
-    Returns ``True`` on success, ``False`` if any use case failed.
-    """
-    print("\n🎯 Practical Use Cases")
-    print("-" * 40)
-
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            image_model = await client.models.resolve_image()
-
-            # Use case 1: Product photography — isolate a product
-            print("🛍️ Use case 1: Product photography")
-            print("   Generating product image...")
-            response: ImageGenerationResponse = await client.image.create(
-                model=image_model,
-                prompt="A sleek wireless headphone on a wooden desk, product photography",
-                width=512,
-                height=512,
-                num_images=1,
-                return_binary=False,
-            )
-
-            product_bytes = response.bytes(0)
-            product_path = (
-                RESULTS_DIR / f"bg_removal_product_original.{detect_image_format(product_bytes)[0]}"
-            )
-            with open(product_path, "wb") as f:
-                f.write(product_bytes)
-
-            print("   ✂️ Isolating product from background...")
-            isolated = await client.image.background_remove(image=product_bytes)
-            isolated_path = (
-                RESULTS_DIR / f"bg_removal_product_isolated.{detect_image_format(isolated)[0]}"
-            )
-            with open(isolated_path, "wb") as f:
-                f.write(isolated)
-            print(f"   ✅ Product isolated: {isolated_path}")
-            print(f"   📏 Transparent PNG: {len(isolated)} bytes")
-            print("   💡 Ready for e-commerce listing or catalog compositing!")
-
-            # Use case 2: Profile picture — remove distracting background
-            print("\n👤 Use case 2: Profile picture")
-            print("   Generating portrait...")
-            response = await client.image.create(
-                model=image_model,
-                prompt="Professional headshot portrait of a person in an office, shallow depth of field",
-                width=512,
-                height=512,
-                num_images=1,
-                return_binary=False,
-            )
-
-            portrait_bytes = response.bytes(0)
-            portrait_path = (
-                RESULTS_DIR
-                / f"bg_removal_portrait_original.{detect_image_format(portrait_bytes)[0]}"
-            )
-            with open(portrait_path, "wb") as f:
-                f.write(portrait_bytes)
-
-            print("   ✂️ Removing background from portrait...")
-            cutout = await client.image.background_remove(image=portrait_bytes)
-            cutout_path = (
-                RESULTS_DIR / f"bg_removal_portrait_cutout.{detect_image_format(cutout)[0]}"
-            )
-            with open(cutout_path, "wb") as f:
-                f.write(cutout)
-            print(f"   ✅ Portrait cutout: {cutout_path}")
-            print(f"   📏 Transparent PNG: {len(cutout)} bytes")
-            print("   💡 Ready for profile avatars or compositing onto custom backgrounds!")
-
-            # Use case 3: Batch processing — multiple items
-            print("\n📦 Use case 3: Batch processing pipeline")
-            items = [
-                "A ceramic coffee mug on a kitchen counter",
-                "Running shoes on a track field",
-                "A potted succulent plant on a shelf",
-            ]
-
-            batch_failed = 0
-            for i, prompt in enumerate(items):
-                item_name = prompt.split(" on ")[0].removeprefix("A ").lower().replace(" ", "_")
-                print(f"   🎨 Generating item {i + 1}: {item_name}...")
-
-                try:
-                    response = await client.image.create(
-                        model=image_model,
-                        prompt=prompt,
-                        width=512,
-                        height=512,
-                        num_images=1,
-                        return_binary=False,
-                    )
-
-                    item_bytes = response.bytes(0)
-                    result = await client.image.background_remove(image=item_bytes)
-
-                    item_path = (
-                        RESULTS_DIR
-                        / f"bg_removal_batch_{item_name}.{detect_image_format(result)[0]}"
-                    )
-                    with open(item_path, "wb") as f:
-                        f.write(result)
-                    print(f"   ✅ {item_name}: {item_path} ({len(result)} bytes)")
-
-                except Exception as e:
-                    print(f"   ❌ Failed for {item_name}: {e}")
-                    ok = False
-                    batch_failed += 1
-
-            if batch_failed:
-                print(
-                    f"\n⚠️ Batch processing finished with {batch_failed} of {len(items)} items failed"
-                )
-            else:
-                print("\n✅ Batch processing complete!")
-                print("   💡 All items are now transparent PNGs ready for compositing")
-
-        except Exception as e:
-            print(f"❌ Error in practical use cases: {e}")
-            ok = False
-
+            continue
+        ok &= _save_cutout(cutout, f"bg_removal_from_{tag}", written, sample_size)
     return ok
 
 
 async def main() -> int:
     """Run all background removal examples.
 
-    Returns ``0`` only if every demo succeeded, ``1`` otherwise, so a real API
-    failure surfaces as a non-zero process exit instead of being masked by the
-    success banner.
+    Returns ``0`` only if every demo succeeded, ``1`` if any failed, and ``77``
+    if Pillow is missing or no catalog image model is sized by width/height.
     """
     print("🚀 Venice AI Background Removal Examples")
     print("=" * 50)
 
-    results: list[tuple[str, bool]] = [
-        ("basic_background_removal", await basic_background_removal()),
-        ("background_removal_from_url", await background_removal_from_url()),
-        ("different_input_methods", await different_input_methods()),
-        ("practical_use_cases", await practical_use_cases()),
-    ]
+    if not pillow_available():
+        print(
+            "SKIPPED: Pillow is not installed; it is needed to check cutouts (pip install Pillow)"
+        )
+        return SKIPPED
+
+    written: list[Path] = []
+    async with VeniceClient() as client:
+        try:
+            print("🎨 Generating image of a red sports car on a city street...")
+            original = await generate_base_image(
+                client, "A red sports car parked on a city street, clear subject, studio lighting"
+            )
+        except NoMatchingModelError as e:
+            print(f"SKIPPED: no image model in the catalog takes width/height ({e})")
+            return SKIPPED
+        except VeniceError as e:
+            print(f"❌ Could not generate the source image: {e}")
+            return 1
+        original_path = save_image(RESULTS_DIR / "bg_removal_original", original)
+        written.append(original_path)
+        print(f"   💾 Original: {original_path.name} ({len(original)} bytes)\n")
+
+        results: list[tuple[str, bool]] = [
+            ("basic_background_removal", await basic_background_removal(client, original, written)),
+            ("background_removal_from_url", await background_removal_from_url(client, written)),
+            (
+                "different_input_methods",
+                await different_input_methods(client, original, original_path, written),
+            ),
+        ]
 
     failed = [name for name, ok in results if not ok]
 
@@ -352,22 +184,15 @@ async def main() -> int:
         print(f"\n⚠️ {len(failed)} of {len(results)} demos failed: {', '.join(failed)}")
     else:
         print("\n✨ Background removal examples completed!")
+        print("\n💡 Key concepts demonstrated:")
+        print("   - Basic background removal from image bytes")
+        print("   - Background removal from URL (image_url parameter)")
+        print("   - Multiple input methods (bytes, path, BinaryIO, Path)")
+        print("   - Checking how much of each cutout is see-through and how much is solid")
 
-    print("\n💡 Key concepts demonstrated:")
-    print("   - Basic background removal (generate → remove)")
-    print("   - Background removal from URL (image_url parameter)")
-    print("   - Multiple input methods (path, bytes, BinaryIO, Path)")
-    print("   - Product photography isolation")
-    print("   - Profile picture cutouts")
-    print("   - Batch processing pipeline")
-    print("\n📁 Generated files in examples/results/:")
-    print("   - bg_removal_original.png (source image)")
-    print("   - bg_removal_transparent.png (background removed)")
-    print("   - bg_removal_from_url.png (URL input)")
-    print("   - bg_removal_from_*.png (different input methods)")
-    print("   - bg_removal_product_*.png (product photography)")
-    print("   - bg_removal_portrait_*.png (profile picture)")
-    print("   - bg_removal_batch_*.png (batch processing)")
+    print(f"\n📁 Files written by this run ({len(written)}):")
+    for path in written:
+        print(f"   - {path.name}")
 
     return 1 if failed else 0
 

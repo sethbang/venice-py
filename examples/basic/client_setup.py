@@ -5,6 +5,26 @@ Venice AI SDK - Client Setup Examples
 
 This example demonstrates different ways to configure and set up the Venice AI client
 for various use cases and environments.
+
+Every live section verifies the client against ``api_keys.get_rate_limits()``,
+a free endpoint that requires a valid API key. (``models.list()`` is public, so
+it would succeed even with a wrong key and prove nothing about the setup.)
+
+The API root comes from ``base_url=``, ``VeniceAIConfig.api_base_url`` or the
+``VENICE_API_BASE_URL`` environment variable, in the form
+``https://api.venice.ai/api/v1`` (version path included). The sections print the
+root each client actually uses.
+
+The production section needs a reachable Redis server. The Redis URL is the
+first of these that is set:
+
+1. ``VENICE_BACKEND__REDIS__REDIS_URL`` — the SDK's own setting
+   (``VeniceAIConfig.backend.redis.redis_url``), so it always wins;
+2. ``VENICE_REDIS_URL`` — a convenience name the examples also read;
+3. ``REDIS_URL`` — the conventional name many hosts set.
+
+Without one the section prints a ``Section skipped:`` line. The script still
+exits 0 when every other section passed, since Redis is optional.
 """
 
 import asyncio
@@ -16,225 +36,245 @@ from venice_ai.core.config import (
     BackendConfig,
     BackendType,
     HttpClientConfig,
+    RateLimiterConfig,
+    RateLimiterMode,
     RedisBackendConfig,
-    SchedulerConfig,
-    SchedulerMode,
 )
-from venice_ai.exceptions import APIConnectionError, AuthenticationError
+from venice_ai.exceptions import AuthenticationError, VeniceError
+
+# Checked in this order: the SDK's own setting first, then the example fallbacks.
+REDIS_URL_ENV_VARS = ("VENICE_BACKEND__REDIS__REDIS_URL", "VENICE_REDIS_URL", "REDIS_URL")
+
+
+async def verify_api_key(client: VeniceClient, indent: str = "   ") -> bool:
+    """Make one authenticated call so the check proves the key works."""
+    try:
+        limits = await client.api_keys.get_rate_limits()
+    except VeniceError as e:
+        print(f"{indent}❌ Authenticated call failed: {type(e).__name__}: {e}")
+        return False
+    print(f"{indent}🔐 API key accepted (tier: {limits.data.apiTier.id})")
+    return True
 
 
 async def basic_setup() -> bool:
-    """Basic client setup with API key.
-
-    Returns ``True`` on success, ``False`` if the backend call failed.
-    """
+    """Basic client setup with API key from the environment."""
     print("🔧 Basic Client Setup")
     print("-" * 30)
 
-    ok = True
     # Method 1: Direct instantiation (reads VENICE_API_KEY from environment)
     async with VeniceClient() as client:
-        print("✅ Basic client created successfully")
-
-        # Test with a simple request
-        try:
-            models = await client.models.list()
-            print(f"📋 Found {len(models.data)} models")
-        except Exception as e:
-            print(f"❌ Backend call failed: {type(e).__name__}: {e}")
-            ok = False
-
-    return ok
+        print("✅ Basic client created")
+        print(f"   - API root: {client.base_url}")
+        print(f"   - Request timeout: {client.timeout}s")
+        return await verify_api_key(client)
 
 
 async def explicit_key_setup() -> bool:
-    """Setup with an explicit API key (useful for testing or multi-key setups).
-
-    Returns ``True`` on success, ``False`` if the backend call failed.
-    """
+    """Setup with an explicit API key (useful for testing or multi-key setups)."""
     print("\n🔑 Explicit Key Setup")
     print("-" * 30)
 
-    ok = True
-    # Method 2: Pass API key explicitly
-    api_key = os.getenv("VENICE_API_KEY", "your-api-key-here")
+    # Method 2: Pass the API key explicitly, e.g. one loaded from a secrets store.
+    api_key = os.environ.get("VENICE_API_KEY")
+    if not api_key:
+        print("❌ VENICE_API_KEY is not set")
+        return False
+
     async with VeniceClient(api_key=api_key) as client:
         print("✅ Client created with explicit API key")
-        try:
-            models = await client.models.list()
-            print(f"   📋 Backend verified: {len(models.data)} models reachable")
-        except Exception as e:
-            print(f"   ❌ Backend verification failed: {type(e).__name__}: {e}")
-            ok = False
-
-    return ok
+        return await verify_api_key(client)
 
 
 async def custom_configuration() -> bool:
-    """Setup with custom configuration.
-
-    Returns ``True`` on success, ``False`` if the backend call failed.
-    """
+    """Setup with a custom VeniceAIConfig built through the factory."""
     print("\n⚙️ Custom Configuration Setup")
     print("-" * 30)
 
-    # Create a custom configuration
     config = VeniceAIConfig(
-        # Backend configuration
+        # In-process rate-limit state (no external services needed)
         backend=BackendConfig(backend_type=BackendType.MEMORY),
         # HTTP client settings
-        http_client=HttpClientConfig(
-            timeout=60.0, max_connections=50, max_keepalive_connections=20
-        ),
-        # Scheduler configuration
-        scheduler=SchedulerConfig(mode=SchedulerMode.BASIC),
+        http_client=HttpClientConfig(timeout=60.0, max_connections=50),
     )
 
-    # Create client using factory with custom config
     client = VeniceClientFactory.create_client(config=config)
 
-    ok = True
     async with client:
         print("✅ Custom configured client created")
-        print("   - Memory backend (for testing)")
-        print("   - 60s timeout")
-        print("   - 50 max connections")
-        print("   - Basic scheduler mode")
-        try:
-            models = await client.models.list()
-            print(f"   📋 Backend verified: {len(models.data)} models reachable")
-        except Exception as e:
-            print(f"   ❌ Backend verification failed: {type(e).__name__}: {e}")
-            ok = False
+        print(f"   - API root: {client.base_url} (config: {config.api_base_url})")
+        print(f"   - Backend: {config.backend.backend_type.value}")
+        print(f"   - Rate limiter: {type(client.rate_limiter).__name__}")
+        print(f"   - Request timeout: {client.timeout}s")
+        # Read the settings back from the client rather than from the config,
+        # so the output shows what the client actually uses.
+        limits = client.connection_limits
+        print(
+            f"   - Connection pool: {limits.limit} total, {limits.limit_per_host or 'no'} per host"
+        )
+        retry = client.retry_options
+        if retry is not None:
+            print(f"   - Retries: up to {retry.max_attempts} after the first attempt")
+        if limits.limit != config.http_client.max_connections:
+            print(
+                f"   ❌ Expected a pool of {config.http_client.max_connections} connections, "
+                f"the client has {limits.limit}"
+            )
+            return False
+        if client.base_url.rstrip("/") != config.api_base_url.rstrip("/"):
+            print("   ❌ The client does not use the API root the config names")
+            return False
+        return await verify_api_key(client)
 
-    return ok
+
+def configured_redis_url() -> str | None:
+    """Return the first Redis URL set in ``REDIS_URL_ENV_VARS`` order, if any."""
+    for name in REDIS_URL_ENV_VARS:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
 
 
-async def production_setup() -> bool:
-    """Production-ready client setup.
+async def redis_reachable(redis_url: str) -> bool:
+    """Ping Redis so the section never claims a backend it cannot reach."""
+    try:
+        import redis.asyncio as redis_asyncio
+        from redis.exceptions import RedisError
+    except ImportError:
+        print("   The redis package is missing: pip install 'venice-py[adaptive]'")
+        return False
 
-    Returns ``True`` on success. A missing local Redis is treated as a graceful
-    skip (still ``True``) because the example only demonstrates configuration;
-    any other failure surfaces as ``False``.
+    probe = redis_asyncio.Redis.from_url(redis_url, socket_connect_timeout=2.0)
+    try:
+        await probe.ping()
+        return True
+    except (RedisError, OSError) as e:
+        print(f"   Redis ping failed: {type(e).__name__}: {e}")
+        return False
+    finally:
+        await probe.aclose()
+
+
+async def production_setup() -> bool | None:
+    """Production-ready client setup with shared rate-limit state in Redis.
+
+    Redis is only contacted by the ADAPTIVE rate limiter, so the backend and the
+    rate limiter are configured together. Without a reachable Redis the section
+    is skipped (an infrastructure prerequisite, not a code failure) and returns
+    ``None``.
     """
     print("\n🏭 Production Setup")
     print("-" * 30)
 
-    # Production configuration with Redis backend
+    redis_url = configured_redis_url()
+    if not redis_url:
+        print(
+            "Section skipped: production_setup needs Redis; "
+            f"set one of {', '.join(REDIS_URL_ENV_VARS)}"
+        )
+        return None
+    if not await redis_reachable(redis_url):
+        print(
+            "Section skipped: production_setup needs Redis, and the configured one is unreachable"
+        )
+        print("   (examples/advanced/redis_backend.py shows the full Redis walkthrough)")
+        return None
+
     config = VeniceAIConfig(
-        # Redis backend for distributed state
+        # Redis holds the rate-limit state shared by every process using this key
         backend=BackendConfig(
             backend_type=BackendType.REDIS,
-            redis=RedisBackendConfig(
-                redis_url="redis://localhost:6379",
-                max_connections=20,
-                default_ttl=3600,
-            ),
+            redis=RedisBackendConfig(redis_url=redis_url, max_connections=20),
         ),
-        # Optimized HTTP settings
-        http_client=HttpClientConfig(
-            timeout=30.0, max_connections=100, max_keepalive_connections=50
-        ),
-        # Basic scheduler for this example (INTELLIGENT mode requires more setup)
-        scheduler=SchedulerConfig(mode=SchedulerMode.BASIC),
+        # The ADAPTIVE limiter is the component that reads and writes Redis
+        rate_limiter=RateLimiterConfig(mode=RateLimiterMode.ADAPTIVE, redis_url=redis_url),
+        http_client=HttpClientConfig(timeout=30.0, max_connections=100),
     )
 
-    try:
-        client = VeniceClientFactory.create_client(config=config)
+    # account_id scopes the Redis keys, so deployments sharing one Redis
+    # instance do not collide.
+    client = VeniceClientFactory.create_client(config=config, account_id="client-setup-example")
 
-        async with client:
-            print("✅ Production client created")
-            print("   - Redis backend configured for distributed state")
-            print(f"   - Basic scheduler ({SchedulerMode.BASIC.value}) — predictable FIFO ordering")
-            print("   - 100 max connections, 50 keep-alive")
-            print("   ℹ️  For tier-aware prioritization upgrade to SchedulerMode.INTELLIGENT")
-            print("       and configure RateLimiterConfig(mode=ADAPTIVE, redis_url=...)")
-            try:
-                models = await client.models.list()
-                print(f"   📋 Backend verified: {len(models.data)} models reachable")
-            except Exception as e:
-                print(f"   ❌ Backend verification failed: {type(e).__name__}: {e}")
-                return False
-    except (ConnectionError, APIConnectionError, OSError) as e:
-        # No local Redis available — this is an infra prerequisite, not a code
-        # bug, so the demo is skipped rather than failed.
-        print(f"⏭️  Skipped: Redis not reachable ({type(e).__name__}); start Redis to run this demo")
-        return True
-
-    return True
+    async with client:
+        print("✅ Production client created")
+        print(f"   - Backend: {config.backend.backend_type.value} (reachable)")
+        print(f"   - Rate limiter: {type(client.rate_limiter).__name__}")
+        print(f"   - Max connections: {config.http_client.max_connections}")
+        return await verify_api_key(client)
 
 
 async def test_setup() -> bool:
     """Test-optimized client setup.
 
-    Uses a placeholder ``api_key="test-key"`` to show the test client wires up
-    end to end. The backend is expected to reject that key with an
-    :class:`AuthenticationError`; catching that specific error *proves* the
-    request reached the backend, so it counts as success. Any other failure
-    (including a surprising 2xx) is reported and returns ``False``.
+    The test client carries a placeholder key, so an authenticated call must be
+    rejected with :class:`AuthenticationError`. That rejection proves the
+    request reached the API; a 2xx would mean the placeholder was never sent.
     """
     print("\n🧪 Test Setup")
     print("-" * 30)
 
     from venice_ai import create_test_venice_client
 
-    ok = True
-    # create_test_venice_client now defaults to SchedulerMode.BASIC, so a
-    # test client works out of the box without TierDiscovery setup.
-    async with create_test_venice_client(api_key="test-key") as client:
+    async with create_test_venice_client(api_key="test-key", enable_redis=False) as client:
         print("✅ Test client created")
-        print("   - Optimized for testing")
-        print("   - Fast timeouts")
-        print("   - Memory backend")
-        print("   - Minimal retries")
-        print("   - Basic scheduler mode (default)")
+        print(f"   - Request timeout: {client.timeout}s")
+        print(f"   - Rate limiter: {type(client.rate_limiter).__name__}")
         try:
-            models = await client.models.list()
-            print(f"   📋 Wiring verified — models.list() returned {len(models.data)} entries")
+            await client.api_keys.get_rate_limits()
         except AuthenticationError as e:
-            # The placeholder key is rejected by the backend, which proves the
-            # request was wired all the way through.
-            print(f"   📋 Wiring verified — backend rejected placeholder key: {type(e).__name__}")
-        except Exception as e:
-            print(f"   ❌ Unexpected failure (not an auth rejection): {type(e).__name__}: {e}")
-            ok = False
-
-    return ok
+            print(f"   📋 Placeholder key rejected as expected: {type(e).__name__}")
+            return True
+        print("   ❌ The placeholder key was accepted; expected AuthenticationError")
+        return False
 
 
 async def main() -> int:
     """Demonstrate various client setup methods.
 
-    Returns ``0`` only if every demo succeeded, ``1`` otherwise, so a real
-    failure surfaces as a non-zero process exit instead of being masked by the
-    success banner.
+    Returns ``1`` if any section failed, otherwise ``0``. The Redis-backed
+    production section is optional: when it is skipped the other sections
+    still validate the client, so the script exits ``0`` after saying so.
     """
     print("🚀 Venice AI Client Setup Examples")
     print("=" * 50)
 
-    results: list[tuple[str, bool]] = [
-        ("basic_setup", await basic_setup()),
-        ("explicit_key_setup", await explicit_key_setup()),
-        ("custom_configuration", await custom_configuration()),
-        ("production_setup", await production_setup()),
-        ("test_setup", await test_setup()),
+    sections = [
+        ("basic_setup", basic_setup),
+        ("explicit_key_setup", explicit_key_setup),
+        ("custom_configuration", custom_configuration),
+        ("production_setup", production_setup),
+        ("test_setup", test_setup),
     ]
 
-    failed = [name for name, ok in results if not ok]
+    # Each section returns True (passed), False (failed) or None (skipped).
+    results: list[tuple[str, bool | None]] = []
+    for name, section in sections:
+        try:
+            results.append((name, await section()))
+        except VeniceError as e:
+            print(f"❌ {name} failed: {type(e).__name__}: {e}")
+            results.append((name, False))
+
+    failed = [name for name, ok in results if ok is False]
+    skipped = [name for name, ok in results if ok is None]
+    passed = len(results) - len(failed) - len(skipped)
 
     if failed:
-        print(f"\n⚠️ {len(failed)} of {len(results)} setup examples failed: {', '.join(failed)}")
+        print(f"\n❌ {len(failed)} of {len(results)} setup examples failed: {', '.join(failed)}")
+        return 1
+
+    if skipped:
+        print(f"\n✅ {passed} setup examples passed, {len(skipped)} skipped: {', '.join(skipped)}")
     else:
         print("\n✨ All client setup examples completed!")
-
     print("\n💡 Choose the setup method that best fits your use case:")
     print("   - Basic: Simple applications")
-    print("   - Environment: Docker/cloud deployments")
+    print("   - Explicit key: Keys loaded from a secrets store")
     print("   - Custom: Specific requirements")
-    print("   - Production: High-scale applications")
+    print("   - Production: Shared rate-limit state across processes (needs Redis)")
     print("   - Test: Unit/integration testing")
-
-    return 1 if failed else 0
+    return 0
 
 
 if __name__ == "__main__":

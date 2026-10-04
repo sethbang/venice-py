@@ -1,37 +1,61 @@
 #!/usr/bin/env python3
 """
-Venice AI SDK - Multi-Layer Image Editing
-=========================================
+Venice AI SDK - Multi-Image Editing
+===================================
 
-This example demonstrates how to use the Venice AI SDK's most advanced image
-editing endpoint: ``client.image.multi_edit()``.  Unlike the single-image
-``edit()`` method, ``multi_edit()`` accepts up to **three layered inputs**
-(base image + up to two overlay layers) and composites them according to a
-text prompt.
+This example demonstrates ``client.image.multi_edit()``. Unlike the
+single-image ``edit()`` method, ``multi_edit()`` accepts up to **three input
+images** (``image``, ``image_2``, ``image_3``) plus a text prompt. The first
+image is the base; the others are references the model draws on. It is
+prompt-driven editing, not pixel compositing: the model decides how to
+combine the inputs from the instruction and may invent new detail.
 
-The ``multi_edit()`` method returns raw image **bytes** — save the result with
-``open("output.png", "wb")``.
+Only edit models whose ``constraints.combineImages`` is true accept more than
+one image, so the multi-image demos select their model with
+``client.models.resolve_inpaint(require_combine_images=True, prefer="cheapest")``,
+the lowest-priced model that qualifies.
+
+Three input images are generated once (a desert, a night sky and a set of
+lanterns) and reused by every demo.
+
+``multi_edit()`` returns raw image **bytes**; the examples save them with the
+extension detected from the bytes. Outputs are written to
+``examples/results/``.
 """
 
 import asyncio
 import sys
 from pathlib import Path
 
-from venice_ai import VeniceClient, detect_image_format
+from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
+from venice_ai.types.api import InpaintModelSpec
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import generate_base_image as _generate_base_image
+from _helpers import (  # noqa: E402
+    SKIPPED,
+    catalog_price_usd,
+    generate_base_image,
+    image_dimensions,
+    save_image,
+)
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Accumulator of files that were actually written to disk, in write order.
-# Each demo appends to this immediately after a successful ``f.write()`` so the
-# end-of-run summary reflects exactly what hit disk — with real extensions —
-# even when a demo fails partway through.
-WRITTEN: list[str] = []
+
+def _save(data: bytes, stem: str, written: list[Path]) -> None:
+    path = save_image(RESULTS_DIR / stem, data)
+    written.append(path)
+    width, height = image_dimensions(data)
+    print(f"   💾 {path.name}: {width}x{height}, {len(data)} bytes")
+
+
+async def _quote(client: VeniceClient, model: str, input_images: int) -> None:
+    spec = (await client.models.get(model)).model_spec
+    price = catalog_price_usd(spec, input_images=input_images)
+    if price is not None:
+        print(f"💰 Catalog price with {input_images} input image(s): ${price:.2f}")
 
 
 # ---------------------------------------------------------------------------
@@ -39,221 +63,105 @@ WRITTEN: list[str] = []
 # ---------------------------------------------------------------------------
 
 
-async def basic_multi_edit() -> bool:
-    """Use multi_edit() with a single image and prompt (simplest case).
-
-    Returns ``True`` on success, ``False`` if the API call failed.
-    """
+async def basic_multi_edit(client: VeniceClient, desert: bytes, written: list[Path]) -> bool:
+    """Use multi_edit() with a single image and prompt (simplest case)."""
     print("🔀 Basic Multi-Edit (Single Image)")
     print("-" * 30)
 
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            # Step 1 — generate a base image
-            print("🎨 Generating base image …")
-            base_bytes = await _generate_base_image(
-                client,
-                "A sunlit park with a stone fountain and tall oak trees",
-            )
+    model = await client.models.resolve_inpaint(prefer="cheapest")
+    print(f"📍 Using edit model: {model}")
+    await _quote(client, model, 1)
 
-            base_path = str(
-                RESULTS_DIR / f"multi_edit_base_park.{detect_image_format(base_bytes)[0]}"
-            )
-            with open(base_path, "wb") as f:
-                f.write(base_bytes)
-            WRITTEN.append(base_path)
-            print(f"💾 Base image saved: {base_path} ({len(base_bytes)} bytes)")
+    try:
+        print("🔀 Applying multi-edit: a camel caravan …")
+        edited = await client.image.multi_edit(
+            prompt="Add a camel caravan walking along the crest of the dunes",
+            model=model,
+            image=desert,
+        )
+    except VeniceError as e:
+        print(f"❌ Error: {e}")
+        return False
 
-            # Step 2 — select an inpaint / edit model
-            inpaint_model = await client.models.resolve_inpaint()
-            print(f"📍 Using edit model: {inpaint_model}")
-
-            # Step 3 — multi-edit with just one image + prompt
-            # This is similar to edit() but uses the multi-edit endpoint.
-            print("🔀 Applying multi-edit: adding autumn foliage …")
-            edited_bytes = await client.image.multi_edit(
-                prompt="Transform the trees to show vibrant autumn foliage with orange and red leaves",
-                model=inpaint_model,
-                image=base_bytes,
-            )
-
-            out_path = str(
-                RESULTS_DIR / f"multi_edit_autumn.{detect_image_format(edited_bytes)[0]}"
-            )
-            with open(out_path, "wb") as f:
-                f.write(edited_bytes)
-            WRITTEN.append(out_path)
-            print(f"✅ Edited image saved: {out_path} ({len(edited_bytes)} bytes)")
-
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            print("💡 Note: Multi-edit requires appropriate API access")
-            ok = False
-
-    return ok
+    _save(edited, "multi_edit_caravan", written)
+    return True
 
 
 # ---------------------------------------------------------------------------
-# 2. Two-layer editing
+# 2. Two input images
 # ---------------------------------------------------------------------------
 
 
-async def two_layer_editing() -> bool:
-    """Combine two generated images using multi_edit().
-
-    Returns ``True`` on success, ``False`` if the API call failed.
-    """
-    print("\n🖼️  Two-Layer Editing")
+async def two_image_editing(
+    client: VeniceClient, model: str, desert: bytes, sky: bytes, written: list[Path]
+) -> bool:
+    """Combine two images with one prompt."""
+    print("\n🖼️  Two-Image Editing")
     print("-" * 30)
+    print(f"📍 Using multi-image edit model: {model}")
+    await _quote(client, model, 2)
 
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            # Generate two base images
-            print("🎨 Generating layer 1: landscape …")
-            layer1_bytes = await _generate_base_image(
-                client,
-                "A dramatic desert landscape with sand dunes at golden hour",
-            )
-            layer1_path = str(
-                RESULTS_DIR / f"multi_edit_layer1_desert.{detect_image_format(layer1_bytes)[0]}"
-            )
-            with open(layer1_path, "wb") as f:
-                f.write(layer1_bytes)
-            WRITTEN.append(layer1_path)
-            print(f"💾 Layer 1 saved: {layer1_path}")
+    try:
+        print("🔀 Combining the two images …")
+        combined = await client.image.multi_edit(
+            prompt=(
+                "Put the starry night sky from the second image above the desert "
+                "dunes of the first image, creating a twilight scene"
+            ),
+            model=model,
+            image=desert,
+            image_2=sky,
+        )
+    except VeniceError as e:
+        print(f"❌ Error: {e}")
+        return False
 
-            print("🎨 Generating layer 2: sky overlay …")
-            layer2_bytes = await _generate_base_image(
-                client,
-                "A starry night sky with the Milky Way and shooting stars",
-            )
-            layer2_path = str(
-                RESULTS_DIR / f"multi_edit_layer2_sky.{detect_image_format(layer2_bytes)[0]}"
-            )
-            with open(layer2_path, "wb") as f:
-                f.write(layer2_bytes)
-            WRITTEN.append(layer2_path)
-            print(f"💾 Layer 2 saved: {layer2_path}")
-
-            # Select an inpaint model
-            inpaint_model = await client.models.resolve_inpaint()
-            print(f"📍 Using edit model: {inpaint_model}")
-
-            # Combine the two images with multi_edit()
-            print("🔀 Compositing two layers …")
-            composited = await client.image.multi_edit(
-                prompt="Blend the desert landscape with the starry night sky, creating a magical twilight scene",
-                model=inpaint_model,
-                image=layer1_bytes,
-                image_2=layer2_bytes,
-            )
-
-            out_path = str(
-                RESULTS_DIR / f"multi_edit_two_layer.{detect_image_format(composited)[0]}"
-            )
-            with open(out_path, "wb") as f:
-                f.write(composited)
-            WRITTEN.append(out_path)
-            print(f"✅ Composited image saved: {out_path} ({len(composited)} bytes)")
-
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            ok = False
-
-    return ok
+    _save(combined, "multi_edit_two_images", written)
+    return True
 
 
 # ---------------------------------------------------------------------------
-# 3. Three-layer composition
+# 3. Three input images
 # ---------------------------------------------------------------------------
 
 
-async def three_layer_composition() -> bool:
-    """Demonstrate full three-layer compositing with multi_edit().
-
-    Returns ``True`` on success, ``False`` if the API call failed.
-    """
-    print("\n🎭 Three-Layer Composition")
+async def three_image_composition(
+    client: VeniceClient,
+    model: str,
+    desert: bytes,
+    sky: bytes,
+    lanterns: bytes,
+    written: list[Path],
+) -> bool:
+    """Combine three images into one scene."""
+    print("\n🎭 Three-Image Composition")
     print("-" * 30)
+    print(f"📍 Using multi-image edit model: {model}")
+    await _quote(client, model, 3)
 
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            # Generate three base images
-            print("🎨 Generating layer 1: background environment …")
-            bg_bytes = await _generate_base_image(
-                client,
-                "A misty enchanted forest with ancient trees and soft green light",
-            )
-            bg_path = str(RESULTS_DIR / f"multi_edit_layer_bg.{detect_image_format(bg_bytes)[0]}")
-            with open(bg_path, "wb") as f:
-                f.write(bg_bytes)
-            WRITTEN.append(bg_path)
-            print(f"💾 Background saved: {bg_path}")
+    try:
+        print("🔀 Combining three images into a single scene …")
+        final = await client.image.multi_edit(
+            prompt=(
+                "Merge these three images into one night scene: the desert dunes "
+                "from the first image, the starry sky from the second above them, "
+                "and the glowing lanterns from the third floating over the sand"
+            ),
+            model=model,
+            image=desert,
+            image_2=sky,
+            image_3=lanterns,
+        )
+    except VeniceError as e:
+        print(f"❌ Error: {e}")
+        return False
 
-            print("🎨 Generating layer 2: mid-ground element …")
-            mid_bytes = await _generate_base_image(
-                client,
-                "A crystal-clear woodland stream with mossy rocks and ferns",
-            )
-            mid_path = str(
-                RESULTS_DIR / f"multi_edit_layer_mid.{detect_image_format(mid_bytes)[0]}"
-            )
-            with open(mid_path, "wb") as f:
-                f.write(mid_bytes)
-            WRITTEN.append(mid_path)
-            print(f"💾 Mid-ground saved: {mid_path}")
-
-            print("🎨 Generating layer 3: foreground accent …")
-            fg_bytes = await _generate_base_image(
-                client,
-                "Glowing fireflies and magical floating lanterns in a dark scene",
-            )
-            fg_path = str(RESULTS_DIR / f"multi_edit_layer_fg.{detect_image_format(fg_bytes)[0]}")
-            with open(fg_path, "wb") as f:
-                f.write(fg_bytes)
-            WRITTEN.append(fg_path)
-            print(f"💾 Foreground saved: {fg_path}")
-
-            # Select inpaint model
-            inpaint_model = await client.models.resolve_inpaint()
-            print(f"📍 Using edit model: {inpaint_model}")
-
-            # Three-layer composition
-            print("🔀 Compositing three layers into a single scene …")
-            final = await client.image.multi_edit(
-                prompt=(
-                    "Merge these three layers into a cohesive enchanted forest scene: "
-                    "the misty forest as the background, the stream as the mid-ground, "
-                    "and the glowing fireflies scattered throughout the foreground"
-                ),
-                model=inpaint_model,
-                image=bg_bytes,
-                image_2=mid_bytes,
-                image_3=fg_bytes,
-            )
-
-            out_path = str(RESULTS_DIR / f"multi_edit_three_layer.{detect_image_format(final)[0]}")
-            with open(out_path, "wb") as f:
-                f.write(final)
-            WRITTEN.append(out_path)
-            print(f"✅ Final composition saved: {out_path} ({len(final)} bytes)")
-
-            # Show the full parameter recap
-            print("\n📋 Parameters used:")
-            print("   • image   → enchanted forest (background)")
-            print("   • image_2 → woodland stream (mid-ground)")
-            print("   • image_3 → fireflies / lanterns (foreground)")
-            print("   • prompt  → merge instruction")
-            print("   • model   → inpaint model")
-
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            ok = False
-
-    return ok
+    _save(final, "multi_edit_three_images", written)
+    print("\n📋 Inputs:")
+    print("   • image   → desert dunes (base)")
+    print("   • image_2 → starry night sky")
+    print("   • image_3 → floating lanterns")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -261,68 +169,39 @@ async def three_layer_composition() -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def model_selection() -> bool:
-    """Discover and choose models compatible with multi-edit.
+async def model_selection(client: VeniceClient) -> bool:
+    """Show which edit models accept several images and which one is selected.
 
-    Returns ``True`` on success, ``False`` if the API call failed.
+    This demo only reads the catalog; the two- and three-image demos make the
+    paid edits with the model selected here.
     """
     print("\n🔍 Model Selection for Multi-Edit")
     print("-" * 30)
 
-    ok = True
-    async with VeniceClient() as client:
-        try:
-            # List available inpaint / edit models (multi-edit uses the same pool)
-            inpaint_models_response = await client.models.list(type="inpaint")
-            inpaint_model_ids = [m.id for m in inpaint_models_response.data]
-            print(f"🎨 Available inpaint/edit models ({len(inpaint_model_ids)}):")
-            for model_id in inpaint_model_ids:
-                print(f"   • {model_id}")
+    listing = await client.models.list(type="inpaint")
+    multi = []
+    single = []
+    for entry in listing.data:
+        spec = entry.model_spec
+        if isinstance(spec, InpaintModelSpec) and spec.constraints is not None:
+            (multi if spec.constraints.combineImages else single).append(entry.id)
+    print(f"🎨 Edit models that accept several images ({len(multi)}):")
+    for model_id in multi:
+        print(f"   • {model_id}")
+    print(f"🚫 Single-image only ({len(single)}): {', '.join(single) or 'none'}")
 
-            # Auto-select the best available model
-            default_model = await client.models.resolve_inpaint()
-            print(f"\n📍 Auto-selected model: {default_model}")
-
-            # Try preferred models in order. A missing preferred model is an
-            # expected, handled condition — it must not fail this demo.
-            preferred = ["flux-2-max-edit", "gpt-image-1-5-edit"]
-            try:
-                preferred_model = await client.models.resolve_inpaint(
-                    preferred_models=preferred,
-                )
-                print(f"⭐ Preferred model selected: {preferred_model}")
-            except ValueError:
-                print("⚠️  None of the preferred models are available")
-
-            # Quick demo with the selected model
-            if inpaint_model_ids:
-                print(f"\n🔀 Quick multi-edit demo with {default_model} …")
-                base_bytes = await _generate_base_image(
-                    client,
-                    "A simple wooden table with a white coffee mug",
-                    width=512,
-                    height=512,
-                )
-
-                edited = await client.image.multi_edit(
-                    prompt="Add steam rising from the mug and a plate of cookies beside it",
-                    model=default_model,
-                    image=base_bytes,
-                )
-
-                out_path = str(
-                    RESULTS_DIR / f"multi_edit_model_demo.{detect_image_format(edited)[0]}"
-                )
-                with open(out_path, "wb") as f:
-                    f.write(edited)
-                WRITTEN.append(out_path)
-                print(f"✅ Saved: {out_path} ({len(edited)} bytes)")
-
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            ok = False
-
-    return ok
+    try:
+        catalog_pick = await client.models.resolve_inpaint(require_combine_images=True)
+        cheapest = await client.models.resolve_inpaint(
+            require_combine_images=True, prefer="cheapest"
+        )
+    except NoMatchingModelError as e:
+        print(f"❌ No multi-image edit model is available: {e}")
+        return False
+    print(f"\n📍 require_combine_images=True → {catalog_pick} (catalog order)")
+    print(f"📍 require_combine_images=True, prefer='cheapest' → {cheapest}")
+    await _quote(client, cheapest, 2)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -333,19 +212,54 @@ async def model_selection() -> bool:
 async def main() -> int:
     """Run all multi-edit examples.
 
-    Returns ``0`` only if every demo succeeded, ``1`` otherwise, so a real API
-    failure surfaces as a non-zero process exit instead of being masked by the
-    success banner.
+    Returns ``0`` only if every demo succeeded, ``1`` if any failed, and ``77``
+    if no catalog edit model combines several images or no image model is
+    sized by width/height.
     """
-    print("🚀 Venice AI Multi-Layer Image Editing Examples")
+    print("🚀 Venice AI Multi-Image Editing Examples")
     print("=" * 50)
 
-    results: list[tuple[str, bool]] = [
-        ("basic_multi_edit", await basic_multi_edit()),
-        ("two_layer_editing", await two_layer_editing()),
-        ("three_layer_composition", await three_layer_composition()),
-        ("model_selection", await model_selection()),
-    ]
+    written: list[Path] = []
+    async with VeniceClient() as client:
+        try:
+            multi_model = await client.models.resolve_inpaint(
+                require_combine_images=True, prefer="cheapest"
+            )
+        except NoMatchingModelError as e:
+            print(f"SKIPPED: no edit model in the catalog combines several images ({e})")
+            return SKIPPED
+
+        inputs: dict[str, bytes] = {}
+        try:
+            for name, prompt in [
+                ("desert", "A dramatic desert landscape with sand dunes at golden hour"),
+                ("sky", "A starry night sky with the Milky Way and shooting stars"),
+                ("lanterns", "Glowing paper lanterns floating in a dark scene"),
+            ]:
+                print(f"🎨 Generating input image: {name} …")
+                inputs[name] = await generate_base_image(client, prompt)
+                _save(inputs[name], f"multi_edit_input_{name}", written)
+        except NoMatchingModelError as e:
+            print(f"SKIPPED: no image model in the catalog takes width/height ({e})")
+            return SKIPPED
+        except VeniceError as e:
+            print(f"❌ Could not generate the input images: {e}")
+            return 1
+        desert, sky, lanterns = inputs["desert"], inputs["sky"], inputs["lanterns"]
+        print()
+
+        results: list[tuple[str, bool]] = [
+            ("basic_multi_edit", await basic_multi_edit(client, desert, written)),
+            (
+                "two_image_editing",
+                await two_image_editing(client, multi_model, desert, sky, written),
+            ),
+            (
+                "three_image_composition",
+                await three_image_composition(client, multi_model, desert, sky, lanterns, written),
+            ),
+            ("model_selection", await model_selection(client)),
+        ]
 
     failed = [name for name, ok in results if not ok]
 
@@ -354,22 +268,16 @@ async def main() -> int:
         print(f"⚠️ {len(failed)} of {len(results)} demos failed: {', '.join(failed)}")
     else:
         print("✨ Multi-edit examples completed!")
+        print("\n💡 Key concepts demonstrated:")
+        print("   - Single-image multi-edit (simplest case)")
+        print("   - Two input images (image + image_2)")
+        print("   - Three input images (image + image_2 + image_3)")
+        print("   - resolve_inpaint(require_combine_images=True, prefer='cheapest')")
+        print("   - Self-contained generate → multi-edit workflow")
 
-    print("\n💡 Key concepts demonstrated:")
-    print("   - Single-image multi-edit (simplest case)")
-    print("   - Two-layer compositing (image + image_2)")
-    print("   - Three-layer composition (image + image_2 + image_3)")
-    print("   - Dynamic inpaint model selection")
-    print("   - Self-contained generate → multi-edit workflow")
-
-    # Honest summary: list only the files that were actually written, with the
-    # extensions they were saved under (.webp, .png, …) — never a fixed list.
-    print("\n📁 Generated files in examples/results/:")
-    if WRITTEN:
-        for path in WRITTEN:
-            print(f"   - {path}")
-    else:
-        print("   (no files written)")
+    print(f"\n📁 Files written by this run ({len(written)}):")
+    for path in written:
+        print(f"   - {path.name}")
 
     return 1 if failed else 0
 
