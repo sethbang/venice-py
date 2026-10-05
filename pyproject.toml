@@ -187,7 +187,7 @@ hypothesis = "^6.155.1"
 # pip removed - Poetry manages pip itself, no need to pin it as a dev dependency
 # This also resolves GHSA-4xh5-x5gv-qwph vulnerability from pinned pip 25.2
 setuptools = "^84.0.0"
-pyflakes = "^3.4.0"
+pyflakes = ">=3.4,<5.0"
 pyright = "^1.1.0"
 cyclonedx-bom = "^7.0.0"
 
