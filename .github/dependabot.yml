@@ -55,6 +55,12 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      # Groups only cover version updates unless applies-to says otherwise,
+      # so without this every security fix arrives as its own lockfile PR.
+      python-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # Docs site (Docusaurus). Its tree is ~1,300 packages, almost all of them
   # transitive under @docusaurus/*, so the groups below keep a weekly run from
@@ -87,6 +93,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      website-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
