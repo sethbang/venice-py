@@ -47,6 +47,14 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      # Everything the groups above miss. Each pip update rewrites poetry.lock,
+      # so separate PRs conflict with one another; majors still arrive alone.
+      python-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # Docs site (Docusaurus). Its tree is ~1,300 packages, almost all of them
   # transitive under @docusaurus/*, so the groups below keep a weekly run from
