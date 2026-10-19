@@ -85,7 +85,7 @@ cryptography = { version = ">=46.0.0,<51.0.0", optional = true } # secp256k1 ECD
 # stays at 46 deliberately: CVE-2026-69247 (fixed in 50.0.0) is a Bleichenbacher oracle in PKCS#7 EnvelopedData decryption,
 # an API this SDK never calls, so requiring 50 would narrow platform support without closing a reachable hole.
 # Full client-side Intel TDX attestation verification — install with pip install venice-py[e2ee-verify]
-dcap-qvl = { version = "^0.6.1", optional = true }      # Phala pure-Rust DCAP TDX quote verifier
+dcap-qvl = { version = ">=0.6.1,<0.8.0", optional = true }      # Phala pure-Rust DCAP TDX quote verifier
 
 [tool.poetry.extras]
 observability = ["opentelemetry-api", "opentelemetry-sdk"]
