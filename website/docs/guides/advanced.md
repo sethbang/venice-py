@@ -396,3 +396,51 @@ VCRpy tests for x402 endpoints use a deterministic throwaway key (never
 funded, publicly known in the test suite). The root conftest scrubs
 `X-Sign-In-With-X` and `X-402-Payment` from every recorded cassette via
 `filter_headers`, so signed tokens never land on disk.
+
+## Responses API (beta)
+
+`client.responses.create()` wraps `POST /responses`, which accepts requests in
+OpenAI's Responses format. Most OpenAI models are served natively; other
+models, and requests that use Venice features such as web search, go through a
+translation layer onto Chat Completions. The
+`x-venice-responses-lane` response header says which mode served a call.
+Venice stores nothing, so send the full conversation in `input` every time.
+
+```python
+from venice_ai import VeniceClient
+from venice_ai.types.api import ResponsesCustomToolCallOutput, ResponsesMessageOutput
+
+async with VeniceClient() as client:
+    model = await client.models.resolve_chat()
+    response = await client.responses.create(
+        model=model,
+        input="Rename the helper to parse_rows.",
+        instructions="Use the apply_patch tool for every edit.",
+        tools=[{"type": "custom", "name": "apply_patch", "description": "Apply a unified diff"}],
+        tool_choice={"type": "custom", "name": "apply_patch"},
+        parallel_tool_calls=False,
+    )
+    for block in response.output:
+        if isinstance(block, ResponsesCustomToolCallOutput):
+            print(block.name, block.input)
+        elif isinstance(block, ResponsesMessageOutput):
+            print("".join(part.text for part in block.content))
+```
+
+| Parameter | Notes |
+| - | - |
+| `instructions` | System instructions, applied before `input`. |
+| `parallel_tool_calls` | Whether the model may call more than one tool per turn. |
+| `prompt_cache_retention` | `"in_memory"`, `"default"`, `"24h"`, or `"extended"`, for supported OpenAI models. |
+| `tools` | Dicts, the shared `Tool` model, `ResponsesFunctionTool` (adds `defer_loading`), or a client-executed `ResponsesToolSearchTool`. |
+| `tool_choice` | `"auto"`, `"none"`, `"required"`, `{"type": "function" \| "custom", "name": ..., "namespace": ...}`, or `{"type": "function", "function": {"name": ...}}`. |
+
+`response.output` holds typed blocks: `ResponsesReasoningOutput`,
+`ResponsesMessageOutput`, `ResponsesFunctionCallOutput`,
+`ResponsesCustomToolCallOutput`, `ResponsesToolSearchCallOutput`, and
+`ResponsesWebSearchCallOutput`. A block type the SDK does not model parses as
+`ResponsesUnknownOutput` with its fields kept. Reply to tool calls by appending
+the output blocks (as dicts) and a result item to `input`:
+`function_call_output`, `custom_tool_call_output`
+(`ResponsesInputCustomToolCallOutput`), or `tool_search_output`
+(`ResponsesInputToolSearchOutput`).

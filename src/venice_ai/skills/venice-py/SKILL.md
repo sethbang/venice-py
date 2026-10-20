@@ -208,6 +208,9 @@ async with VeniceClient() as client:
 public URL. Supported: PDF, EPUB, DOCX, PPTX, XLSX/XLS, txt, md, csv, json, and
 most source-code files. The builder chains `.text()` / `.image()` / `.audio()` /
 `.video()` / `.file()` parts and `.build()` returns the `UserMessage`.
+`.image(url, detail="low")` sets the image detail level (`"auto"`, `"low"`,
+`"high"`, `"original"`); explicit `"high"` may cost more image tokens, and
+`detail` is omitted from the request when unset.
 
 ## Discovering model capabilities & lifecycle
 
@@ -336,7 +339,7 @@ To catch these patterns automatically in user code, run **`venice-py lint <path>
 - `references/structured-output.md` — nested models, validation failures, manual JSON Schema
 - `references/headers-and-metadata.md` — full table of `_response` properties
 - `references/migration-v1-to-v2.md` — full v2 breaking-change list with rationale
-- `references/responses-api.md` — alpha `client.responses` (OpenAI-compat)
+- `references/responses-api.md` — beta `client.responses` (OpenAI Responses format)
 - `references/characters-and-augment.md` — `client.characters`, `client.augment.search/scrape/parse_text`
 - `references/response-shapes.md` — where fields actually live (`model_spec` per type, billing balance nesting, augment results, audio response, etc.)
 - `references/billing.md` — `client.billing.*` (`get_balance`, `get_usage_history`, `iter_usage_history`, `iter_usage_history_csv`, beta analytics)

@@ -24,6 +24,7 @@ response = await client.image.create(
     lora_strength=None,                      # int | None
     resolution=None,                         # str | None — "1K"/"2K"/"4K" tier on resolution-priced models
     quality=None,                            # "low"|"medium"|"high"|None — quality-aware models (GPT Image 2)
+    transparent_background=None,             # bool | None — alpha background; png/webp only, capable models only
     return_binary=False,                     # bool — True returns raw bytes instead of response
     safe_mode=None,                          # bool | None
     seed=None,                               # int | None — for reproducibility
@@ -36,6 +37,7 @@ saved = response.save_all(Path("./out"), prefix="izakaya", overwrite=True)
 
 Key parameters:
 - **`num_images`** (NOT `n=`) — Venice uses `num_images`. OpenAI uses `n=`. The lint script flags `n=` if you leave it in.
+- **`response.content_policy_violation_count`** — when set, that many requested variants were dropped because the provider refused them under its content policy, so `response.images` holds fewer entries than `num_images`. `None` when nothing was dropped.
 - **`return_binary=True`** — returns `bytes` directly instead of `ImageGenerationResponse`. Useful for streaming or piping to another service without saving to disk.
 - **`format`** — request a specific output format. Default lets the model decide; many fast models return WebP.
 - **`style_preset`** — preset name from the live catalog. See `list_styles()`.
@@ -102,6 +104,7 @@ edited = await client.image.edit(
     aspect_ratio=None,                       # "1:1"/"16:9"/... — model-dependent
     safe_mode=None,                          # bool | None — None uses the server default
     resolution=None,                         # "1K"/"2K"/"4K" — resolution-priced models only
+    transparent_background=None,             # bool | None — alpha background; capable models only
     timeout=None,                            # float seconds | aiohttp.ClientTimeout — raise for big edits
 )
 # edit() returns raw bytes — write them yourself.
@@ -149,6 +152,7 @@ image_bytes = await client.image.multi_edit(
     image_3=None,
     resolution=None,                         # "1K"/"2K"/"4K" — same semantics as edit()
     safe_mode=None,
+    transparent_background=None,             # bool | None — same semantics as edit()
 )
 # multi_edit takes a SINGLE prompt and up to three images (image / image_2 / image_3),
 # NOT lists of images/prompts. It returns raw bytes.
@@ -196,6 +200,32 @@ response = await client.image.create(
     style_preset="anime",                    # from the catalog
 )
 ```
+
+## Transparent backgrounds
+
+`create()`, `edit()` and `multi_edit()` take `transparent_background=True` to
+return the image with an alpha channel. Only models whose constraints set
+`supportsTransparentBackground` accept it, and the output must be PNG or WebP;
+the server rejects the request otherwise. Resolve a capable model rather than
+naming one:
+
+```python
+model = await client.models.resolve_image(require_transparent_background=True)
+response = await client.image.create(
+    model=model, prompt="A ceramic mug, product shot", format="png", transparent_background=True
+)
+
+edit_model = await client.models.resolve_inpaint(require_transparent_background=True)
+cutout = await client.image.edit(
+    model=edit_model, image="photo.jpg", prompt="Isolate the mug", transparent_background=True
+)
+```
+
+On `edit()` and `multi_edit()`, leaving `output_format` unset yields PNG when
+`transparent_background=True`. On `simple_generate()` (OpenAI-compatible), the
+equivalent is `background="transparent"` with `output_format="png"` or
+`"webp"`. To cut the background out of an existing image with any model, use
+`background_remove()` below.
 
 ## Background removal
 

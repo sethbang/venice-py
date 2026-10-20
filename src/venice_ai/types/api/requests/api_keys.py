@@ -2,9 +2,9 @@
 API key management request models for Venice.ai API.
 """
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from ...._date_validation import validate_expires_at as validate_expires_at_format
 from .common import ConsumptionLimit
@@ -12,6 +12,15 @@ from .common import ConsumptionLimit
 # ============================================================================
 # API Keys Request Models
 # ============================================================================
+
+_IP_ALLOWLIST_DESCRIPTION = (
+    "Globally reachable IPv4 or IPv6 addresses and CIDR subnets allowed to use "
+    "this key (at most 100 entries, each at most 64 characters), e.g. "
+    "``['11.22.33.44', '11.22.33.0/24', '2a00:1::/48']``. An empty list allows "
+    "requests from any IP address, as does omitting the field."
+)
+
+_IpAllowlistEntry = Annotated[str, StringConstraints(max_length=64)]
 
 
 class CreateApiKeyRequest(BaseModel):
@@ -32,6 +41,11 @@ class CreateApiKeyRequest(BaseModel):
     expiresAt: str | None = Field(
         default=None, description="Expiration date (ISO format, date, or empty string)"
     )
+    ipAllowlist: list[_IpAllowlistEntry] | None = Field(
+        default=None, max_length=100, description=_IP_ALLOWLIST_DESCRIPTION
+    )
+
+    model_config = ConfigDict(extra="forbid")
 
     @field_validator("expiresAt")
     @classmethod
@@ -65,7 +79,18 @@ class UpdateApiKeyRequest(BaseModel):
         default=None, description="Period over which the consumption limit resets"
     )
 
-    model_config = ConfigDict(populate_by_name=True)
+    ipAllowlist: list[_IpAllowlistEntry] | None = Field(
+        default=None,
+        max_length=100,
+        description=(
+            "Replacement IP allowlist: globally reachable IPv4 or IPv6 addresses "
+            "and CIDR subnets allowed to use this key (at most 100 entries). An "
+            "empty list removes the restriction so any IP address may use the "
+            "key. Omit to leave the key's current allowlist unchanged."
+        ),
+    )
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     @field_validator("expiresAt")
     @classmethod
@@ -100,6 +125,11 @@ class Web3CreateApiKeyRequest(BaseModel):
         default=None, description="Period over which the consumption limit resets"
     )
     expiresAt: str | None = Field(default=None, description="Expiration date")
+    ipAllowlist: list[_IpAllowlistEntry] | None = Field(
+        default=None, max_length=100, description=_IP_ALLOWLIST_DESCRIPTION
+    )
+
+    model_config = ConfigDict(extra="forbid")
 
 
 # ============================================================================

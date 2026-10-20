@@ -40,3 +40,23 @@ def test_simple_image_generation_response_stays_strict():
         SimpleImageGenerationResponse.model_validate(
             {"created": 1, "data": [], "an_unexpected_field": True}
         )
+
+
+def test_content_policy_violation_count_is_typed():
+    resp = ImageGenerationResponse.model_validate(
+        {
+            "id": "img-1",
+            "images": ["YmFzZTY0"],
+            "timing": _TIMING,
+            "content_policy_violation_count": 2,
+        }
+    )
+    assert resp.content_policy_violation_count == 2
+    assert "content_policy_violation_count" not in (resp.model_extra or {})
+
+
+def test_content_policy_violation_count_defaults_to_none():
+    resp = ImageGenerationResponse.model_validate(
+        {"id": "img-1", "images": ["YmFzZTY0"], "timing": _TIMING}
+    )
+    assert resp.content_policy_violation_count is None

@@ -132,6 +132,11 @@ CLOSED_ENUM_EXEMPTIONS: dict[str, str] = {
     "venice_ai.core.models.common.VeniceParameters.enable_web_search": (
         "request-side parameters model; a typo must fail before the request is sent"
     ),
+    "venice_ai.core.models.common.ImageUrl.detail": (
+        "request content part; a typo must fail before the request is sent. The "
+        "chat response schema carries no image parts, and ChatMessage reuses "
+        "ImageContent only so message history can be passed back in"
+    ),
     "venice_ai.types.api.audio.VoiceDetail.gender": (
         "derived client-side from the voice ID prefix, never read from the server"
     ),

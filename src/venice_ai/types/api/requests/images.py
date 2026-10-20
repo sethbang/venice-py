@@ -151,6 +151,16 @@ class ImageGenerationRequest(BaseModel):
             "supported by models with ``supportsStyleReferences``."
         ),
     )
+    transparent_background: bool | None = Field(
+        default=None,
+        description=(
+            "Return the image with a transparent background (alpha channel). Only "
+            "supported by models whose constraints set ``supportsTransparentBackground`` "
+            "and only with ``format`` ``png`` or ``webp``; the server rejects the "
+            "request otherwise. Omit or pass ``False`` to keep the model's default "
+            "background."
+        ),
+    )
 
     anon_user_id: AnonUserId | None = Field(
         default=None,
@@ -204,7 +214,14 @@ class SimpleImageGenerationRequest(BaseModel):
         default="natural", description="Style setting (compatibility only)"
     )
     background: Literal["transparent", "opaque", "auto"] | None = Field(
-        default="auto", description="Background setting (compatibility only)"
+        default="auto",
+        description=(
+            "``transparent`` returns the image with a transparent background "
+            "(alpha channel). Only supported by models whose constraints set "
+            "``supportsTransparentBackground`` and with ``output_format`` ``png`` "
+            "or ``webp``; the server rejects the request otherwise. ``auto``, "
+            "``opaque`` and ``None`` keep the model's default background."
+        ),
     )
     moderation: Literal["low", "auto"] | None = Field(
         default="auto", description="Moderation level (auto = safe mode on)"
@@ -302,7 +319,8 @@ class ImageEditRequest(BaseModel):
         default=None,
         description=(
             "Output format for the edited image. When omitted, the format is "
-            "inferred from resolution (PNG for 1K edits, JPEG for 2K/4K edits)."
+            "inferred from resolution (PNG for 1K edits, JPEG for 2K/4K edits), "
+            "or PNG at any resolution when ``transparent_background`` is true."
         ),
     )
     enhance_prompt: bool | None = Field(
@@ -321,6 +339,17 @@ class ImageEditRequest(BaseModel):
             "Skip the model's prompt-optimization thinking step for faster "
             "generation. Supported only by models that advertise it; ignored "
             "rather than rejected by the rest. Omit for the model default."
+        ),
+    )
+    transparent_background: bool | None = Field(
+        default=None,
+        description=(
+            "Return the edited image with a transparent background (alpha "
+            "channel). Only supported by models whose constraints set "
+            "``supportsTransparentBackground``; when set, ``output_format`` must "
+            "be ``png`` or ``webp`` (or omitted, which then defaults to PNG). "
+            "The server rejects the request otherwise. Omit or pass ``False`` "
+            "to keep the model's default background."
         ),
     )
 
@@ -399,7 +428,8 @@ class ImageMultiEditRequest(BaseModel):
         default=None,
         description=(
             "Output format for the edited image. When omitted, the format is "
-            "inferred from resolution (PNG for 1K edits, JPEG for 2K/4K edits)."
+            "inferred from resolution (PNG for 1K edits, JPEG for 2K/4K edits), "
+            "or PNG at any resolution when ``transparent_background`` is true."
         ),
     )
     quality: Literal["low", "medium", "high"] | None = Field(
@@ -430,6 +460,17 @@ class ImageMultiEditRequest(BaseModel):
             "Skip the model's prompt-optimization thinking step for faster "
             "generation. Supported only by models that advertise it; ignored "
             "rather than rejected by the rest. Omit for the model default."
+        ),
+    )
+    transparent_background: bool | None = Field(
+        default=None,
+        description=(
+            "Return the edited image with a transparent background (alpha "
+            "channel). Only supported by models whose constraints set "
+            "``supportsTransparentBackground``; when set, ``output_format`` must "
+            "be ``png`` or ``webp`` (or omitted, which then defaults to PNG). "
+            "The server rejects the request otherwise. Omit or pass ``False`` "
+            "to keep the model's default background."
         ),
     )
 

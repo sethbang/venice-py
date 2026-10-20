@@ -577,7 +577,7 @@ Rate limiting, distributed state, monitoring, observability, and performance tun
 | Resource | Purpose | Key Methods | Example |
 |----------|---------|-------------|---------|
 | `chat.completions` | Chat & text generation | `create()` | [simple_chat.py](https://github.com/sethbang/venice-py/blob/main/examples/chat/simple_chat.py) |
-| `responses` | Stateless multi-modal generation (Alpha) | `create()` | — |
+| `responses` | OpenAI Responses-format API (beta) | `create()` | [responses_api.py](https://github.com/sethbang/venice-py/blob/main/examples/responses/responses_api.py) |
 | `image` | Image generation | `create()`, `background_remove()` | [text_to_image.py](https://github.com/sethbang/venice-py/blob/main/examples/image/text_to_image.py) |
 | `video` | Async video generation | `run()` → `VideoJob`, low-level `submit()` / `quote()` / `retrieve()` / `cancel()` | [text_to_video.py](https://github.com/sethbang/venice-py/blob/main/examples/video/text_to_video.py) |
 | `audio` | TTS / ASR | `create_speech()`, `transcribe()` | [text_to_speech.py](https://github.com/sethbang/venice-py/blob/main/examples/audio/text_to_speech.py) |

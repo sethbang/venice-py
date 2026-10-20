@@ -2504,3 +2504,54 @@ class TestReferenceAudioUrls:
             "https://example.com/a.mp3",
             "https://example.com/b.mp3",
         ]
+
+
+# ---------------------------------------------------------------------------
+# from-image --image-strength (0-1, omitted unless set)
+# ---------------------------------------------------------------------------
+
+
+class TestFromImageCLIImageStrength:
+    def _invoke(self, tmp_path, extra_args):
+        from venice_ai.cli.cli import cli
+
+        img_file = tmp_path / "test.png"
+        img_file.write_bytes(b"fake png data")
+
+        mock_client = AsyncMock()
+        mock_client.video.submit = AsyncMock(return_value=_make_queue_response("job-strength"))
+
+        with (
+            patch("venice_ai.VeniceClient") as MockClient,
+            patch("venice_ai.cli.config.ensure_api_key", return_value="test-key"),
+            patch("os.makedirs"),
+        ):
+            _setup_client_patch(MockClient, mock_client)
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "video",
+                    "from-image",
+                    str(img_file),
+                    "--model",
+                    "some-i2v-model",
+                    "--no-poll",
+                    *extra_args,
+                ],
+            )
+        return result, mock_client
+
+    def test_image_strength_forwarded(self, tmp_path):
+        result, mock_client = self._invoke(tmp_path, ["--image-strength", "0.6"])
+        assert result.exit_code == 0, result.output
+        assert mock_client.video.submit.call_args[1]["image_strength"] == 0.6
+
+    def test_image_strength_omitted_when_unset(self, tmp_path):
+        result, mock_client = self._invoke(tmp_path, [])
+        assert result.exit_code == 0, result.output
+        assert "image_strength" not in mock_client.video.submit.call_args[1]
+
+    def test_image_strength_out_of_range_rejected(self, tmp_path):
+        result, mock_client = self._invoke(tmp_path, ["--image-strength", "1.5"])
+        assert result.exit_code != 0
+        mock_client.video.submit.assert_not_called()

@@ -9,6 +9,7 @@ Exception Hierarchy::
     │   ├── APIStatusError (HTTP status errors)
     │   ├── AuthenticationError (401 Unauthorized)
     │   ├── PermissionDeniedError (403 Forbidden)
+    │   │   └── ApiKeyIpRestrictedError (403 — source IP not in the key's allowlist)
     │   ├── InvalidRequestError (400 Bad Request)
     │   ├── NotFoundError (404 Not Found)
     │   ├── ModelGoneError (410 Gone — retired/unroutable model)
@@ -152,6 +153,7 @@ __all__ = [
     "APIStatusError",
     "AuthenticationError",
     "PermissionDeniedError",
+    "ApiKeyIpRestrictedError",
     "InvalidRequestError",
     "NotFoundError",
     "ModelGoneError",
@@ -278,6 +280,24 @@ class AuthenticationError(APIError):
 
 class PermissionDeniedError(APIError):
     """Raised for 403 Forbidden errors — authenticated but not authorised."""
+
+
+class ApiKeyIpRestrictedError(PermissionDeniedError):
+    """Raised for a 403 because the request's source IP is not on the API key's
+    IP allowlist.
+
+    The key itself is valid; it was created or updated with an ``ipAllowlist``
+    that does not include the address this request came from. Retrying from
+    the same address fails the same way. Send the request from an allowed
+    address, or widen the key's allowlist with
+    ``client.api_keys.update(id=..., ip_allowlist=[...])`` from a key that is
+    not restricted (``ip_allowlist=[]`` removes the restriction).
+
+    Venice sends no machine-readable ``code`` for this error, so the SDK
+    recognises it from the response message. It subclasses
+    :class:`PermissionDeniedError`, so existing ``except PermissionDeniedError``
+    handlers still catch it.
+    """
 
 
 class InvalidRequestError(APIError):
@@ -905,6 +925,39 @@ def _parse_error_body(body: Any) -> tuple[str | None, str | None, str | None]:
     return detail, code, custom_message
 
 
+_API_KEY_IP_RESTRICTED_MESSAGE = (
+    "This API key is restricted to configured IP addresses, and this "
+    "request's source IP is not allowed"
+)
+"""The ``error`` string Venice sends with a 403 from an IP-restricted API key."""
+
+_API_KEY_IP_RESTRICTED_PREFIX = _API_KEY_IP_RESTRICTED_MESSAGE.split(",", 1)[0].lower()
+
+
+def _is_api_key_ip_restricted(body: Any) -> bool:
+    """Whether a 403 body is Venice's API-key IP allowlist rejection.
+
+    Compares the body's top-level ``error`` string (not the rendered detail,
+    which can carry appended validation reasons) case-insensitively against
+    the stable leading clause of :data:`_API_KEY_IP_RESTRICTED_MESSAGE`. The
+    body may arrive parsed or as raw JSON text.
+    """
+    parsed: Any = body
+    if isinstance(body, str):
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            return False
+    if not isinstance(parsed, dict):
+        return False
+    error = parsed.get("error")
+    if isinstance(error, dict):
+        error = error.get("message") or error.get("detail")
+    if not isinstance(error, str):
+        return False
+    return error.strip().lower().startswith(_API_KEY_IP_RESTRICTED_PREFIX)
+
+
 def _make_status_error(
     message: str | None,
     *,
@@ -983,6 +1036,8 @@ def _make_status_error(
         case 402:
             return _build(PaymentRequiredError)
         case 403:
+            if _is_api_key_ip_restricted(body):
+                return _build(ApiKeyIpRestrictedError)
             return _build(PermissionDeniedError)
         case 404:
             return _build(NotFoundError)

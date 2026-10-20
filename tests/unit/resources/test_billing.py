@@ -55,6 +55,7 @@ def sample_usage_history_response():
                 "units": 100.0,
                 "pricePerUnitUsd": 0.00001,
                 "notes": "LLM inference request",
+                "apiKeyId": "e28e82dc-9df2-4b47-b726-d0a222ef2ab5",
                 "inferenceDetails": {
                     "requestId": "req_123",
                     "promptTokens": 50.0,
@@ -70,6 +71,7 @@ def sample_usage_history_response():
                 "units": 50.0,
                 "pricePerUnitUsd": 0.0002,
                 "notes": "Embedding generation request",
+                "apiKeyId": None,
                 "inferenceDetails": None,
             },
         ],

@@ -349,6 +349,96 @@ class TestInpaintFilters:
 
 
 # ---------------------------------------------------------------------------
+# Transparent background (image and inpaint)
+# ---------------------------------------------------------------------------
+
+# The non-capable model sorts first and carries ``default``; the capable one is
+# last, so only the filter can pick it.
+TRANSPARENT_IMAGE_CATALOG = [
+    _image("z-image-turbo", traits=["default"]),
+    _image("grok-imagine-image-2-0", extra_constraints={"supportsTransparentBackground": False}),
+    _image("gpt-image-2", extra_constraints={"supportsTransparentBackground": True}),
+]
+TRANSPARENT_INPAINT_CATALOG = [
+    _inpaint("luma-uni-1-edit", traits=["default"]),
+    _inpaint("firered-image-edit", combine=False),
+    _inpaint("gpt-image-2-edit", extra_constraints={"supportsTransparentBackground": True}),
+]
+
+
+class TestTransparentBackgroundFilter:
+    def test_constraint_is_typed_on_image_and_inpaint(self) -> None:
+        assert "supportsTransparentBackground" in ImageModelConstraints.model_fields
+        assert "supportsTransparentBackground" in InpaintModelConstraints.model_fields
+
+    async def test_defaults_unchanged(self) -> None:
+        assert await _resource(TRANSPARENT_IMAGE_CATALOG).resolve_image() == "z-image-turbo"
+        assert await _resource(TRANSPARENT_INPAINT_CATALOG).resolve_inpaint() == "luma-uni-1-edit"
+
+    async def test_image_skips_models_without_the_flag(self) -> None:
+        model = await _resource(TRANSPARENT_IMAGE_CATALOG).resolve_image(
+            require_transparent_background=True
+        )
+        assert model == "gpt-image-2"
+
+    async def test_image_via_resolve(self) -> None:
+        model = await _resource(TRANSPARENT_IMAGE_CATALOG).resolve(
+            type="image", require_transparent_background=True
+        )
+        assert model == "gpt-image-2"
+
+    async def test_inpaint_skips_models_without_the_flag(self) -> None:
+        model = await _resource(TRANSPARENT_INPAINT_CATALOG).resolve_inpaint(
+            require_transparent_background=True
+        )
+        assert model == "gpt-image-2-edit"
+
+    async def test_inpaint_via_resolve(self) -> None:
+        model = await _resource(TRANSPARENT_INPAINT_CATALOG).resolve(
+            type="inpaint", require_transparent_background=True
+        )
+        assert model == "gpt-image-2-edit"
+
+    async def test_combines_with_other_inpaint_filters(self) -> None:
+        with pytest.raises(ValueError, match="transparent_background=True"):
+            await _resource(TRANSPARENT_INPAINT_CATALOG).resolve_inpaint(
+                require_transparent_background=True, require_resolution="2K"
+            )
+
+    async def test_preferred_model_cannot_bypass_filter(self) -> None:
+        model = await _resource(TRANSPARENT_IMAGE_CATALOG).resolve_image(
+            require_transparent_background=True, preferred_models=["z-image-turbo"]
+        )
+        assert model == "gpt-image-2"
+
+    async def test_image_no_match_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"image.*transparent_background=True"):
+            await _resource(IMAGE_CATALOG).resolve_image(require_transparent_background=True)
+
+    async def test_inpaint_no_match_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"inpaint.*transparent_background=True"):
+            await _resource(INPAINT_CATALOG).resolve_inpaint(require_transparent_background=True)
+
+    @pytest.mark.parametrize(
+        "catalog,capable,incapable",
+        [
+            (TRANSPARENT_IMAGE_CATALOG, "gpt-image-2", "z-image-turbo"),
+            (TRANSPARENT_INPAINT_CATALOG, "gpt-image-2-edit", "luma-uni-1-edit"),
+        ],
+    )
+    async def test_capabilities_report_the_flag(
+        self, catalog: list[dict[str, Any]], capable: str, incapable: str
+    ) -> None:
+        resource = _resource(catalog)
+        listing = ModelsListResponse.model_validate(
+            {"object": "list", "type": "all", "data": catalog}
+        )
+        resource.list = AsyncMock(return_value=listing)  # type: ignore[method-assign]
+        assert (await resource.get_capabilities(capable)).supports_transparent_background
+        assert not (await resource.get_capabilities(incapable)).supports_transparent_background
+
+
+# ---------------------------------------------------------------------------
 # Video
 # ---------------------------------------------------------------------------
 

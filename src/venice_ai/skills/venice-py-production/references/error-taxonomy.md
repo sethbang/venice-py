@@ -10,6 +10,7 @@ VeniceError                              (base — catch this only as a last res
 │   ├── APIStatusError                   (generic HTTP status error with a status code attached)
 │   ├── AuthenticationError              (401)
 │   ├── PermissionDeniedError            (403)
+│   │   └── ApiKeyIpRestrictedError      (403 — source IP not on the key's ipAllowlist)
 │   ├── InvalidRequestError              (400)
 │   ├── NotFoundError                    (404)
 │   ├── ModelGoneError                   (410 — model retired/unroutable)
@@ -55,6 +56,7 @@ Plus the `VeniceAPIErrorCode` enum (server error code strings) — useful for ma
 |---|---|---|
 | `AuthenticationError` (401) | API key is wrong/missing. Retry won't fix. | Surface to operator. Check `VENICE_API_KEY`. |
 | `PermissionDeniedError` (403) | Account lacks access to this resource/model. | Surface; check ACLs / tier. |
+| `ApiKeyIpRestrictedError` (403) | The key has an IP allowlist and this request's source IP is not on it. Subclass of `PermissionDeniedError`, recognised from the response message (Venice sends no `code`). | Call from an allowed address, or widen the list with `client.api_keys.update(id=..., ip_allowlist=[...])` from an unrestricted key (`ip_allowlist=[]` removes it). |
 | `PaymentRequiredError` (402) | Out of prepaid balance OR x402 endpoint requires payment. | **Top up balance** (see `venice-py-x402`). The 402 body has structured payment instructions. |
 | `InvalidRequestError` (400) | Request body / parameters wrong. | Fix the request. Don't loop. |
 | `NotFoundError` (404) | Resource doesn't exist. | Fix the URL/ID; don't loop. |

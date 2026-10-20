@@ -36,6 +36,7 @@ from .common import (
     FileContent,
     FileObject,
     ImageContent,
+    ImageDetail,
     ImageUrl,
     JSONObjectFormat,
     # Response format components
@@ -86,7 +87,25 @@ from .music import (
     MusicQuoteRequest,
     MusicRetrieveRequest,
 )
-from .responses import ResponsesRequest
+from .responses import (
+    PromptCacheRetention,
+    ResponsesFunctionTool,
+    ResponsesFunctionToolChoice,
+    ResponsesFunctionToolDefinition,
+    ResponsesInputAdditionalTools,
+    ResponsesInputCustomToolCall,
+    ResponsesInputCustomToolCallOutput,
+    ResponsesInputItem,
+    ResponsesInputToolSearchCall,
+    ResponsesInputToolSearchOutput,
+    ResponsesItemStatus,
+    ResponsesNamedToolChoice,
+    ResponsesRequest,
+    ResponsesTool,
+    ResponsesToolChoice,
+    ResponsesToolChoiceFunctionName,
+    ResponsesToolSearchTool,
+)
 from .video import (
     CameraKeyframe,
     SeedanceConsents,
@@ -114,6 +133,7 @@ from .voice_changer import (
 __all__ = [
     # Content types
     "TextContent",
+    "ImageDetail",
     "ImageUrl",
     "ImageContent",
     "FileObject",
@@ -147,8 +167,24 @@ __all__ = [
     "DeveloperMessage",
     # Chat completion
     "ChatCompletionRequest",
-    # Responses API (Alpha)
+    # Responses API (beta)
     "ResponsesRequest",
+    "PromptCacheRetention",
+    "ResponsesFunctionTool",
+    "ResponsesFunctionToolChoice",
+    "ResponsesFunctionToolDefinition",
+    "ResponsesInputAdditionalTools",
+    "ResponsesInputCustomToolCall",
+    "ResponsesInputCustomToolCallOutput",
+    "ResponsesInputItem",
+    "ResponsesInputToolSearchCall",
+    "ResponsesInputToolSearchOutput",
+    "ResponsesItemStatus",
+    "ResponsesNamedToolChoice",
+    "ResponsesTool",
+    "ResponsesToolChoice",
+    "ResponsesToolChoiceFunctionName",
+    "ResponsesToolSearchTool",
     # Image requests
     "ImageGenerationRequest",
     "SimpleImageGenerationRequest",

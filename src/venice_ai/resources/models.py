@@ -439,6 +439,7 @@ class Models(APIResource["VeniceClient"]):
                     prompt_character_limit=int(constraints.promptCharacterLimit),
                     width_height_divisor=int(constraints.widthHeightDivisor),
                     supports_web_search=bool(supports_web_search),
+                    supports_transparent_background=bool(constraints.supportsTransparentBackground),
                 )
             return ImageCapabilities(supports_web_search=bool(supports_web_search))
 
@@ -464,6 +465,7 @@ class Models(APIResource["VeniceClient"]):
                 return InpaintCapabilities(
                     prompt_character_limit=int(constraints.promptCharacterLimit),
                     combine_images=constraints.combineImages,
+                    supports_transparent_background=bool(constraints.supportsTransparentBackground),
                 )
             return InpaintCapabilities()
 
@@ -499,6 +501,8 @@ class Models(APIResource["VeniceClient"]):
         exclude_uncensored: bool = False,
         # Image-specific
         require_custom_size: bool = False,
+        # Image and inpaint
+        require_transparent_background: bool = False,
         # Video-specific
         video_type: Literal["text-to-video", "image-to-video"] | None = None,
         input_mode: VideoInputMode | None = None,
@@ -562,6 +566,11 @@ class Models(APIResource["VeniceClient"]):
             ``aspectRatios``. Models that list ``aspectRatios`` size by
             ``aspect_ratio`` (and ``resolution``) and reject or ignore pixel
             dimensions.
+        :param require_transparent_background: Image and inpaint. Only consider
+            models whose constraints set ``supportsTransparentBackground``, the
+            ones that accept ``transparent_background=True`` on
+            ``image.create`` (image) or ``image.edit`` / ``image.multi_edit``
+            (inpaint).
         :param video_type: Filter video models by ``"text-to-video"`` or
             ``"image-to-video"``. ``"image-to-video"`` means plain image-to-video
             models (one start image) unless ``input_mode`` says otherwise.
@@ -709,6 +718,7 @@ class Models(APIResource["VeniceClient"]):
                     require_web_search=require_web_search,
                     require_quality=require_quality,
                     require_custom_size=require_custom_size,
+                    require_transparent_background=require_transparent_background,
                     exclude_uncensored=exclude_uncensored,
                 )
             case "video":
@@ -747,6 +757,7 @@ class Models(APIResource["VeniceClient"]):
                     require_quality=require_quality,
                     require_resolution=require_resolution,
                     require_uncensored=require_uncensored,
+                    require_transparent_background=require_transparent_background,
                 )
             case "music":
                 return await selector.select_music_model(
@@ -1063,6 +1074,7 @@ class Models(APIResource["VeniceClient"]):
         require_web_search: bool = False,
         require_quality: str | None = None,
         require_custom_size: bool = False,
+        require_transparent_background: bool = False,
         exclude_uncensored: bool = False,
         preferred_models: builtins.list[str] | None = None,
         exclude_models: builtins.list[str] | None = None,
@@ -1077,6 +1089,9 @@ class Models(APIResource["VeniceClient"]):
         :param require_custom_size: Only consider models sized by explicit
             ``width`` / ``height`` (no ``aspectRatios`` constraint); see
             :meth:`resolve`.
+        :param require_transparent_background: Only consider models whose
+            constraints set ``supportsTransparentBackground`` (they accept
+            ``transparent_background=True``).
         :param exclude_uncensored: Skip models Venice flags as ``uncensored``.
         :param preferred_models: Preferred model IDs in priority order.
         :param exclude_models: Model IDs to exclude.
@@ -1088,6 +1103,7 @@ class Models(APIResource["VeniceClient"]):
             require_web_search=require_web_search,
             require_quality=require_quality,
             require_custom_size=require_custom_size,
+            require_transparent_background=require_transparent_background,
             exclude_uncensored=exclude_uncensored,
             preferred_models=preferred_models,
             exclude_models=exclude_models,
@@ -1279,6 +1295,7 @@ class Models(APIResource["VeniceClient"]):
         require_quality: str | None = None,
         require_resolution: str | None = None,
         require_uncensored: bool = False,
+        require_transparent_background: bool = False,
         preferred_models: builtins.list[str] | None = None,
         exclude_models: builtins.list[str] | None = None,
         prefer: ModelPreference | None = None,
@@ -1294,6 +1311,9 @@ class Models(APIResource["VeniceClient"]):
             constraint reject a ``resolution`` argument.
         :param require_uncensored: Only consider models Venice flags as
             ``uncensored``.
+        :param require_transparent_background: Only consider models whose
+            constraints set ``supportsTransparentBackground`` (they accept
+            ``transparent_background=True`` on ``edit`` and ``multi_edit``).
         :param preferred_models: Preferred model IDs in priority order.
         :param exclude_models: Model IDs to exclude.
         :param prefer: ``"cheapest"`` picks the lowest-priced matching model
@@ -1305,6 +1325,7 @@ class Models(APIResource["VeniceClient"]):
             require_quality=require_quality,
             require_resolution=require_resolution,
             require_uncensored=require_uncensored,
+            require_transparent_background=require_transparent_background,
             preferred_models=preferred_models,
             exclude_models=exclude_models,
             prefer=prefer,

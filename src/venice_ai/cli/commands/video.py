@@ -427,6 +427,15 @@ async def _generate_async(
     help="End-frame image URL for models that support transitions",
 )
 @click.option(
+    "--image-strength",
+    type=click.FloatRange(0, 1),
+    default=None,
+    help=(
+        "How strongly the input image guides the video, from 0 to 1, on models "
+        "that declare image strength (omitted unless set; provider default 1)"
+    ),
+)
+@click.option(
     "--output",
     "-o",
     default=None,
@@ -464,6 +473,7 @@ def from_image(
     reference_video_urls,
     reference_audio_urls,
     end_image_url,
+    image_strength,
     output,
     save_dir,
     no_poll,
@@ -485,6 +495,8 @@ def from_image(
       venice-py video from-image portrait.jpg --model <i2v-model> --duration 10s
 
       venice-py video from-image landscape.jpg --no-poll
+
+      venice-py video from-image sketch.png --image-strength 0.6
     """
     asyncio.run(
         _from_image_async(
@@ -503,6 +515,7 @@ def from_image(
             reference_video_urls=reference_video_urls,
             reference_audio_urls=reference_audio_urls,
             end_image_url=end_image_url,
+            image_strength=image_strength,
         )
     )
 
@@ -524,6 +537,7 @@ async def _from_image_async(
     reference_video_urls=None,
     reference_audio_urls=None,
     end_image_url=None,
+    image_strength=None,
 ):
     from venice_ai import VeniceClient
     from venice_ai.cli._model_defaults import resolve_default_model
@@ -567,6 +581,8 @@ async def _from_image_async(
             queue_kwargs["reference_audio_urls"] = list(reference_audio_urls)
         if end_image_url:
             queue_kwargs["end_image_url"] = end_image_url
+        if image_strength is not None:
+            queue_kwargs["image_strength"] = image_strength
 
         OutputManager.echo("Queuing job...")
 

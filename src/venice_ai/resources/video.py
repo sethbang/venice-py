@@ -592,6 +592,7 @@ class Video(APIResource["VeniceClient"]):
         image_url: str | None = None,
         upscale_factor: Literal[1, 2, 4] | None = None,
         end_image_url: str | None = None,
+        image_strength: float | None = None,
         audio_url: str | None = None,
         video_url: str | None = None,
         reference_image_urls: list[str] | None = None,
@@ -676,6 +677,11 @@ class Video(APIResource["VeniceClient"]):
         :type upscale_factor: Optional[Literal[1, 2, 4]]
         :param end_image_url: End-frame image for models that support transitions.
         :type end_image_url: Optional[str]
+        :param image_strength: How strongly ``image_url`` guides an
+            image-to-video generation, from ``0`` to ``1``. Supported on models
+            that declare image strength; omit to use the provider default
+            (``1``). Does not affect price, and :meth:`quote` does not accept it.
+        :type image_strength: Optional[float]
         :param audio_url: Background audio input (WAV/MP3, max 30s/15MB) for
             models that support it.
         :type audio_url: Optional[str]
@@ -759,6 +765,7 @@ class Video(APIResource["VeniceClient"]):
             "aspect_ratio": aspect_ratio,
             "upscale_factor": upscale_factor,
             "end_image_url": end_image_url,
+            "image_strength": image_strength,
             "audio_url": audio_url,
             "video_url": video_url,
             "reference_image_urls": reference_image_urls,
@@ -1108,6 +1115,7 @@ class Video(APIResource["VeniceClient"]):
         image_url: str | None = None,
         upscale_factor: Literal[1, 2, 4] | None = None,
         end_image_url: str | None = None,
+        image_strength: float | None = None,
         audio_url: str | None = None,
         video_url: str | None = None,
         reference_image_urls: list[str] | None = None,
@@ -1160,6 +1168,7 @@ class Video(APIResource["VeniceClient"]):
             image_url=image_url,
             upscale_factor=upscale_factor,
             end_image_url=end_image_url,
+            image_strength=image_strength,
             audio_url=audio_url,
             video_url=video_url,
             reference_image_urls=reference_image_urls,

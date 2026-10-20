@@ -107,6 +107,7 @@ from .costs import (
 from .exceptions import (
     APIConnectionError,
     APIError,
+    ApiKeyIpRestrictedError,
     APIResponseProcessingError,
     APIResponseValidationError,
     APIStatusError,
@@ -336,7 +337,7 @@ __all__ = [
     "VideoCapabilities",
     "InpaintCapabilities",
     "GenericCapabilities",
-    # Responses API (Alpha)
+    # Responses API (beta)
     "ResponsesRequest",
     "ResponsesResponse",
     "ImageGenerationResponse",
@@ -426,6 +427,7 @@ __all__ = [
     "APIStatusError",
     "AuthenticationError",
     "PermissionDeniedError",
+    "ApiKeyIpRestrictedError",
     "InvalidRequestError",
     "ModelGoneError",
     "NotFoundError",

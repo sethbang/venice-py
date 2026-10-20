@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-10-19
+
+Adds the Venice API surface that shipped between 2026-10-02 and 2026-10-19. Each new request parameter is left out of the request body when it is not passed, so existing requests are byte-identical.
+
+### Added
+
+- **API key IP allowlists.** `CreateApiKeyRequest`, `UpdateApiKeyRequest` and `Web3CreateApiKeyRequest` take `ipAllowlist` (up to 100 globally reachable IPv4/IPv6 addresses or CIDR subnets), and `client.api_keys.update(ip_allowlist=[...])` sets it on an existing key. Pass `[]` to remove a key's allowlist; omit it to leave the allowlist unchanged. `ApiKey.ipAllowlist` and `CreatedApiKey.ipAllowlist` return entries in canonical CIDR form (`11.22.33.44` comes back as `11.22.33.44/32`). The CLI gains `venice-py api-keys create --ip-allow`, and `venice-py account keys update --ip-allow` / `--clear-ip-allowlist`; key output shows the allowlist.
+
+- **`ApiKeyIpRestrictedError`**, a `PermissionDeniedError` subclass raised for the 403 Venice returns when a request's source IP is not on the key's allowlist. Existing `except PermissionDeniedError` handlers still catch it.
+
+- **Transparent backgrounds on image generation and editing.** `image.create()`, `image.submit()`, `image.edit()` and `image.multi_edit()` accept `transparent_background=True` to return an image with an alpha channel. Only models whose constraints set `supportsTransparentBackground` accept it, and only with `png` or `webp` output; the server rejects other requests with a 400.
+
+- **`require_transparent_background` model filter.** `client.models.resolve(type="image" | "inpaint", ...)`, `resolve_image()`, `resolve_inpaint()` and `DynamicModelSelector.select_image_model()` / `select_inpaint_model()` return only models that can produce a transparent background; the CLI equivalent is `venice-py models resolve --transparent-background`. `ImageModelConstraints` and `InpaintModelConstraints` gain a typed `supportsTransparentBackground` field, and `ImageCapabilities` / `InpaintCapabilities` gain `supports_transparent_background`.
+
+- **`ImageGenerationResponse.content_policy_violation_count`.** How many requested variants the provider refused under its content policy, so `images` can hold fewer entries than requested. It is `None` when nothing was dropped.
+
+- **Image detail on chat image parts.** `ImageUrl` takes an optional `detail` (`"auto"`, `"low"`, `"high"` or `"original"`, typed as `ImageDetail`), and `UserMessage.builder().image(url, detail=...)` sets it. Explicit `"high"` may increase image-token usage and cost; `"original"` is kept on direct OpenAI routes and treated as `"high"` elsewhere.
+
+- **`image_strength` on video generation.** `client.video.submit()` and `run()` accept `image_strength` (0 to 1) to set how strongly `image_url` guides an image-to-video clip, on models that declare image strength; omit it for the provider default (1). It does not change the price, and `/video/quote` does not accept it. `venice-py video from-image` gains `--image-strength`. Values outside 0–1 are rejected before the request is sent. As of this release, no model in the catalog declares image strength.
+
+- **Responses API: custom tools, tool search and new request fields.** `client.responses.create()` takes `instructions`, `parallel_tool_calls` and `prompt_cache_retention` (`"in_memory"`, `"24h"`, `"default"`, `"extended"`). New typed tools `ResponsesFunctionTool` (with `defer_loading`) and the client-executed `ResponsesToolSearchTool`; named tool choices `ResponsesNamedToolChoice` (`{"type": "function" | "custom", "name", "namespace"}`) and `ResponsesFunctionToolChoice`; and input items `ResponsesInputCustomToolCall`, `ResponsesInputCustomToolCallOutput`, `ResponsesInputAdditionalTools`, `ResponsesInputToolSearchCall` and `ResponsesInputToolSearchOutput`. Dicts are still accepted everywhere and sent as written.
+
+- **Responses API output.** `custom_tool_call` and `tool_search_call` blocks parse into `ResponsesCustomToolCallOutput` and `ResponsesToolSearchCallOutput` instead of `ResponsesUnknownOutput`; `function_call` blocks expose `namespace`; reasoning `summary` accepts `ResponsesReasoningSummaryText` parts. New `KNOWN_RESPONSE_CUSTOM_TOOL_CALL_STATUSES`, `KNOWN_RESPONSE_TOOL_SEARCH_CALL_STATUSES` and `KNOWN_RESPONSE_TOOL_SEARCH_EXECUTIONS`.
+
+- **`BillingUsageEntry.apiKeyId`.** The API key a usage-history entry was charged to, or `None` for web-app usage and non-usage entries such as credit purchases.
+
+### Changed
+
+- **API key request models reject unknown fields.** `CreateApiKeyRequest`, `UpdateApiKeyRequest` and `Web3CreateApiKeyRequest` now raise `ValidationError` on an unknown field instead of dropping it, matching the API's `additionalProperties: false`. A misspelled restriction previously created an unrestricted key without an error. Code that passed snake_case names such as `expires_at=` or misspelled fields to these models now fails instead of silently losing them.
+
+- **`client.responses.create(tool_choice=...)`** strings other than `"auto"`, `"none"` and `"required"` now raise `pydantic.ValidationError` before the request is sent (not a `VeniceError`), and type checkers reject a plain `str` variable; pass a named tool choice, or a dict, for a specific tool. The rejected strings were not valid under Venice's schema. `input` and `tools` take any `Sequence`.
+
+- **`simple_generate(background="transparent")` is documented as working.** On `POST /images/generations` it returns an alpha background on models that support it (`png` or `webp` output), and is no longer described as a compatibility-only flag.
+
+- **`custom_tool_call` and `tool_search_call` output blocks are typed.** Code that matched them as `ResponsesUnknownOutput` now receives `ResponsesCustomToolCallOutput` or `ResponsesToolSearchCallOutput`.
+
+- **The Responses API is labelled beta**, matching Venice's docs.
+
+Video aspect ratio `2:1` and new decision models need no SDK change: aspect ratios and model IDs are passed through as strings, and `resolve_decision()` picks decision models from the catalog.
+
 ## [2.7.0] - 2026-10-19
 
 ### Added
@@ -1217,7 +1257,8 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.7.0...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.8.0...HEAD
+[2.8.0]: https://github.com/sethbang/venice-py/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/sethbang/venice-py/compare/v2.6.0...v2.7.0
 [2.6.0]: https://github.com/sethbang/venice-py/compare/v2.5.1...v2.6.0
 [2.5.1]: https://github.com/sethbang/venice-py/compare/v2.5.0...v2.5.1

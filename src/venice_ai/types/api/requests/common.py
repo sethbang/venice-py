@@ -34,6 +34,7 @@ from venice_ai.core.models.common import (
     FileObjectParam,
     ImageContent,
     ImageContentParam,
+    ImageDetail,
     ImageUrl,
     ImageUrlParam,
     JSONObjectFormat,
@@ -212,4 +213,5 @@ __all__ = [
     "PaginationParams",
     "DateRangeParams",
     "ConsumptionLimit",
+    "ImageDetail",
 ]
