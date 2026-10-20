@@ -29,6 +29,16 @@ class ImageGenerationResponse(VeniceBaseModel):
         default=None, description="The original request data sent to the API"
     )
     timing: TimingInfo = Field(..., description="Performance timing information")
+    content_policy_violation_count: int | None = Field(
+        default=None,
+        description=(
+            "Number of requested variants omitted because the model provider "
+            "rejected them under its content policy, so ``images`` can hold fewer "
+            "entries than requested. ``None`` when nothing was omitted. Other "
+            "moderation outcomes can still return blacked-out images, flagged by "
+            "the ``x-venice-is-content-violation`` response header."
+        ),
+    )
 
     def bytes(self, index: int = 0) -> bytes:
         """Return decoded image bytes for the image at *index* (default ``0``).

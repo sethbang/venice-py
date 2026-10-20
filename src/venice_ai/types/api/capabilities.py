@@ -106,6 +106,7 @@ class ImageCapabilities(BaseModel):
         description="Output dimensions must be divisible by this (``None`` if unspecified).",
     )
     supports_web_search: bool = False
+    supports_transparent_background: bool = False
 
 
 class VideoCapabilities(BaseModel):
@@ -134,6 +135,7 @@ class InpaintCapabilities(BaseModel):
     type: Literal["inpaint"] = "inpaint"
     prompt_character_limit: int | None = None
     combine_images: bool = False
+    supports_transparent_background: bool = False
 
 
 class GenericCapabilities(BaseModel):

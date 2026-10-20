@@ -1124,6 +1124,7 @@ venice-py models resolve --type chat --function-calling
 venice-py models resolve --type chat --function-calling --prefer cheapest
 venice-py models resolve --type embedding --prefer cheapest
 venice-py models resolve --type image --prefer cheapest --quality low
+venice-py models resolve --type inpaint --transparent-background
 venice-py models resolve --type chat --vision --min-context-tokens 32000
 venice-py models resolve --type chat --prompt-caching
 venice-py models resolve --type music --music-only --force-instrumental

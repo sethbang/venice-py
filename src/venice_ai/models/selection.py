@@ -1109,6 +1109,7 @@ class DynamicModelSelector:
                                         "steps",
                                         "widthHeightDivisor",
                                         "combineImages",
+                                        "supportsTransparentBackground",
                                     ]:
                                         if hasattr(constraints, attr):
                                             val = getattr(constraints, attr)
@@ -1915,6 +1916,7 @@ class DynamicModelSelector:
         require_web_search: bool = False,
         require_quality: str | None = None,
         require_custom_size: bool = False,
+        require_transparent_background: bool = False,
         exclude_uncensored: bool = False,
     ) -> str:
         """
@@ -1936,6 +1938,9 @@ class DynamicModelSelector:
                 ``height``, so a model without ``aspectRatios`` takes pixel
                 dimensions. The catalog does not say whether such a model
                 returns exactly the requested size.
+            require_transparent_background: If True, only select models whose
+                constraints set ``supportsTransparentBackground`` (i.e. that
+                accept ``transparent_background=True``).
             exclude_uncensored: If True, skip models Venice flags as
                 ``uncensored``.
 
@@ -1973,6 +1978,7 @@ class DynamicModelSelector:
             require_web_search
             or require_quality is not None
             or require_custom_size
+            or require_transparent_background
             or exclude_uncensored
         ):
             filtered = []
@@ -1988,6 +1994,10 @@ class DynamicModelSelector:
                     continue
                 if require_custom_size and constraints.get("aspectRatios"):
                     continue
+                if require_transparent_background and not constraints.get(
+                    "supportsTransparentBackground", False
+                ):
+                    continue
                 if exclude_uncensored and model_data.get("uncensored", False):
                     continue
                 filtered.append(model_id)
@@ -1996,6 +2006,7 @@ class DynamicModelSelector:
                     f"No image models found matching requirements: "
                     f"web_search={require_web_search}, quality={require_quality!r}, "
                     f"custom_size={require_custom_size}, "
+                    f"transparent_background={require_transparent_background}, "
                     f"exclude_uncensored={exclude_uncensored}",
                     resource_type="image",
                 )
@@ -2400,6 +2411,7 @@ class DynamicModelSelector:
         require_quality: str | None = None,
         require_resolution: str | None = None,
         require_uncensored: bool = False,
+        require_transparent_background: bool = False,
     ) -> str:
         """
         Select a suitable inpaint (image editing) model.
@@ -2417,6 +2429,9 @@ class DynamicModelSelector:
                 Models without the constraint reject a ``resolution`` argument.
             require_uncensored: If True, only select models Venice flags as
                 ``uncensored``.
+            require_transparent_background: If True, only select models whose
+                constraints set ``supportsTransparentBackground`` (i.e. that
+                accept ``transparent_background=True`` on edit and multi-edit).
 
         Returns:
             Selected model ID
@@ -2429,6 +2444,7 @@ class DynamicModelSelector:
             or require_quality is not None
             or require_resolution is not None
             or require_uncensored
+            or require_transparent_background
         )
 
         def _matches(model_data: dict[str, Any]) -> bool:
@@ -2443,6 +2459,10 @@ class DynamicModelSelector:
                 constraints.get("resolutions"), require_resolution
             ):
                 return False
+            if require_transparent_background and not constraints.get(
+                "supportsTransparentBackground", False
+            ):
+                return False
             return not (require_uncensored and not model_data.get("uncensored", False))
 
         return await self._select_simple_model(
@@ -2454,7 +2474,8 @@ class DynamicModelSelector:
             candidate_filter=_matches if has_filter else None,
             filter_description=(
                 f"combine_images={require_combine_images}, quality={require_quality!r}, "
-                f"resolution={require_resolution!r}, uncensored={require_uncensored}"
+                f"resolution={require_resolution!r}, uncensored={require_uncensored}, "
+                f"transparent_background={require_transparent_background}"
             ),
         )
 

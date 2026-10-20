@@ -472,6 +472,31 @@ class TestResolvePreferAndNewFilters:
         assert client.models.resolve.await_args.kwargs["require_quality"] == "low"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("model_type", ["image", "inpaint"])
+    async def test_transparent_background_forwarded(self, model_type):
+        client, _ = await _run_resolve(model_type, transparent_background=True)
+        kwargs = client.models.resolve.await_args.kwargs
+        assert kwargs["require_transparent_background"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model_type", ["image", "inpaint"])
+    async def test_transparent_background_defaults_off(self, model_type):
+        client, _ = await _run_resolve(model_type)
+        kwargs = client.models.resolve.await_args.kwargs
+        assert kwargs["require_transparent_background"] is False
+
+    @pytest.mark.parametrize("argv,expected", [([], False), (["--transparent-background"], True)])
+    def test_transparent_background_flag_parsed(self, argv, expected):
+        from venice_ai.cli.cli import cli
+
+        with patch(
+            "venice_ai.cli.commands.models.resolve._resolve_async", new_callable=AsyncMock
+        ) as mock_async:
+            result = CliRunner().invoke(cli, ["models", "resolve", "--type", "image", *argv])
+        assert result.exit_code == 0, result.output
+        assert mock_async.await_args.kwargs["transparent_background"] is expected
+
+    @pytest.mark.asyncio
     async def test_cheapest_video_defaults_to_per_model_minimum_and_silent(self):
         client, echo = await _run_resolve("cheapest-video", audio_configurable=True)
         kwargs = client.models.resolve_cheapest_video.await_args.kwargs

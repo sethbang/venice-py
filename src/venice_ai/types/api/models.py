@@ -223,6 +223,14 @@ class ImageModelConstraints(BaseModel):
         default=None,
         description="Default output resolution tier. Present only for resolution-aware models.",
     )
+    supportsTransparentBackground: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the model can return a transparent background (PNG or WebP "
+            "output only) via ``transparent_background``. Present, as true, only "
+            "for models that support it."
+        ),
+    )
 
 
 class InpaintModelConstraints(BaseModel):
@@ -259,6 +267,14 @@ class InpaintModelConstraints(BaseModel):
     qualities: list[str] | None = Field(
         default=None,
         description="Supported quality options (open str). Present only for quality-aware models.",
+    )
+    supportsTransparentBackground: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the model can return a transparent background (PNG or WebP "
+            "output only) via ``transparent_background`` on edit and multi-edit. "
+            "Present, as true, only for models that support it."
+        ),
     )
 
 

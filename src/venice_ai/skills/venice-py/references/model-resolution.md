@@ -24,6 +24,7 @@ model_id: str = await client.models.resolve(
     exclude_reasoning=False,             # chat: only models that never reason
     exclude_uncensored=False,            # chat and image: skip models flagged uncensored
     require_custom_size=False,           # image: sized by width/height (no aspectRatios)
+    require_transparent_background=False,  # image and inpaint: supportsTransparentBackground
     # Video-specific filters
     video_type=None,                     # "text-to-video" | "image-to-video" (plain) | None
     input_mode=None,                     # "image" | "reference" | "first_last_frame" | "transition" | "multi_angle"
@@ -165,6 +166,7 @@ model = await client.models.resolve_image(
     require_web_search=False,            # spec-level supportsWebSearch (enable_web_search)
     require_quality=None,                # must be in constraints.qualities, e.g. "high"
     require_custom_size=False,           # sized by width/height (no aspectRatios constraint)
+    require_transparent_background=False,  # constraints.supportsTransparentBackground
     exclude_uncensored=False,            # skip models flagged uncensored
     preferred_models=None,
     exclude_models=None,
@@ -217,6 +219,7 @@ inpaint_model = await client.models.resolve_inpaint(
     require_quality=None,                # must be in constraints.qualities, e.g. "low"
     require_resolution=None,             # must be in constraints.resolutions, e.g. "2K"
     require_uncensored=False,            # spec-level uncensored flag
+    require_transparent_background=False,  # constraints.supportsTransparentBackground
     preferred_models=None,
     exclude_models=None,
 )
@@ -353,6 +356,7 @@ If neither preferred model is available (deprecation, region restrictions, etc.)
 | `exclude_reasoning` (chat) | Model never reasons (`supportsReasoning` false) | Direct answers under a small token budget |
 | `exclude_uncensored` (chat, image) | Skip models Venice flags `uncensored` | General-audience output |
 | `require_custom_size` (image only) | Model sizes by `width`/`height` (no `aspectRatios`) | `image.create(width=768, height=512)` |
+| `require_transparent_background` (image, inpaint) | Constraints set `supportsTransparentBackground` | `image.create(transparent_background=True, format="png")` |
 | `input_mode` (video only) | What an image-to-video model takes as input | `input_mode="reference"` for R2V |
 | `require_multiple_images` (chat) | Model accepts several images in one request | Comparing screenshots |
 | `require_e2ee` (chat) | Model is end-to-end encrypted (`supportsE2EE`) | `chat.completions.create(e2ee=...)` |

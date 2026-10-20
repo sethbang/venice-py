@@ -73,6 +73,11 @@ _TYPE_CHOICES = [
 )
 # Image / inpaint
 @click.option(
+    "--transparent-background",
+    is_flag=True,
+    help="Require transparent-background output support (image/inpaint).",
+)
+@click.option(
     "--quality",
     default=None,
     help="Quality tier the model must offer (image/inpaint); also the tier priced by "
@@ -173,6 +178,7 @@ def resolve(
     exclude_reasoning: bool,
     exclude_uncensored: bool,
     custom_size: bool,
+    transparent_background: bool,
     quality: str | None,
     music_only: bool,
     force_instrumental: bool,
@@ -200,6 +206,7 @@ def resolve(
       venice-py models resolve --type embedding --prefer cheapest
       venice-py models resolve --type chat --function-calling --prefer cheapest
       venice-py models resolve --type video --audio --min-resolution 720p
+      venice-py models resolve --type image --transparent-background
       venice-py models resolve --type cheapest-video --video-type text-to-video
       venice-py models resolve --type cheapest-music --duration 10
       venice-py models resolve --type video-upscale
@@ -222,6 +229,7 @@ def resolve(
             exclude_reasoning=exclude_reasoning,
             exclude_uncensored=exclude_uncensored,
             custom_size=custom_size,
+            transparent_background=transparent_background,
             quality=quality,
             music_only=music_only,
             force_instrumental=force_instrumental,
@@ -272,6 +280,7 @@ async def _resolve_async(
     exclude_reasoning: bool = False,
     exclude_uncensored: bool = False,
     custom_size: bool = False,
+    transparent_background: bool = False,
     quality: str | None = None,
     music_only: bool = False,
     force_instrumental: bool = False,
@@ -360,10 +369,14 @@ async def _resolve_async(
             kwargs.update(
                 require_quality=quality,
                 require_custom_size=custom_size,
+                require_transparent_background=transparent_background,
                 exclude_uncensored=exclude_uncensored,
             )
         elif model_type == "inpaint":
-            kwargs.update(require_quality=quality)
+            kwargs.update(
+                require_quality=quality,
+                require_transparent_background=transparent_background,
+            )
         elif model_type == "music":
             kwargs.update(
                 exclude_non_music=music_only,

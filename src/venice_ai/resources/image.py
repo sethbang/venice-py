@@ -324,6 +324,7 @@ class Image(APIResource["VeniceClient"]):
         enhance_prompt: bool | None = None,
         disable_prompt_optimization_thinking: bool | None = None,
         style_references: list[StyleReference | dict] | None = None,
+        transparent_background: bool | None = None,
         resolution: str | None = None,
         return_binary: Literal[False] = ...,
         safe_mode: bool | None = None,
@@ -354,6 +355,7 @@ class Image(APIResource["VeniceClient"]):
         enhance_prompt: bool | None = None,
         disable_prompt_optimization_thinking: bool | None = None,
         style_references: list[StyleReference | dict] | None = None,
+        transparent_background: bool | None = None,
         resolution: str | None = None,
         return_binary: Literal[True] = ...,
         safe_mode: bool | None = None,
@@ -384,6 +386,7 @@ class Image(APIResource["VeniceClient"]):
         enhance_prompt: bool | None = None,
         disable_prompt_optimization_thinking: bool | None = None,
         style_references: list[StyleReference | dict] | None = None,
+        transparent_background: bool | None = None,
         resolution: str | None = None,
         return_binary: bool | None,
         safe_mode: bool | None = None,
@@ -413,6 +416,7 @@ class Image(APIResource["VeniceClient"]):
         enhance_prompt: bool | None = None,
         disable_prompt_optimization_thinking: bool | None = None,
         style_references: list[StyleReference | dict] | None = None,
+        transparent_background: bool | None = None,
         resolution: str | None = None,
         return_binary: bool | None = None,
         safe_mode: bool | None = None,
@@ -463,6 +467,14 @@ class Image(APIResource["VeniceClient"]):
         :type quality: Optional[Literal["low", "medium", "high"]]
         :param resolution: Optional. Output resolution: ``"1K"``, ``"2K"``, or ``"4K"`` for supported models with resolution-based pricing.
         :type resolution: Optional[str]
+        :param transparent_background: Optional. If ``True``, return the image
+            with a transparent background (alpha channel). Only models whose
+            constraints set ``supportsTransparentBackground`` accept it, and only
+            with ``format="png"`` or ``"webp"``; the server rejects the request
+            otherwise. Resolve a capable model with
+            ``client.models.resolve_image(require_transparent_background=True)``.
+            Omitted from the request when ``None``.
+        :type transparent_background: Optional[bool]
         :param return_binary: Optional. If ``True``, return raw image bytes instead of JSON response with base64 data.
         :type return_binary: Optional[bool]
         :param safe_mode: Optional. If ``True``, enable content filtering for safer outputs.
@@ -524,6 +536,7 @@ class Image(APIResource["VeniceClient"]):
                 "list[StyleReference] | None",
                 style_references,
             ),
+            transparent_background=transparent_background,
             resolution=resolution,
             return_binary=return_binary,
             safe_mode=safe_mode,
@@ -581,6 +594,7 @@ class Image(APIResource["VeniceClient"]):
         enhance_prompt: bool | None = None,
         disable_prompt_optimization_thinking: bool | None = None,
         style_references: list[StyleReference | dict] | None = None,
+        transparent_background: bool | None = None,
         resolution: str | None = None,
         return_binary: bool | None = None,
         safe_mode: bool | None = None,
@@ -624,6 +638,7 @@ class Image(APIResource["VeniceClient"]):
             "enhance_prompt": enhance_prompt,
             "disable_prompt_optimization_thinking": disable_prompt_optimization_thinking,
             "style_references": style_references,
+            "transparent_background": transparent_background,
             "resolution": resolution,
             "return_binary": return_binary,
             "safe_mode": safe_mode,
@@ -796,6 +811,7 @@ class Image(APIResource["VeniceClient"]):
         quality: Literal["low", "medium", "high"] | None = None,
         enhance_prompt: bool | None = None,
         disable_prompt_optimization_thinking: bool | None = None,
+        transparent_background: bool | None = None,
         anon_user_id: str | None = None,
         timeout: float | aiohttp.ClientTimeout | None = None,
     ) -> bytes:
@@ -838,8 +854,17 @@ class Image(APIResource["VeniceClient"]):
         :type resolution: Optional[str]
         :param output_format: Optional. Output format for the edited image.
             When omitted, the format is inferred from resolution (PNG for 1K
-            edits, JPEG for 2K/4K edits).
+            edits, JPEG for 2K/4K edits), or PNG at any resolution when
+            ``transparent_background`` is ``True``.
         :type output_format: Optional[Literal["jpeg", "png", "webp"]]
+        :param transparent_background: Optional. If ``True``, return the edited
+            image with a transparent background (alpha channel). Only models
+            whose constraints set ``supportsTransparentBackground`` accept it;
+            ``output_format`` must then be ``"png"``, ``"webp"`` or omitted.
+            Resolve a capable model with
+            ``client.models.resolve_inpaint(require_transparent_background=True)``.
+            Omitted from the request when ``None``.
+        :type transparent_background: Optional[bool]
         :param quality: Deprecated and ignored. ``POST /image/edit`` does not
             accept a quality field and rejects the whole request when one is
             sent, so every call that passed this failed with HTTP 400. It is
@@ -927,6 +952,7 @@ class Image(APIResource["VeniceClient"]):
             output_format=output_format,
             enhance_prompt=enhance_prompt,
             disable_prompt_optimization_thinking=disable_prompt_optimization_thinking,
+            transparent_background=transparent_background,
             anon_user_id=anon_user_id,
         )
         payload = edit_request.model_dump(exclude_none=True)
@@ -1117,6 +1143,7 @@ class Image(APIResource["VeniceClient"]):
         quality: Literal["low", "medium", "high"] | None = None,
         enhance_prompt: bool | None = None,
         disable_prompt_optimization_thinking: bool | None = None,
+        transparent_background: bool | None = None,
         anon_user_id: str | None = None,
     ) -> bytes:
         """Edit an image using up to 3 layered inputs (POST /image/multi-edit).
@@ -1148,8 +1175,17 @@ class Image(APIResource["VeniceClient"]):
         :type aspect_ratio: Optional[str]
         :param output_format: Optional. Output format for the edited image.
             When omitted, the format is inferred from resolution (PNG for 1K
-            edits, JPEG for 2K/4K edits).
+            edits, JPEG for 2K/4K edits), or PNG at any resolution when
+            ``transparent_background`` is ``True``.
         :type output_format: Optional[Literal["jpeg", "png", "webp"]]
+        :param transparent_background: Optional. If ``True``, return the edited
+            image with a transparent background (alpha channel). Only models
+            whose constraints set ``supportsTransparentBackground`` accept it;
+            ``output_format`` must then be ``"png"``, ``"webp"`` or omitted.
+            Resolve a capable model with
+            ``client.models.resolve_inpaint(require_transparent_background=True)``.
+            Omitted from the request when ``None``.
+        :type transparent_background: Optional[bool]
         :param quality: Optional. Output quality for quality-aware models (e.g.
             GPT Image 2). Higher values can increase the request charge.
         :type quality: Optional[Literal["low", "medium", "high"]]
@@ -1180,7 +1216,8 @@ class Image(APIResource["VeniceClient"]):
                 )
         """
         # /image/multi-edit accepts {prompt, images[], modelId, safe_mode,
-        # resolution, aspect_ratio, output_format, quality} per the Venice spec.
+        # resolution, aspect_ratio, output_format, quality, transparent_background}
+        # per the Venice spec.
         # Bytes/file inputs are encoded to base64 and the request body is always
         # JSON.
 
@@ -1236,6 +1273,8 @@ class Image(APIResource["VeniceClient"]):
             payload["enhance_prompt"] = enhance_prompt
         if disable_prompt_optimization_thinking is not None:
             payload["disable_prompt_optimization_thinking"] = disable_prompt_optimization_thinking
+        if transparent_background is not None:
+            payload["transparent_background"] = transparent_background
         if anon_user_id is not None:
             # multi_edit builds its body by hand, so the constraints that
             # ImageMultiEditRequest would apply are enforced explicitly here.
@@ -1298,7 +1337,11 @@ class Image(APIResource["VeniceClient"]):
             higher values can increase the request charge. Ignored by models that do not
             advertise quality support (see the model spec's ``qualities`` field).
         :param style: OpenAI-compatibility flag.
-        :param background: OpenAI-compatibility flag.
+        :param background: ``"transparent"`` returns the image with a
+            transparent background (alpha channel). Only models whose
+            constraints set ``supportsTransparentBackground`` accept it, and
+            only with ``output_format`` ``png`` or ``webp``. ``"auto"`` and
+            ``"opaque"`` keep the model's default background.
         :param moderation: ``"auto"`` enables Venice safe-mode; ``"low"``
             relaxes it.
         :param output_compression: 0–100; OpenAI-compatibility flag.
