@@ -302,7 +302,6 @@ For retry policy, backoff strategy, and the full exception map, see `venice-py-p
 | `client.video.queue(...)` | `client.video.run(...)` (high-level) or `client.video.submit(...)` (low-level) |
 | `resp["data"]` (embeddings/models/billing/voices) | `resp.data` — responses are typed Pydantic now |
 | `client.api_keys.retrieve()` as a dict | typed `ApiKey` — read fields by attribute |
-| Python 3.11 / 3.12 | Python ≥3.13 required |
 
 Run `scripts/lint_v1_usage.py <path>` to scan for v1 / legacy / non-idiomatic patterns in a codebase.
 

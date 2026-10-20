@@ -1,0 +1,3272 @@
+{
+  "endpoints": {
+    "DELETE /api_keys": {
+      "params": [
+        "query.id"
+      ],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "success"
+          ]
+        }
+      }
+    },
+    "GET /api_keys": {
+      "params": [],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data[].apiKeyType",
+            "data[].consumptionLimits",
+            "data[].consumptionLimits.diem",
+            "data[].consumptionLimits.usd",
+            "data[].consumptionLimits.vcu",
+            "data[].createdAt",
+            "data[].currentPeriodUsage",
+            "data[].currentPeriodUsage.diem",
+            "data[].currentPeriodUsage.usd",
+            "data[].description",
+            "data[].expiresAt",
+            "data[].id",
+            "data[].ipAllowlist",
+            "data[].last6Chars",
+            "data[].lastUsedAt",
+            "data[].limitPeriod",
+            "data[].modelPrivacy",
+            "data[].usage",
+            "data[].usage.trailingSevenDays",
+            "data[].usage.trailingSevenDays.diem",
+            "data[].usage.trailingSevenDays.usd",
+            "data[].usage.trailingSevenDays.vcu",
+            "object"
+          ]
+        }
+      }
+    },
+    "GET /api_keys/generate_web3_key": {
+      "params": [],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data.token",
+            "success"
+          ]
+        }
+      }
+    },
+    "GET /api_keys/rate_limits": {
+      "params": [],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data.accessPermitted",
+            "data.apiTier",
+            "data.apiTier.id",
+            "data.apiTier.isCharged",
+            "data.balances",
+            "data.balances.BUNDLED_CREDITS",
+            "data.balances.DIEM",
+            "data.balances.USD",
+            "data.keyExpiration",
+            "data.nextEpochBegins",
+            "data.rateLimits",
+            "data.rateLimits[].apiModelId",
+            "data.rateLimits[].rateLimits",
+            "data.rateLimits[].rateLimits[].amount",
+            "data.rateLimits[].rateLimits[].type"
+          ]
+        }
+      }
+    },
+    "GET /api_keys/rate_limits/log": {
+      "params": [],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data[].apiKeyId",
+            "data[].modelId",
+            "data[].rateLimitTier",
+            "data[].rateLimitType",
+            "data[].timestamp",
+            "object"
+          ]
+        }
+      }
+    },
+    "GET /api_keys/{id}": {
+      "params": [
+        "path.id"
+      ],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data.apiKeyType",
+            "data.consumptionLimits",
+            "data.consumptionLimits.diem",
+            "data.consumptionLimits.usd",
+            "data.consumptionLimits.vcu",
+            "data.createdAt",
+            "data.currentPeriodUsage",
+            "data.currentPeriodUsage.diem",
+            "data.currentPeriodUsage.usd",
+            "data.description",
+            "data.expiresAt",
+            "data.id",
+            "data.ipAllowlist",
+            "data.last6Chars",
+            "data.lastUsedAt",
+            "data.limitPeriod",
+            "data.modelPrivacy",
+            "data.usage",
+            "data.usage.trailingSevenDays",
+            "data.usage.trailingSevenDays.diem",
+            "data.usage.trailingSevenDays.usd",
+            "data.usage.trailingSevenDays.vcu"
+          ]
+        }
+      }
+    },
+    "GET /billing/balance": {
+      "params": [],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "balances",
+            "balances.bundledCredits",
+            "balances.diem",
+            "balances.earnedCredits",
+            "balances.usd",
+            "canConsume",
+            "consumptionCurrency",
+            "diemEpochAllocation"
+          ]
+        }
+      }
+    },
+    "GET /billing/usage": {
+      "params": [],
+      "request_content_types": [],
+      "responses": {}
+    },
+    "GET /billing/usage-analytics": {
+      "params": [
+        "query.endDate",
+        "query.lookback",
+        "query.startDate"
+      ],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "byDate",
+            "byDate[].DIEM",
+            "byDate[].USD",
+            "byDate[].date",
+            "byKey",
+            "byKeyDaily",
+            "byKey[].apiKeyId",
+            "byKey[].description",
+            "byKey[].totalDiem",
+            "byKey[].totalUnits",
+            "byKey[].totalUsd",
+            "byModel",
+            "byModelDaily",
+            "byModel[].breakdown",
+            "byModel[].breakdown[].diem",
+            "byModel[].breakdown[].type",
+            "byModel[].breakdown[].units",
+            "byModel[].breakdown[].usd",
+            "byModel[].modelName",
+            "byModel[].modelType",
+            "byModel[].totalDiem",
+            "byModel[].totalUnits",
+            "byModel[].totalUsd",
+            "byModel[].unitType",
+            "lookback",
+            "topKeyNames",
+            "topModels"
+          ]
+        }
+      }
+    },
+    "GET /billing/usage-history": {
+      "params": [
+        "query.currency",
+        "query.cursor",
+        "query.endTimestamp",
+        "query.pageSize",
+        "query.startTimestamp"
+      ],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json",
+            "text/csv"
+          ],
+          "fields": [
+            "data",
+            "data[].amount",
+            "data[].apiKeyId",
+            "data[].currency",
+            "data[].inferenceDetails",
+            "data[].inferenceDetails.completionTokens",
+            "data[].inferenceDetails.inferenceExecutionTime",
+            "data[].inferenceDetails.promptTokens",
+            "data[].inferenceDetails.requestId",
+            "data[].notes",
+            "data[].pricePerUnitUsd",
+            "data[].sku",
+            "data[].timestamp",
+            "data[].units",
+            "nextCursor"
+          ]
+        }
+      }
+    },
+    "GET /characters": {
+      "params": [
+        "query.categories",
+        "query.isAdult",
+        "query.isPro",
+        "query.isWebEnabled",
+        "query.limit",
+        "query.modelId",
+        "query.offset",
+        "query.search",
+        "query.sortBy",
+        "query.sortOrder",
+        "query.tags"
+      ],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data[].adult",
+            "data[].author",
+            "data[].createdAt",
+            "data[].description",
+            "data[].featured",
+            "data[].id",
+            "data[].modelId",
+            "data[].name",
+            "data[].photoUrl",
+            "data[].shareUrl",
+            "data[].slug",
+            "data[].stats",
+            "data[].stats.averageRating",
+            "data[].stats.imports",
+            "data[].stats.ratingCount",
+            "data[].stats.ratingSum",
+            "data[].stats.userRating",
+            "data[].tags",
+            "data[].updatedAt",
+            "data[].webEnabled",
+            "object"
+          ]
+        }
+      }
+    },
+    "GET /characters/{slug}": {
+      "params": [
+        "path.slug"
+      ],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data.adult",
+            "data.author",
+            "data.createdAt",
+            "data.description",
+            "data.featured",
+            "data.id",
+            "data.modelId",
+            "data.name",
+            "data.photoUrl",
+            "data.shareUrl",
+            "data.slug",
+            "data.stats",
+            "data.stats.averageRating",
+            "data.stats.imports",
+            "data.stats.ratingCount",
+            "data.stats.ratingSum",
+            "data.stats.userRating",
+            "data.tags",
+            "data.updatedAt",
+            "data.webEnabled",
+            "object"
+          ]
+        }
+      }
+    },
+    "GET /characters/{slug}/reviews": {
+      "params": [
+        "path.slug",
+        "query.page",
+        "query.pageSize"
+      ],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data[].characterId",
+            "data[].createdAt",
+            "data[].id",
+            "data[].isOwner",
+            "data[].locale",
+            "data[].message",
+            "data[].rating",
+            "data[].userAvatarUrl",
+            "data[].username",
+            "object",
+            "pagination",
+            "pagination.page",
+            "pagination.pageSize",
+            "pagination.total",
+            "pagination.totalPages",
+            "summary",
+            "summary.averageRating",
+            "summary.totalReviews"
+          ]
+        }
+      }
+    },
+    "GET /crypto/rpc/networks": {
+      "params": [],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "networks"
+          ]
+        }
+      }
+    },
+    "GET /image/styles": {
+      "params": [],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "object"
+          ]
+        }
+      }
+    },
+    "GET /models": {
+      "params": [
+        "query.type"
+      ],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data[].context_length",
+            "data[].created",
+            "data[].discount_to_user",
+            "data[].id",
+            "data[].model_spec",
+            "data[].model_spec.accepted_audio_formats",
+            "data[].model_spec.availableContextTokens",
+            "data[].model_spec.beta",
+            "data[].model_spec.betaModel",
+            "data[].model_spec.capabilities",
+            "data[].model_spec.capabilities.defaultReasoningEffort",
+            "data[].model_spec.capabilities.maxImages",
+            "data[].model_spec.capabilities.maxVideos",
+            "data[].model_spec.capabilities.optimizedForCode",
+            "data[].model_spec.capabilities.quantization",
+            "data[].model_spec.capabilities.reasoningEffortOptions",
+            "data[].model_spec.capabilities.supportsAudioInput",
+            "data[].model_spec.capabilities.supportsE2EE",
+            "data[].model_spec.capabilities.supportsFunctionCalling",
+            "data[].model_spec.capabilities.supportsLogProbs",
+            "data[].model_spec.capabilities.supportsMultipleImages",
+            "data[].model_spec.capabilities.supportsReasoning",
+            "data[].model_spec.capabilities.supportsReasoningEffort",
+            "data[].model_spec.capabilities.supportsResponseSchema",
+            "data[].model_spec.capabilities.supportsTeeAttestation",
+            "data[].model_spec.capabilities.supportsVideoInput",
+            "data[].model_spec.capabilities.supportsVision",
+            "data[].model_spec.capabilities.supportsWebSearch",
+            "data[].model_spec.capabilities.supportsXSearch",
+            "data[].model_spec.constraints",
+            "data[].model_spec.constraints.aspectRatios",
+            "data[].model_spec.constraints.aspect_ratios",
+            "data[].model_spec.constraints.audio",
+            "data[].model_spec.constraints.audio_configurable",
+            "data[].model_spec.constraints.combineImages",
+            "data[].model_spec.constraints.defaultAspectRatio",
+            "data[].model_spec.constraints.defaultQuality",
+            "data[].model_spec.constraints.defaultResolution",
+            "data[].model_spec.constraints.durations",
+            "data[].model_spec.constraints.frequency_penalty",
+            "data[].model_spec.constraints.frequency_penalty.default",
+            "data[].model_spec.constraints.maxInputImages",
+            "data[].model_spec.constraints.maxStyleReferences",
+            "data[].model_spec.constraints.model_type",
+            "data[].model_spec.constraints.presence_penalty",
+            "data[].model_spec.constraints.presence_penalty.default",
+            "data[].model_spec.constraints.promptCharacterLimit",
+            "data[].model_spec.constraints.prompt_character_limit",
+            "data[].model_spec.constraints.qualities",
+            "data[].model_spec.constraints.repetition_penalty",
+            "data[].model_spec.constraints.repetition_penalty.default",
+            "data[].model_spec.constraints.resolutions",
+            "data[].model_spec.constraints.singleImageAspectRatio",
+            "data[].model_spec.constraints.steps",
+            "data[].model_spec.constraints.steps.default",
+            "data[].model_spec.constraints.steps.max",
+            "data[].model_spec.constraints.supportsStyleReferenceStrength",
+            "data[].model_spec.constraints.supportsTransparentBackground",
+            "data[].model_spec.constraints.temperature",
+            "data[].model_spec.constraints.temperature.default",
+            "data[].model_spec.constraints.top_p",
+            "data[].model_spec.constraints.top_p.default",
+            "data[].model_spec.constraints.topaz",
+            "data[].model_spec.constraints.topaz.h264_output",
+            "data[].model_spec.constraints.topaz.models",
+            "data[].model_spec.constraints.topaz.models[].display",
+            "data[].model_spec.constraints.topaz.models[].value",
+            "data[].model_spec.constraints.topaz.no_upscale_models",
+            "data[].model_spec.constraints.topaz.prompt",
+            "data[].model_spec.constraints.topaz.selects",
+            "data[].model_spec.constraints.topaz.selects[].default",
+            "data[].model_spec.constraints.topaz.selects[].options",
+            "data[].model_spec.constraints.topaz.selects[].param",
+            "data[].model_spec.constraints.topaz.sliders",
+            "data[].model_spec.constraints.topaz.sliders[].default",
+            "data[].model_spec.constraints.topaz.sliders[].max",
+            "data[].model_spec.constraints.topaz.sliders[].min",
+            "data[].model_spec.constraints.topaz.sliders[].only_for_models",
+            "data[].model_spec.constraints.topaz.sliders[].param",
+            "data[].model_spec.constraints.widthHeightDivisor",
+            "data[].model_spec.default_duration",
+            "data[].model_spec.default_format",
+            "data[].model_spec.default_speed",
+            "data[].model_spec.default_voice",
+            "data[].model_spec.deprecation",
+            "data[].model_spec.deprecation.autoRemap",
+            "data[].model_spec.deprecation.date",
+            "data[].model_spec.deprecation.removesAt",
+            "data[].model_spec.deprecation.replacementModelId",
+            "data[].model_spec.deprecation.startsAt",
+            "data[].model_spec.description",
+            "data[].model_spec.duration_options",
+            "data[].model_spec.embeddingDimensions",
+            "data[].model_spec.lyrics_character_limit",
+            "data[].model_spec.lyrics_required",
+            "data[].model_spec.maxCompletionTokens",
+            "data[].model_spec.maxInputTokens",
+            "data[].model_spec.maxStateTokens",
+            "data[].model_spec.maxTotalTokens",
+            "data[].model_spec.max_duration",
+            "data[].model_spec.max_source_audio_duration_seconds",
+            "data[].model_spec.max_speed",
+            "data[].model_spec.min_duration",
+            "data[].model_spec.min_prompt_length",
+            "data[].model_spec.min_speed",
+            "data[].model_spec.modelSource",
+            "data[].model_spec.name",
+            "data[].model_spec.offline",
+            "data[].model_spec.pricing",
+            "data[].model_spec.pricing.cache_input",
+            "data[].model_spec.pricing.cache_input.diem",
+            "data[].model_spec.pricing.cache_input.usd",
+            "data[].model_spec.pricing.cache_write",
+            "data[].model_spec.pricing.cache_write.diem",
+            "data[].model_spec.pricing.cache_write.usd",
+            "data[].model_spec.pricing.durations",
+            "data[].model_spec.pricing.durations{}.diem",
+            "data[].model_spec.pricing.durations{}.max_seconds",
+            "data[].model_spec.pricing.durations{}.min_seconds",
+            "data[].model_spec.pricing.durations{}.usd",
+            "data[].model_spec.pricing.extended",
+            "data[].model_spec.pricing.extended.cache_input",
+            "data[].model_spec.pricing.extended.cache_input.diem",
+            "data[].model_spec.pricing.extended.cache_input.usd",
+            "data[].model_spec.pricing.extended.cache_write",
+            "data[].model_spec.pricing.extended.cache_write.diem",
+            "data[].model_spec.pricing.extended.cache_write.usd",
+            "data[].model_spec.pricing.extended.context_token_threshold",
+            "data[].model_spec.pricing.extended.input",
+            "data[].model_spec.pricing.extended.input.diem",
+            "data[].model_spec.pricing.extended.input.usd",
+            "data[].model_spec.pricing.extended.output",
+            "data[].model_spec.pricing.extended.output.diem",
+            "data[].model_spec.pricing.extended.output.usd",
+            "data[].model_spec.pricing.generation",
+            "data[].model_spec.pricing.generation.diem",
+            "data[].model_spec.pricing.generation.usd",
+            "data[].model_spec.pricing.inpaint",
+            "data[].model_spec.pricing.inpaint.diem",
+            "data[].model_spec.pricing.inpaint.usd",
+            "data[].model_spec.pricing.input",
+            "data[].model_spec.pricing.input.diem",
+            "data[].model_spec.pricing.input.usd",
+            "data[].model_spec.pricing.inputImages",
+            "data[].model_spec.pricing.inputImages.additional",
+            "data[].model_spec.pricing.inputImages.additional.diem",
+            "data[].model_spec.pricing.inputImages.additional.usd",
+            "data[].model_spec.pricing.inputImages.included",
+            "data[].model_spec.pricing.output",
+            "data[].model_spec.pricing.output.diem",
+            "data[].model_spec.pricing.output.usd",
+            "data[].model_spec.pricing.per_audio_second",
+            "data[].model_spec.pricing.per_audio_second.diem",
+            "data[].model_spec.pricing.per_audio_second.usd",
+            "data[].model_spec.pricing.per_second",
+            "data[].model_spec.pricing.per_second.diem",
+            "data[].model_spec.pricing.per_second.usd",
+            "data[].model_spec.pricing.per_thousand_characters",
+            "data[].model_spec.pricing.per_thousand_characters.diem",
+            "data[].model_spec.pricing.per_thousand_characters.usd",
+            "data[].model_spec.pricing.quality",
+            "data[].model_spec.pricing.quality{}.high",
+            "data[].model_spec.pricing.quality{}.high.diem",
+            "data[].model_spec.pricing.quality{}.high.usd",
+            "data[].model_spec.pricing.quality{}.low",
+            "data[].model_spec.pricing.quality{}.low.diem",
+            "data[].model_spec.pricing.quality{}.low.usd",
+            "data[].model_spec.pricing.quality{}.medium",
+            "data[].model_spec.pricing.quality{}.medium.diem",
+            "data[].model_spec.pricing.quality{}.medium.usd",
+            "data[].model_spec.pricing.resolutions",
+            "data[].model_spec.pricing.resolutions{}.diem",
+            "data[].model_spec.pricing.resolutions{}.usd",
+            "data[].model_spec.pricing.upscale",
+            "data[].model_spec.pricing.upscale.2x",
+            "data[].model_spec.pricing.upscale.2x.diem",
+            "data[].model_spec.pricing.upscale.2x.usd",
+            "data[].model_spec.pricing.upscale.4x",
+            "data[].model_spec.pricing.upscale.4x.diem",
+            "data[].model_spec.pricing.upscale.4x.usd",
+            "data[].model_spec.privacy",
+            "data[].model_spec.prompt_character_limit",
+            "data[].model_spec.regionRestrictions",
+            "data[].model_spec.supported_formats",
+            "data[].model_spec.supportsCustomDimensions",
+            "data[].model_spec.supportsStyleReferences",
+            "data[].model_spec.supports_background_noise_removal",
+            "data[].model_spec.supports_custom_voice_id",
+            "data[].model_spec.supports_force_instrumental",
+            "data[].model_spec.supports_language_code",
+            "data[].model_spec.supports_loop",
+            "data[].model_spec.supports_lyrics",
+            "data[].model_spec.supports_seed",
+            "data[].model_spec.supports_speed",
+            "data[].model_spec.traits",
+            "data[].model_spec.uncensored",
+            "data[].model_spec.voice_changer",
+            "data[].model_spec.voice_cloning",
+            "data[].model_spec.voice_cloning.accepted_formats",
+            "data[].model_spec.voice_cloning.min_sample_seconds",
+            "data[].model_spec.voice_cloning.mode",
+            "data[].model_spec.voice_cloning.retention_days",
+            "data[].model_spec.voices",
+            "data[].object",
+            "data[].owned_by",
+            "data[].type",
+            "object",
+            "type"
+          ]
+        }
+      }
+    },
+    "GET /models/compatibility_mapping": {
+      "params": [
+        "query.type"
+      ],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "object",
+            "type"
+          ]
+        }
+      }
+    },
+    "GET /models/traits": {
+      "params": [
+        "query.type"
+      ],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "object",
+            "type"
+          ]
+        }
+      }
+    },
+    "GET /x402/balance/{walletAddress}": {
+      "params": [
+        "header.SIGN-IN-WITH-X",
+        "path.walletAddress"
+      ],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data.balanceUsd",
+            "data.canConsume",
+            "data.diemBalanceUsd",
+            "data.minimumTopUpUsd",
+            "data.suggestedTopUpUsd",
+            "data.walletAddress",
+            "success"
+          ]
+        }
+      }
+    },
+    "GET /x402/transactions/{walletAddress}": {
+      "params": [
+        "header.SIGN-IN-WITH-X",
+        "path.walletAddress",
+        "query.limit",
+        "query.offset"
+      ],
+      "request_content_types": [],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data.currentBalance",
+            "data.pagination",
+            "data.pagination.hasMore",
+            "data.pagination.limit",
+            "data.pagination.offset",
+            "data.transactions",
+            "data.transactions[].amount",
+            "data.transactions[].balanceAfter",
+            "data.transactions[].createdAt",
+            "data.transactions[].id",
+            "data.transactions[].modelId",
+            "data.transactions[].requestId",
+            "data.transactions[].type",
+            "data.walletAddress",
+            "success"
+          ]
+        }
+      }
+    },
+    "PATCH /api_keys": {
+      "params": [
+        "body.consumptionLimit",
+        "body.consumptionLimit.diem",
+        "body.consumptionLimit.usd",
+        "body.consumptionLimit.vcu",
+        "body.description",
+        "body.expiresAt",
+        "body.id",
+        "body.ipAllowlist",
+        "body.limitPeriod",
+        "body.modelPrivacy"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data.apiKeyType",
+            "data.consumptionLimits",
+            "data.consumptionLimits.diem",
+            "data.consumptionLimits.usd",
+            "data.consumptionLimits.vcu",
+            "data.createdAt",
+            "data.description",
+            "data.expiresAt",
+            "data.id",
+            "data.ipAllowlist",
+            "data.last6Chars",
+            "data.lastUsedAt",
+            "data.limitPeriod",
+            "data.modelPrivacy",
+            "success"
+          ]
+        }
+      }
+    },
+    "POST /api_keys": {
+      "params": [
+        "body.apiKeyType",
+        "body.consumptionLimit",
+        "body.consumptionLimit.diem",
+        "body.consumptionLimit.usd",
+        "body.consumptionLimit.vcu",
+        "body.description",
+        "body.expiresAt",
+        "body.ipAllowlist",
+        "body.limitPeriod",
+        "body.modelPrivacy"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data.apiKey",
+            "data.apiKeyType",
+            "data.consumptionLimit",
+            "data.consumptionLimit.diem",
+            "data.consumptionLimit.usd",
+            "data.consumptionLimit.vcu",
+            "data.description",
+            "data.expiresAt",
+            "data.id",
+            "data.ipAllowlist",
+            "data.limitPeriod",
+            "data.modelPrivacy",
+            "success"
+          ]
+        }
+      }
+    },
+    "POST /api_keys/generate_web3_key": {
+      "params": [
+        "body.address",
+        "body.apiKeyType",
+        "body.consumptionLimit",
+        "body.consumptionLimit.diem",
+        "body.consumptionLimit.usd",
+        "body.consumptionLimit.vcu",
+        "body.description",
+        "body.expiresAt",
+        "body.ipAllowlist",
+        "body.limitPeriod",
+        "body.modelPrivacy",
+        "body.signature",
+        "body.token"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data.apiKey",
+            "data.apiKeyType",
+            "data.consumptionLimit",
+            "data.consumptionLimit.diem",
+            "data.consumptionLimit.usd",
+            "data.consumptionLimit.vcu",
+            "data.description",
+            "data.expiresAt",
+            "data.id",
+            "data.ipAllowlist",
+            "data.limitPeriod",
+            "data.modelPrivacy",
+            "success"
+          ]
+        }
+      }
+    },
+    "POST /audio/complete": {
+      "params": [
+        "body.model",
+        "body.queue_id"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "success"
+          ]
+        }
+      }
+    },
+    "POST /audio/queue": {
+      "params": [
+        "body.duration_seconds",
+        "body.force_instrumental",
+        "body.language_code",
+        "body.loop",
+        "body.lyrics_optimizer",
+        "body.lyrics_prompt",
+        "body.model",
+        "body.prompt",
+        "body.speed",
+        "body.voice"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "model",
+            "queue_id",
+            "status"
+          ]
+        }
+      }
+    },
+    "POST /audio/quote": {
+      "params": [
+        "body.character_count",
+        "body.duration_seconds",
+        "body.model"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "quote"
+          ]
+        }
+      }
+    },
+    "POST /audio/retrieve": {
+      "params": [
+        "body.delete_media_on_completion",
+        "body.model",
+        "body.queue_id"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json",
+            "audio/flac",
+            "audio/mpeg",
+            "audio/wav"
+          ],
+          "fields": [
+            "average_execution_time",
+            "execution_duration",
+            "status"
+          ]
+        }
+      }
+    },
+    "POST /audio/speech": {
+      "params": [
+        "body.input",
+        "body.language",
+        "body.model",
+        "body.prompt",
+        "body.response_format",
+        "body.speed",
+        "body.streaming",
+        "body.temperature",
+        "body.top_p",
+        "body.voice"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "audio/aac",
+            "audio/flac",
+            "audio/mpeg",
+            "audio/opus",
+            "audio/pcm",
+            "audio/wav"
+          ],
+          "fields": []
+        }
+      }
+    },
+    "POST /audio/transcriptions": {
+      "params": [
+        "body.file",
+        "body.language",
+        "body.model",
+        "body.response_format",
+        "body.timestamps"
+      ],
+      "request_content_types": [
+        "multipart/form-data"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json",
+            "text/plain"
+          ],
+          "fields": [
+            "duration",
+            "text",
+            "timestamps",
+            "timestamps.char",
+            "timestamps.char[].char",
+            "timestamps.char[].end",
+            "timestamps.char[].start",
+            "timestamps.segment",
+            "timestamps.segment[].end",
+            "timestamps.segment[].start",
+            "timestamps.segment[].text",
+            "timestamps.word",
+            "timestamps.word[].end",
+            "timestamps.word[].start",
+            "timestamps.word[].word"
+          ]
+        }
+      }
+    },
+    "POST /audio/voice-changer/complete": {
+      "params": [
+        "body.model",
+        "body.queue_id"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "success"
+          ]
+        }
+      }
+    },
+    "POST /audio/voice-changer/queue": {
+      "params": [
+        "body.audio_url",
+        "body.file",
+        "body.model",
+        "body.remove_background_noise",
+        "body.seed",
+        "body.voice"
+      ],
+      "request_content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "duration_seconds",
+            "model",
+            "queue_id",
+            "status"
+          ]
+        }
+      }
+    },
+    "POST /audio/voice-changer/quote": {
+      "params": [
+        "body.duration_seconds",
+        "body.model"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "duration_seconds",
+            "quote"
+          ]
+        }
+      }
+    },
+    "POST /audio/voice-changer/retrieve": {
+      "params": [
+        "body.delete_media_on_completion",
+        "body.model",
+        "body.queue_id"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json",
+            "audio/mpeg"
+          ],
+          "fields": [
+            "average_execution_time",
+            "execution_duration",
+            "status"
+          ]
+        }
+      }
+    },
+    "POST /audio/voices": {
+      "params": [
+        "body.file",
+        "body.model"
+      ],
+      "request_content_types": [
+        "multipart/form-data"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "id",
+            "model"
+          ]
+        }
+      }
+    },
+    "POST /augment/scrape": {
+      "params": [
+        "body.url"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "content",
+            "format",
+            "url"
+          ]
+        }
+      }
+    },
+    "POST /augment/search": {
+      "params": [
+        "body.limit",
+        "body.query",
+        "body.search_provider"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "query",
+            "results",
+            "results[].content",
+            "results[].date",
+            "results[].title",
+            "results[].url"
+          ]
+        }
+      }
+    },
+    "POST /augment/text-parser": {
+      "params": [
+        "body.file",
+        "body.response_format"
+      ],
+      "request_content_types": [
+        "multipart/form-data"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json",
+            "text/plain"
+          ],
+          "fields": [
+            "text",
+            "tokens"
+          ]
+        }
+      }
+    },
+    "POST /chat/completions": {
+      "params": [
+        "body.anon_user_id",
+        "body.fallbacks",
+        "body.fallbacks[].model",
+        "body.frequency_penalty",
+        "body.include",
+        "body.logprobs",
+        "body.max_completion_tokens",
+        "body.max_temp",
+        "body.max_tokens",
+        "body.messages",
+        "body.messages[].content",
+        "body.messages[].content[].cache_control",
+        "body.messages[].content[].cache_control.ttl",
+        "body.messages[].content[].cache_control.type",
+        "body.messages[].content[].file",
+        "body.messages[].content[].file.file_data",
+        "body.messages[].content[].file.filename",
+        "body.messages[].content[].image_url",
+        "body.messages[].content[].image_url.detail",
+        "body.messages[].content[].image_url.url",
+        "body.messages[].content[].input_audio",
+        "body.messages[].content[].input_audio.data",
+        "body.messages[].content[].input_audio.format",
+        "body.messages[].content[].text",
+        "body.messages[].content[].type",
+        "body.messages[].content[].video_url",
+        "body.messages[].content[].video_url.url",
+        "body.messages[].name",
+        "body.messages[].reasoning_content",
+        "body.messages[].reasoning_details",
+        "body.messages[].reasoning_details[].data",
+        "body.messages[].reasoning_details[].format",
+        "body.messages[].reasoning_details[].id",
+        "body.messages[].reasoning_details[].index",
+        "body.messages[].reasoning_details[].text",
+        "body.messages[].reasoning_details[].type",
+        "body.messages[].role",
+        "body.messages[].thought_signature",
+        "body.messages[].tool_call_id",
+        "body.messages[].tool_calls",
+        "body.metadata",
+        "body.min_p",
+        "body.min_temp",
+        "body.model",
+        "body.n",
+        "body.parallel_tool_calls",
+        "body.presence_penalty",
+        "body.prompt_cache_key",
+        "body.prompt_cache_retention",
+        "body.reasoning",
+        "body.reasoning.effort",
+        "body.reasoning.enabled",
+        "body.reasoning.summary",
+        "body.reasoning_effort",
+        "body.repetition_penalty",
+        "body.response_format",
+        "body.response_format.json_schema",
+        "body.response_format.type",
+        "body.seed",
+        "body.stop",
+        "body.stop_token_ids",
+        "body.store",
+        "body.stream",
+        "body.stream_options",
+        "body.stream_options.include_usage",
+        "body.temperature",
+        "body.text",
+        "body.text.verbosity",
+        "body.tool_choice",
+        "body.tool_choice.function",
+        "body.tool_choice.function.name",
+        "body.tool_choice.type",
+        "body.tools",
+        "body.tools[].function",
+        "body.tools[].function.description",
+        "body.tools[].function.name",
+        "body.tools[].function.parameters",
+        "body.tools[].function.strict",
+        "body.tools[].id",
+        "body.tools[].type",
+        "body.top_k",
+        "body.top_logprobs",
+        "body.top_p",
+        "body.user",
+        "body.venice_parameters",
+        "body.venice_parameters.character_slug",
+        "body.venice_parameters.disable_thinking",
+        "body.venice_parameters.enable_e2ee",
+        "body.venice_parameters.enable_web_citations",
+        "body.venice_parameters.enable_web_scraping",
+        "body.venice_parameters.enable_web_search",
+        "body.venice_parameters.enable_x_search",
+        "body.venice_parameters.include_search_results_in_stream",
+        "body.venice_parameters.include_venice_system_prompt",
+        "body.venice_parameters.return_search_results_as_documents",
+        "body.venice_parameters.strip_thinking_response",
+        "body.verbosity",
+        "header.Accept-Encoding"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "choices",
+            "choices[].finish_reason",
+            "choices[].index",
+            "choices[].logprobs",
+            "choices[].logprobs.bytes",
+            "choices[].logprobs.logprob",
+            "choices[].logprobs.token",
+            "choices[].logprobs.top_logprobs",
+            "choices[].logprobs.top_logprobs[].bytes",
+            "choices[].logprobs.top_logprobs[].logprob",
+            "choices[].logprobs.top_logprobs[].token",
+            "choices[].message",
+            "choices[].message.content",
+            "choices[].message.content[].cache_control",
+            "choices[].message.content[].cache_control.ttl",
+            "choices[].message.content[].cache_control.type",
+            "choices[].message.content[].text",
+            "choices[].message.content[].type",
+            "choices[].message.name",
+            "choices[].message.reasoning_content",
+            "choices[].message.reasoning_details",
+            "choices[].message.reasoning_details[].data",
+            "choices[].message.reasoning_details[].format",
+            "choices[].message.reasoning_details[].id",
+            "choices[].message.reasoning_details[].index",
+            "choices[].message.reasoning_details[].text",
+            "choices[].message.reasoning_details[].type",
+            "choices[].message.role",
+            "choices[].message.thought_signature",
+            "choices[].message.tool_call_id",
+            "choices[].message.tool_calls",
+            "choices[].stop_reason",
+            "cost",
+            "cost.diem",
+            "cost.usd",
+            "created",
+            "id",
+            "model",
+            "object",
+            "prompt_logprobs",
+            "usage",
+            "usage.completion_tokens",
+            "usage.completion_tokens_details",
+            "usage.completion_tokens_details.reasoning_tokens",
+            "usage.prompt_tokens",
+            "usage.prompt_tokens_details",
+            "usage.prompt_tokens_details.cache_creation_input_tokens",
+            "usage.prompt_tokens_details.cached_tokens",
+            "usage.total_tokens",
+            "venice_parameters",
+            "venice_parameters.character_slug",
+            "venice_parameters.disable_thinking",
+            "venice_parameters.enable_e2ee",
+            "venice_parameters.enable_web_citations",
+            "venice_parameters.enable_web_scraping",
+            "venice_parameters.enable_web_search",
+            "venice_parameters.include_search_results_in_stream",
+            "venice_parameters.include_venice_system_prompt",
+            "venice_parameters.return_search_results_as_documents",
+            "venice_parameters.strip_thinking_response",
+            "venice_parameters.web_search_citations",
+            "venice_parameters.web_search_citations[].content",
+            "venice_parameters.web_search_citations[].date",
+            "venice_parameters.web_search_citations[].title",
+            "venice_parameters.web_search_citations[].url"
+          ]
+        }
+      }
+    },
+    "POST /crypto/rpc/{network}": {
+      "params": [
+        "body.id",
+        "body.jsonrpc",
+        "body.method",
+        "body.params",
+        "body[].id",
+        "body[].jsonrpc",
+        "body[].method",
+        "body[].params",
+        "header.Idempotency-Key",
+        "path.network"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "[].error",
+            "[].error.code",
+            "[].error.data",
+            "[].error.message",
+            "[].id",
+            "[].jsonrpc",
+            "[].result",
+            "error",
+            "error.code",
+            "error.data",
+            "error.message",
+            "id",
+            "jsonrpc",
+            "result"
+          ]
+        }
+      }
+    },
+    "POST /decisions": {
+      "params": [
+        "body.model",
+        "body.questions",
+        "body.questions{}.criteria",
+        "body.questions{}.criteria.false",
+        "body.questions{}.criteria.true",
+        "body.questions{}.instructions",
+        "body.questions{}.type",
+        "body.state",
+        "header.Accept-Encoding"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "answers",
+            "answers{}.choice",
+            "answers{}.confidence",
+            "answers{}.legend",
+            "answers{}.noul",
+            "answers{}.probabilities",
+            "answers{}.score",
+            "answers{}.type",
+            "model",
+            "usage",
+            "usage.input_tokens",
+            "usage.output_tokens"
+          ]
+        }
+      }
+    },
+    "POST /embeddings": {
+      "params": [
+        "body.dimensions",
+        "body.encoding_format",
+        "body.input",
+        "body.model",
+        "body.user",
+        "header.Accept-Encoding"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data[].embedding",
+            "data[].index",
+            "data[].object",
+            "model",
+            "object",
+            "usage",
+            "usage.prompt_tokens",
+            "usage.total_tokens"
+          ]
+        }
+      }
+    },
+    "POST /image/background-remove": {
+      "params": [
+        "body.anon_user_id",
+        "body.image",
+        "body.image_url"
+      ],
+      "request_content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "image/png"
+          ],
+          "fields": []
+        }
+      }
+    },
+    "POST /image/edit": {
+      "params": [
+        "body.anon_user_id",
+        "body.aspect_ratio",
+        "body.disable_prompt_optimization_thinking",
+        "body.enhance_prompt",
+        "body.image",
+        "body.model",
+        "body.modelId",
+        "body.output_format",
+        "body.prompt",
+        "body.resolution",
+        "body.safe_mode",
+        "body.transparent_background"
+      ],
+      "request_content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+          ],
+          "fields": []
+        }
+      }
+    },
+    "POST /image/generate": {
+      "params": [
+        "body.anon_user_id",
+        "body.aspect_ratio",
+        "body.cfg_scale",
+        "body.disable_prompt_optimization_thinking",
+        "body.embed_exif_metadata",
+        "body.enable_web_search",
+        "body.enhance_prompt",
+        "body.format",
+        "body.height",
+        "body.hide_watermark",
+        "body.inpaint",
+        "body.lora_strength",
+        "body.model",
+        "body.negative_prompt",
+        "body.prompt",
+        "body.quality",
+        "body.resolution",
+        "body.return_binary",
+        "body.safe_mode",
+        "body.seed",
+        "body.steps",
+        "body.style_preset",
+        "body.style_references",
+        "body.style_references[].image",
+        "body.style_references[].strength",
+        "body.transparent_background",
+        "body.variants",
+        "body.width",
+        "header.Accept-Encoding"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json",
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+          ],
+          "fields": [
+            "content_policy_violation_count",
+            "id",
+            "images",
+            "request",
+            "timing",
+            "timing.inferenceDuration",
+            "timing.inferencePreprocessingTime",
+            "timing.inferenceQueueTime",
+            "timing.total"
+          ]
+        }
+      }
+    },
+    "POST /image/multi-edit": {
+      "params": [
+        "body.anon_user_id",
+        "body.aspect_ratio",
+        "body.disable_prompt_optimization_thinking",
+        "body.enhance_prompt",
+        "body.images",
+        "body.modelId",
+        "body.output_format",
+        "body.prompt",
+        "body.quality",
+        "body.resolution",
+        "body.safe_mode",
+        "body.transparent_background"
+      ],
+      "request_content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+          ],
+          "fields": []
+        }
+      }
+    },
+    "POST /image/upscale": {
+      "params": [
+        "body.creativity",
+        "body.image",
+        "body.scale"
+      ],
+      "request_content_types": [
+        "application/json",
+        "multipart/form-data"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "image/png"
+          ],
+          "fields": []
+        }
+      }
+    },
+    "POST /images/generations": {
+      "params": [
+        "body.anon_user_id",
+        "body.background",
+        "body.model",
+        "body.moderation",
+        "body.n",
+        "body.output_compression",
+        "body.output_format",
+        "body.prompt",
+        "body.quality",
+        "body.response_format",
+        "body.size",
+        "body.style",
+        "body.user",
+        "header.Accept-Encoding"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "created",
+            "data",
+            "data[].b64_json",
+            "data[].url"
+          ]
+        }
+      }
+    },
+    "POST /responses": {
+      "params": [
+        "body.anon_user_id",
+        "body.fallbacks",
+        "body.fallbacks[].model",
+        "body.include",
+        "body.input",
+        "body.input[].arguments",
+        "body.input[].call_id",
+        "body.input[].content",
+        "body.input[].content[].annotations",
+        "body.input[].content[].detail",
+        "body.input[].content[].image_url",
+        "body.input[].content[].image_url.detail",
+        "body.input[].content[].image_url.url",
+        "body.input[].content[].text",
+        "body.input[].content[].type",
+        "body.input[].encrypted_content",
+        "body.input[].execution",
+        "body.input[].id",
+        "body.input[].input",
+        "body.input[].name",
+        "body.input[].namespace",
+        "body.input[].output",
+        "body.input[].role",
+        "body.input[].status",
+        "body.input[].summary",
+        "body.input[].summary[].text",
+        "body.input[].summary[].type",
+        "body.input[].tools",
+        "body.input[].tools[].allowed_x_handles",
+        "body.input[].tools[].container",
+        "body.input[].tools[].container.image",
+        "body.input[].tools[].defer_loading",
+        "body.input[].tools[].description",
+        "body.input[].tools[].display_height",
+        "body.input[].tools[].display_width",
+        "body.input[].tools[].enable_image_understanding",
+        "body.input[].tools[].enable_video_understanding",
+        "body.input[].tools[].environment",
+        "body.input[].tools[].excluded_x_handles",
+        "body.input[].tools[].execution",
+        "body.input[].tools[].from_date",
+        "body.input[].tools[].function",
+        "body.input[].tools[].function.defer_loading",
+        "body.input[].tools[].function.description",
+        "body.input[].tools[].function.name",
+        "body.input[].tools[].function.parameters",
+        "body.input[].tools[].function.strict",
+        "body.input[].tools[].max_num_results",
+        "body.input[].tools[].parameters",
+        "body.input[].tools[].parameters.type",
+        "body.input[].tools[].ranking_options",
+        "body.input[].tools[].ranking_options.ranker",
+        "body.input[].tools[].ranking_options.score_threshold",
+        "body.input[].tools[].search_context_size",
+        "body.input[].tools[].to_date",
+        "body.input[].tools[].type",
+        "body.input[].tools[].user_location",
+        "body.input[].tools[].user_location.city",
+        "body.input[].tools[].user_location.country",
+        "body.input[].tools[].user_location.region",
+        "body.input[].tools[].user_location.timezone",
+        "body.input[].tools[].user_location.type",
+        "body.input[].tools[].vector_store_ids",
+        "body.input[].type",
+        "body.instructions",
+        "body.max_output_tokens",
+        "body.model",
+        "body.parallel_tool_calls",
+        "body.prompt_cache_retention",
+        "body.reasoning",
+        "body.reasoning.effort",
+        "body.reasoning.enabled",
+        "body.reasoning.summary",
+        "body.stream",
+        "body.temperature",
+        "body.tool_choice",
+        "body.tool_choice.function",
+        "body.tool_choice.function.name",
+        "body.tool_choice.name",
+        "body.tool_choice.namespace",
+        "body.tool_choice.type",
+        "body.tools",
+        "body.tools[].allowed_x_handles",
+        "body.tools[].container",
+        "body.tools[].container.image",
+        "body.tools[].defer_loading",
+        "body.tools[].description",
+        "body.tools[].display_height",
+        "body.tools[].display_width",
+        "body.tools[].enable_image_understanding",
+        "body.tools[].enable_video_understanding",
+        "body.tools[].environment",
+        "body.tools[].excluded_x_handles",
+        "body.tools[].execution",
+        "body.tools[].from_date",
+        "body.tools[].function",
+        "body.tools[].function.defer_loading",
+        "body.tools[].function.description",
+        "body.tools[].function.name",
+        "body.tools[].function.parameters",
+        "body.tools[].function.strict",
+        "body.tools[].max_num_results",
+        "body.tools[].parameters",
+        "body.tools[].parameters.type",
+        "body.tools[].ranking_options",
+        "body.tools[].ranking_options.ranker",
+        "body.tools[].ranking_options.score_threshold",
+        "body.tools[].search_context_size",
+        "body.tools[].to_date",
+        "body.tools[].type",
+        "body.tools[].user_location",
+        "body.tools[].user_location.city",
+        "body.tools[].user_location.country",
+        "body.tools[].user_location.region",
+        "body.tools[].user_location.timezone",
+        "body.tools[].user_location.type",
+        "body.tools[].vector_store_ids",
+        "body.top_p",
+        "body.venice_parameters",
+        "body.venice_parameters.character_slug",
+        "body.venice_parameters.enable_e2ee",
+        "body.venice_parameters.enable_web_citations",
+        "body.venice_parameters.enable_web_scraping",
+        "body.venice_parameters.enable_web_search",
+        "body.venice_parameters.include_search_results_in_stream",
+        "body.venice_parameters.include_venice_system_prompt",
+        "body.web_search"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "created_at",
+            "error",
+            "error.code",
+            "error.message",
+            "id",
+            "incomplete_details",
+            "incomplete_details.reason",
+            "model",
+            "object",
+            "output",
+            "output[].arguments",
+            "output[].call_id",
+            "output[].content",
+            "output[].content[].annotations",
+            "output[].content[].annotations[].end_index",
+            "output[].content[].annotations[].start_index",
+            "output[].content[].annotations[].title",
+            "output[].content[].annotations[].type",
+            "output[].content[].annotations[].url",
+            "output[].content[].text",
+            "output[].content[].type",
+            "output[].encrypted_content",
+            "output[].execution",
+            "output[].id",
+            "output[].input",
+            "output[].name",
+            "output[].namespace",
+            "output[].role",
+            "output[].status",
+            "output[].summary",
+            "output[].type",
+            "status",
+            "usage",
+            "usage.input_tokens",
+            "usage.input_tokens_details",
+            "usage.input_tokens_details.cached_tokens",
+            "usage.output_tokens",
+            "usage.output_tokens_details",
+            "usage.output_tokens_details.reasoning_tokens",
+            "usage.total_tokens"
+          ]
+        }
+      }
+    },
+    "POST /systemone": {
+      "params": [
+        "body.model",
+        "body.questions",
+        "body.questions{}.criteria",
+        "body.questions{}.criteria.false",
+        "body.questions{}.criteria.true",
+        "body.questions{}.instructions",
+        "body.questions{}.type",
+        "body.state",
+        "header.Accept-Encoding"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "answers",
+            "answers{}.choice",
+            "answers{}.confidence",
+            "answers{}.legend",
+            "answers{}.noul",
+            "answers{}.probabilities",
+            "answers{}.score",
+            "answers{}.type",
+            "model",
+            "usage",
+            "usage.input_tokens",
+            "usage.output_tokens"
+          ]
+        }
+      }
+    },
+    "POST /video/complete": {
+      "params": [
+        "body.model",
+        "body.queue_id"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "success"
+          ]
+        }
+      }
+    },
+    "POST /video/queue": {
+      "params": [
+        "body.aspect_ratio",
+        "body.audio",
+        "body.audio_url",
+        "body.camera_trajectory",
+        "body.camera_trajectory[].azimuth",
+        "body.camera_trajectory[].distance",
+        "body.camera_trajectory[].elevation",
+        "body.camera_trajectory[].time",
+        "body.compression",
+        "body.consents",
+        "body.consents.seedance",
+        "body.consents.seedance.confirmed_legal_right",
+        "body.consents.seedance.confirmed_screening_acknowledged",
+        "body.consents.seedance.confirmed_terms_and_privacy",
+        "body.creativity",
+        "body.duration",
+        "body.elements",
+        "body.elements[].frontal_image_url",
+        "body.elements[].reference_image_urls",
+        "body.elements[].video_url",
+        "body.end_image_url",
+        "body.enhancement_model",
+        "body.grain",
+        "body.h264_output",
+        "body.halo",
+        "body.image_strength",
+        "body.image_url",
+        "body.keyframes",
+        "body.keyframes[].frame_index",
+        "body.keyframes[].image_url",
+        "body.model",
+        "body.negative_prompt",
+        "body.noise",
+        "body.omni_reference_task_type",
+        "body.output_format",
+        "body.prompt",
+        "body.realism",
+        "body.recover_detail",
+        "body.reference_audio_urls",
+        "body.reference_document_urls",
+        "body.reference_image_urls",
+        "body.reference_video_urls",
+        "body.resolution",
+        "body.scene_image_urls",
+        "body.sharp",
+        "body.slowdown_factor",
+        "body.softness",
+        "body.target_fps",
+        "body.upscale_factor",
+        "body.video_url"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "download_url",
+            "model",
+            "queue_id"
+          ]
+        }
+      }
+    },
+    "POST /video/quote": {
+      "params": [
+        "body.aspect_ratio",
+        "body.audio",
+        "body.duration",
+        "body.enhancement_model",
+        "body.model",
+        "body.reference_video_total_duration",
+        "body.resolution",
+        "body.slowdown_factor",
+        "body.target_fps",
+        "body.upscale_factor",
+        "body.video_url"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "quote"
+          ]
+        }
+      }
+    },
+    "POST /video/retrieve": {
+      "params": [
+        "body.delete_media_on_completion",
+        "body.model",
+        "body.queue_id"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json",
+            "video/mp4"
+          ],
+          "fields": [
+            "average_execution_time",
+            "execution_duration",
+            "status"
+          ]
+        }
+      }
+    },
+    "POST /video/transcriptions": {
+      "params": [],
+      "request_content_types": [],
+      "responses": {}
+    },
+    "POST /x402/top-up": {
+      "params": [
+        "header.PAYMENT-SIGNATURE"
+      ],
+      "request_content_types": [
+        "application/json"
+      ],
+      "responses": {
+        "200": {
+          "content_types": [
+            "application/json"
+          ],
+          "fields": [
+            "data",
+            "data.amountCredited",
+            "data.newBalance",
+            "data.paymentId",
+            "data.walletAddress",
+            "success"
+          ]
+        }
+      }
+    }
+  },
+  "enums": {
+    "GET /api_keys response.200.data[].apiKeyType": [
+      "\"ADMIN\"",
+      "\"INFERENCE\""
+    ],
+    "GET /api_keys response.200.data[].limitPeriod": [
+      "\"EPOCH\"",
+      "\"LIFETIME\"",
+      "\"MONTH\""
+    ],
+    "GET /api_keys response.200.data[].modelPrivacy": [
+      "\"ALL\"",
+      "\"PRIVATE_ONLY\"",
+      "\"PRIVATE_TEXT\""
+    ],
+    "GET /api_keys response.200.object": [
+      "\"list\""
+    ],
+    "GET /api_keys/rate_limits/log response.200.data[].rateLimitType": [
+      "\"FAILED_REQUESTS\"",
+      "\"RPD\"",
+      "\"RPM\"",
+      "\"TPM\"",
+      "\"UNSUPPORTED_FEATURE_REQUESTS\""
+    ],
+    "GET /api_keys/rate_limits/log response.200.object": [
+      "\"list\""
+    ],
+    "GET /api_keys/{id} response.200.data.apiKeyType": [
+      "\"ADMIN\"",
+      "\"INFERENCE\""
+    ],
+    "GET /api_keys/{id} response.200.data.limitPeriod": [
+      "\"EPOCH\"",
+      "\"LIFETIME\"",
+      "\"MONTH\""
+    ],
+    "GET /api_keys/{id} response.200.data.modelPrivacy": [
+      "\"ALL\"",
+      "\"PRIVATE_ONLY\"",
+      "\"PRIVATE_TEXT\""
+    ],
+    "GET /billing/balance response.200.consumptionCurrency": [
+      "\"BUNDLED_CREDITS\"",
+      "\"DIEM\"",
+      "\"EARNED_CREDITS\"",
+      "\"USD\"",
+      "\"VCU\""
+    ],
+    "GET /billing/usage-history query.currency": [
+      "\"BUNDLED_CREDITS\"",
+      "\"DIEM\"",
+      "\"EARNED_CREDITS\"",
+      "\"USD\""
+    ],
+    "GET /billing/usage-history response.200.data[].currency": [
+      "\"BUNDLED_CREDITS\"",
+      "\"DIEM\"",
+      "\"EARNED_CREDITS\"",
+      "\"USD\""
+    ],
+    "GET /characters query.isAdult": [
+      "\"false\"",
+      "\"true\""
+    ],
+    "GET /characters query.isPro": [
+      "\"false\"",
+      "\"true\""
+    ],
+    "GET /characters query.isWebEnabled": [
+      "\"false\"",
+      "\"true\""
+    ],
+    "GET /characters query.sortBy": [
+      "\"featured\"",
+      "\"highestRating\"",
+      "\"highlyRated\"",
+      "\"highlyRatedAndRecent\"",
+      "\"imports\"",
+      "\"mostRecent\"",
+      "\"ratingCount\""
+    ],
+    "GET /characters query.sortOrder": [
+      "\"asc\"",
+      "\"desc\""
+    ],
+    "GET /characters response.200.object": [
+      "\"list\""
+    ],
+    "GET /characters/{slug} response.200.object": [
+      "\"character\""
+    ],
+    "GET /characters/{slug}/reviews response.200.object": [
+      "\"list\""
+    ],
+    "GET /image/styles response.200.object": [
+      "\"list\""
+    ],
+    "GET /models query.type": [
+      "\"all\"",
+      "\"asr\"",
+      "\"code\"",
+      "\"decision\"",
+      "\"embedding\"",
+      "\"image\"",
+      "\"inpaint\"",
+      "\"music\"",
+      "\"text\"",
+      "\"tts\"",
+      "\"upscale\"",
+      "\"video\""
+    ],
+    "GET /models response.200.object": [
+      "\"list\""
+    ],
+    "GET /models response.200.type": [
+      "\"all\"",
+      "\"asr\"",
+      "\"code\"",
+      "\"decision\"",
+      "\"embedding\"",
+      "\"image\"",
+      "\"inpaint\"",
+      "\"music\"",
+      "\"text\"",
+      "\"tts\"",
+      "\"upscale\"",
+      "\"video\""
+    ],
+    "GET /models/compatibility_mapping query.type": [
+      "\"asr\"",
+      "\"decision\"",
+      "\"embedding\"",
+      "\"image\"",
+      "\"inpaint\"",
+      "\"music\"",
+      "\"text\"",
+      "\"tts\"",
+      "\"upscale\"",
+      "\"video\""
+    ],
+    "GET /models/compatibility_mapping response.200.object": [
+      "\"list\""
+    ],
+    "GET /models/compatibility_mapping response.200.type": [
+      "\"all\"",
+      "\"asr\"",
+      "\"code\"",
+      "\"decision\"",
+      "\"embedding\"",
+      "\"image\"",
+      "\"inpaint\"",
+      "\"music\"",
+      "\"text\"",
+      "\"tts\"",
+      "\"upscale\"",
+      "\"video\""
+    ],
+    "GET /models/traits query.type": [
+      "\"asr\"",
+      "\"decision\"",
+      "\"embedding\"",
+      "\"image\"",
+      "\"inpaint\"",
+      "\"music\"",
+      "\"text\"",
+      "\"tts\"",
+      "\"upscale\"",
+      "\"video\""
+    ],
+    "GET /models/traits response.200.object": [
+      "\"list\""
+    ],
+    "GET /models/traits response.200.type": [
+      "\"all\"",
+      "\"asr\"",
+      "\"code\"",
+      "\"decision\"",
+      "\"embedding\"",
+      "\"image\"",
+      "\"inpaint\"",
+      "\"music\"",
+      "\"text\"",
+      "\"tts\"",
+      "\"upscale\"",
+      "\"video\""
+    ],
+    "GET /x402/balance/{walletAddress} response.200.success": [
+      "true"
+    ],
+    "GET /x402/transactions/{walletAddress} response.200.success": [
+      "true"
+    ],
+    "PATCH /api_keys body.expiresAt": [
+      "\"\""
+    ],
+    "PATCH /api_keys body.limitPeriod": [
+      "\"EPOCH\"",
+      "\"LIFETIME\"",
+      "\"MONTH\""
+    ],
+    "PATCH /api_keys body.modelPrivacy": [
+      "\"ALL\"",
+      "\"PRIVATE_ONLY\"",
+      "\"PRIVATE_TEXT\""
+    ],
+    "PATCH /api_keys response.200.data.apiKeyType": [
+      "\"ADMIN\"",
+      "\"INFERENCE\""
+    ],
+    "PATCH /api_keys response.200.data.limitPeriod": [
+      "\"EPOCH\"",
+      "\"LIFETIME\"",
+      "\"MONTH\""
+    ],
+    "PATCH /api_keys response.200.data.modelPrivacy": [
+      "\"ALL\"",
+      "\"PRIVATE_ONLY\"",
+      "\"PRIVATE_TEXT\""
+    ],
+    "POST /api_keys body.apiKeyType": [
+      "\"ADMIN\"",
+      "\"INFERENCE\""
+    ],
+    "POST /api_keys body.expiresAt": [
+      "\"\""
+    ],
+    "POST /api_keys body.limitPeriod": [
+      "\"EPOCH\"",
+      "\"LIFETIME\"",
+      "\"MONTH\""
+    ],
+    "POST /api_keys body.modelPrivacy": [
+      "\"ALL\"",
+      "\"PRIVATE_ONLY\"",
+      "\"PRIVATE_TEXT\""
+    ],
+    "POST /api_keys response.200.data.apiKeyType": [
+      "\"ADMIN\"",
+      "\"INFERENCE\""
+    ],
+    "POST /api_keys response.200.data.limitPeriod": [
+      "\"EPOCH\"",
+      "\"LIFETIME\"",
+      "\"MONTH\""
+    ],
+    "POST /api_keys response.200.data.modelPrivacy": [
+      "\"ALL\"",
+      "\"PRIVATE_ONLY\"",
+      "\"PRIVATE_TEXT\""
+    ],
+    "POST /api_keys/generate_web3_key body.apiKeyType": [
+      "\"ADMIN\"",
+      "\"INFERENCE\""
+    ],
+    "POST /api_keys/generate_web3_key body.expiresAt": [
+      "\"\""
+    ],
+    "POST /api_keys/generate_web3_key body.limitPeriod": [
+      "\"EPOCH\"",
+      "\"LIFETIME\"",
+      "\"MONTH\""
+    ],
+    "POST /api_keys/generate_web3_key body.modelPrivacy": [
+      "\"ALL\"",
+      "\"PRIVATE_ONLY\"",
+      "\"PRIVATE_TEXT\""
+    ],
+    "POST /api_keys/generate_web3_key response.200.data.apiKeyType": [
+      "\"ADMIN\"",
+      "\"INFERENCE\""
+    ],
+    "POST /api_keys/generate_web3_key response.200.data.limitPeriod": [
+      "\"EPOCH\"",
+      "\"LIFETIME\"",
+      "\"MONTH\""
+    ],
+    "POST /api_keys/generate_web3_key response.200.data.modelPrivacy": [
+      "\"ALL\"",
+      "\"PRIVATE_ONLY\"",
+      "\"PRIVATE_TEXT\""
+    ],
+    "POST /audio/queue response.200.status": [
+      "\"QUEUED\""
+    ],
+    "POST /audio/retrieve response.200.status": [
+      "\"PROCESSING\""
+    ],
+    "POST /audio/voice-changer/queue response.200.status": [
+      "\"QUEUED\""
+    ],
+    "POST /audio/voice-changer/retrieve response.200.status": [
+      "\"PROCESSING\""
+    ],
+    "POST /augment/text-parser body.response_format": [
+      "\"json\"",
+      "\"text\""
+    ],
+    "POST /chat/completions response.200.choices[].finish_reason": [
+      "\"content_filter\"",
+      "\"length\"",
+      "\"stop\"",
+      "\"tool_calls\""
+    ],
+    "POST /chat/completions response.200.choices[].message.content[].cache_control.type": [
+      "\"ephemeral\""
+    ],
+    "POST /chat/completions response.200.choices[].message.content[].type": [
+      "\"text\""
+    ],
+    "POST /chat/completions response.200.choices[].message.role": [
+      "\"assistant\"",
+      "\"tool\""
+    ],
+    "POST /chat/completions response.200.choices[].stop_reason": [
+      "\"length\"",
+      "\"stop\""
+    ],
+    "POST /chat/completions response.200.object": [
+      "\"chat.completion\""
+    ],
+    "POST /chat/completions response.200.venice_parameters.enable_web_search": [
+      "\"auto\"",
+      "\"off\"",
+      "\"on\""
+    ],
+    "POST /crypto/rpc/{network} body.jsonrpc": [
+      "\"2.0\""
+    ],
+    "POST /crypto/rpc/{network} body[].jsonrpc": [
+      "\"2.0\""
+    ],
+    "POST /decisions response.200.answers{}.type": [
+      "\"choice\"",
+      "\"noul\"",
+      "\"score\""
+    ],
+    "POST /embeddings response.200.data[].object": [
+      "\"embedding\""
+    ],
+    "POST /embeddings response.200.object": [
+      "\"list\""
+    ],
+    "POST /image/edit body.modelId": [
+      "\"firered-image-edit\"",
+      "\"flux-2-max-edit\"",
+      "\"flux-3-image-edit\"",
+      "\"gpt-image-1-5-edit\"",
+      "\"gpt-image-2-5-flare-edit\"",
+      "\"gpt-image-2-5-sunburst-edit\"",
+      "\"gpt-image-2-edit\"",
+      "\"grok-imagine-edit\"",
+      "\"grok-imagine-image-2-0-edit\"",
+      "\"grok-imagine-quality-edit\"",
+      "\"ideogram-v4-5-edit\"",
+      "\"luma-uni-1-edit\"",
+      "\"luma-uni-1-max-edit\"",
+      "\"muse-image-edit\"",
+      "\"nano-banana-2-1-edit\"",
+      "\"nano-banana-2-edit\"",
+      "\"nano-banana-2-lite-edit\"",
+      "\"nano-banana-pro-edit\"",
+      "\"qwen-edit-uncensored\"",
+      "\"qwen-image-2-1-pro-edit\"",
+      "\"qwen-image-2-1-turbo-edit\"",
+      "\"qwen-image-2-edit\"",
+      "\"qwen-image-2-pro-edit\"",
+      "\"qwen-image-3-edit\"",
+      "\"qwen-image-3-pro-edit\"",
+      "\"seedream-v4-edit\"",
+      "\"seedream-v5-lite-edit\"",
+      "\"seedream-v5-pro-edit\"",
+      "\"wan-2-7-pro-edit\""
+    ],
+    "POST /image/multi-edit body.modelId": [
+      "\"firered-image-edit\"",
+      "\"flux-2-max-edit\"",
+      "\"flux-3-image-edit\"",
+      "\"gpt-image-1-5-edit\"",
+      "\"gpt-image-2-5-flare-edit\"",
+      "\"gpt-image-2-5-sunburst-edit\"",
+      "\"gpt-image-2-edit\"",
+      "\"grok-imagine-edit\"",
+      "\"grok-imagine-image-2-0-edit\"",
+      "\"grok-imagine-quality-edit\"",
+      "\"ideogram-v4-5-edit\"",
+      "\"muse-image-edit\"",
+      "\"nano-banana-2-1-edit\"",
+      "\"nano-banana-2-edit\"",
+      "\"nano-banana-2-lite-edit\"",
+      "\"nano-banana-pro-edit\"",
+      "\"qwen-edit-uncensored\"",
+      "\"qwen-image-2-1-pro-edit\"",
+      "\"qwen-image-2-1-turbo-edit\"",
+      "\"qwen-image-2-edit\"",
+      "\"qwen-image-2-pro-edit\"",
+      "\"qwen-image-3-edit\"",
+      "\"qwen-image-3-pro-edit\"",
+      "\"seedream-v4-edit\"",
+      "\"seedream-v5-lite-edit\"",
+      "\"seedream-v5-pro-edit\"",
+      "\"wan-2-7-pro-edit\""
+    ],
+    "POST /responses response.200.incomplete_details.reason": [
+      "\"content_filter\"",
+      "\"max_output_tokens\""
+    ],
+    "POST /responses response.200.object": [
+      "\"response\""
+    ],
+    "POST /responses response.200.output[].content[].annotations[].type": [
+      "\"url_citation\""
+    ],
+    "POST /responses response.200.output[].content[].type": [
+      "\"output_text\""
+    ],
+    "POST /responses response.200.output[].execution": [
+      "\"client\""
+    ],
+    "POST /responses response.200.output[].role": [
+      "\"assistant\""
+    ],
+    "POST /responses response.200.output[].status": [
+      "\"completed\"",
+      "\"failed\"",
+      "\"in_progress\"",
+      "\"incomplete\""
+    ],
+    "POST /responses response.200.output[].type": [
+      "\"custom_tool_call\"",
+      "\"function_call\"",
+      "\"message\"",
+      "\"reasoning\"",
+      "\"tool_search_call\"",
+      "\"web_search_call\""
+    ],
+    "POST /responses response.200.status": [
+      "\"cancelled\"",
+      "\"completed\"",
+      "\"failed\"",
+      "\"in_progress\"",
+      "\"incomplete\""
+    ],
+    "POST /systemone response.200.answers{}.type": [
+      "\"choice\"",
+      "\"noul\"",
+      "\"score\""
+    ],
+    "POST /video/retrieve response.200.status": [
+      "\"COMPLETED\"",
+      "\"PROCESSING\""
+    ],
+    "POST /x402/top-up response.200.success": [
+      "true"
+    ],
+    "schemas/ApiKeyIpRestrictedError.error": [
+      "\"This API key is restricted to configured IP addresses, and this request's source IP is not allowed\""
+    ],
+    "schemas/BillingBalanceResponse.consumptionCurrency": [
+      "\"BUNDLED_CREDITS\"",
+      "\"DIEM\"",
+      "\"EARNED_CREDITS\"",
+      "\"USD\"",
+      "\"VCU\""
+    ],
+    "schemas/BillingUsageHistoryRequest.currency": [
+      "\"BUNDLED_CREDITS\"",
+      "\"DIEM\"",
+      "\"EARNED_CREDITS\"",
+      "\"USD\""
+    ],
+    "schemas/BillingUsageHistoryResponse.data[].currency": [
+      "\"BUNDLED_CREDITS\"",
+      "\"DIEM\"",
+      "\"EARNED_CREDITS\"",
+      "\"USD\""
+    ],
+    "schemas/ChatCompletionContentPartInputAudio.cache_control.type": [
+      "\"ephemeral\""
+    ],
+    "schemas/ChatCompletionContentPartInputAudio.input_audio.format": [
+      "\"aac\"",
+      "\"aiff\"",
+      "\"flac\"",
+      "\"m4a\"",
+      "\"mp3\"",
+      "\"ogg\"",
+      "\"pcm16\"",
+      "\"pcm24\"",
+      "\"wav\""
+    ],
+    "schemas/ChatCompletionContentPartInputAudio.type": [
+      "\"input_audio\""
+    ],
+    "schemas/ChatCompletionContentPartVideoUrl.cache_control.type": [
+      "\"ephemeral\""
+    ],
+    "schemas/ChatCompletionContentPartVideoUrl.type": [
+      "\"video_url\""
+    ],
+    "schemas/ChatCompletionRequest.messages[].content[].cache_control.type": [
+      "\"ephemeral\""
+    ],
+    "schemas/ChatCompletionRequest.messages[].content[].image_url.detail": [
+      "\"auto\"",
+      "\"high\"",
+      "\"low\"",
+      "\"original\""
+    ],
+    "schemas/ChatCompletionRequest.messages[].content[].input_audio.format": [
+      "\"aac\"",
+      "\"aiff\"",
+      "\"flac\"",
+      "\"m4a\"",
+      "\"mp3\"",
+      "\"ogg\"",
+      "\"pcm16\"",
+      "\"pcm24\"",
+      "\"wav\""
+    ],
+    "schemas/ChatCompletionRequest.messages[].content[].type": [
+      "\"file\"",
+      "\"image_url\"",
+      "\"input_audio\"",
+      "\"text\"",
+      "\"video_url\""
+    ],
+    "schemas/ChatCompletionRequest.messages[].role": [
+      "\"assistant\"",
+      "\"developer\"",
+      "\"system\"",
+      "\"tool\"",
+      "\"user\""
+    ],
+    "schemas/ChatCompletionRequest.prompt_cache_retention": [
+      "\"24h\"",
+      "\"default\"",
+      "\"extended\""
+    ],
+    "schemas/ChatCompletionRequest.reasoning.effort": [
+      "\"high\"",
+      "\"low\"",
+      "\"max\"",
+      "\"medium\"",
+      "\"minimal\"",
+      "\"none\"",
+      "\"xhigh\""
+    ],
+    "schemas/ChatCompletionRequest.reasoning.summary": [
+      "\"auto\"",
+      "\"concise\"",
+      "\"detailed\""
+    ],
+    "schemas/ChatCompletionRequest.reasoning_effort": [
+      "\"high\"",
+      "\"low\"",
+      "\"max\"",
+      "\"medium\"",
+      "\"minimal\"",
+      "\"none\"",
+      "\"xhigh\""
+    ],
+    "schemas/ChatCompletionRequest.response_format.type": [
+      "\"json_object\"",
+      "\"json_schema\"",
+      "\"text\""
+    ],
+    "schemas/ChatCompletionRequest.text.verbosity": [
+      "\"auto\"",
+      "\"high\"",
+      "\"low\"",
+      "\"medium\""
+    ],
+    "schemas/ChatCompletionRequest.tools[].type": [
+      "\"web_search\"",
+      "\"x_search\""
+    ],
+    "schemas/ChatCompletionRequest.venice_parameters.enable_web_search": [
+      "\"auto\"",
+      "\"off\"",
+      "\"on\""
+    ],
+    "schemas/ChatCompletionRequest.verbosity": [
+      "\"auto\"",
+      "\"high\"",
+      "\"low\"",
+      "\"medium\""
+    ],
+    "schemas/CreateClonedVoiceRequestSchema.model": [
+      "\"tts-chatterbox-hd\"",
+      "\"tts-minimax-speech-02-hd\""
+    ],
+    "schemas/CreateDecisionRequestSchema.model": [
+      "\"clef\"",
+      "\"jev-latest\""
+    ],
+    "schemas/CreateDecisionRequestSchema.questions{}.type": [
+      "\"choice\"",
+      "\"noul\"",
+      "\"score\""
+    ],
+    "schemas/CreateEmbeddingRequestSchema.encoding_format": [
+      "\"base64\"",
+      "\"float\""
+    ],
+    "schemas/CreateEmbeddingRequestSchema.model": [
+      "\"gemini-embedding-2-preview\"",
+      "\"text-embedding-3-large\"",
+      "\"text-embedding-3-small\"",
+      "\"text-embedding-bge-en-icl\"",
+      "\"text-embedding-bge-m3\"",
+      "\"text-embedding-multilingual-e5-large-instruct\"",
+      "\"text-embedding-nemotron-embed-vl-1b-v2\"",
+      "\"text-embedding-qwen3-0-6b\"",
+      "\"text-embedding-qwen3-8b\""
+    ],
+    "schemas/CreateSpeechRequestSchema.model": [
+      "\"tts-chatterbox-hd\"",
+      "\"tts-elevenlabs-turbo-v2-5\"",
+      "\"tts-gemini-3-1-flash\"",
+      "\"tts-gradium-v1\"",
+      "\"tts-inworld-1-5-max\"",
+      "\"tts-kokoro\"",
+      "\"tts-minimax-speech-02-hd\"",
+      "\"tts-orpheus\"",
+      "\"tts-qwen3-0-6b\"",
+      "\"tts-qwen3-1-7b\"",
+      "\"tts-xai-v1\""
+    ],
+    "schemas/CreateSpeechRequestSchema.response_format": [
+      "\"aac\"",
+      "\"flac\"",
+      "\"mp3\"",
+      "\"opus\"",
+      "\"pcm\"",
+      "\"wav\""
+    ],
+    "schemas/CreateTranscriptionRequestSchema.model": [
+      "\"elevenlabs/scribe-v2\"",
+      "\"fal-ai/wizper\"",
+      "\"nvidia/parakeet-tdt-0.6b-v3\"",
+      "\"openai/whisper-large-v3\"",
+      "\"stt-xai-v1\""
+    ],
+    "schemas/CreateTranscriptionRequestSchema.response_format": [
+      "\"json\"",
+      "\"text\""
+    ],
+    "schemas/EditImageRequest.aspect_ratio": [
+      "\"16:9\"",
+      "\"1:1\"",
+      "\"21:9\"",
+      "\"2:3\"",
+      "\"3:2\"",
+      "\"3:4\"",
+      "\"4:3\"",
+      "\"4:5\"",
+      "\"9:16\"",
+      "\"auto\""
+    ],
+    "schemas/EditImageRequest.output_format": [
+      "\"jpeg\"",
+      "\"png\"",
+      "\"webp\""
+    ],
+    "schemas/GenerateImageRequest.format": [
+      "\"jpeg\"",
+      "\"png\"",
+      "\"webp\""
+    ],
+    "schemas/GenerateImageRequest.quality": [
+      "\"high\"",
+      "\"low\"",
+      "\"medium\""
+    ],
+    "schemas/ModelResponse.model_spec.capabilities.defaultReasoningEffort": [
+      "\"high\"",
+      "\"low\"",
+      "\"max\"",
+      "\"medium\"",
+      "\"minimal\"",
+      "\"none\"",
+      "\"xhigh\""
+    ],
+    "schemas/ModelResponse.model_spec.capabilities.quantization": [
+      "\"bf16\"",
+      "\"fp16\"",
+      "\"fp4\"",
+      "\"fp8\"",
+      "\"int4\"",
+      "\"int8\"",
+      "\"not-available\""
+    ],
+    "schemas/ModelResponse.model_spec.capabilities.reasoningEffortOptions[]": [
+      "\"high\"",
+      "\"low\"",
+      "\"max\"",
+      "\"medium\"",
+      "\"minimal\"",
+      "\"none\"",
+      "\"xhigh\""
+    ],
+    "schemas/ModelResponse.model_spec.constraints.defaultQuality": [
+      "\"high\"",
+      "\"low\"",
+      "\"medium\""
+    ],
+    "schemas/ModelResponse.model_spec.constraints.model_type": [
+      "\"image-to-video\"",
+      "\"text-to-video\"",
+      "\"video\""
+    ],
+    "schemas/ModelResponse.model_spec.constraints.qualities[]": [
+      "\"high\"",
+      "\"low\"",
+      "\"medium\""
+    ],
+    "schemas/ModelResponse.model_spec.privacy": [
+      "\"anonymized\"",
+      "\"private\""
+    ],
+    "schemas/ModelResponse.model_spec.voice_cloning.mode": [
+      "\"persistent\"",
+      "\"zero_shot\""
+    ],
+    "schemas/ModelResponse.object": [
+      "\"model\""
+    ],
+    "schemas/ModelResponse.owned_by": [
+      "\"venice.ai\""
+    ],
+    "schemas/ModelResponse.type": [
+      "\"asr\"",
+      "\"decision\"",
+      "\"embedding\"",
+      "\"image\"",
+      "\"inpaint\"",
+      "\"music\"",
+      "\"text\"",
+      "\"tts\"",
+      "\"upscale\"",
+      "\"video\""
+    ],
+    "schemas/MultiEditImageMultipartRequest.aspect_ratio": [
+      "\"16:9\"",
+      "\"1:1\"",
+      "\"21:9\"",
+      "\"2:3\"",
+      "\"3:2\"",
+      "\"3:4\"",
+      "\"4:3\"",
+      "\"4:5\"",
+      "\"9:16\"",
+      "\"auto\""
+    ],
+    "schemas/MultiEditImageMultipartRequest.output_format": [
+      "\"jpeg\"",
+      "\"png\"",
+      "\"webp\""
+    ],
+    "schemas/MultiEditImageMultipartRequest.quality": [
+      "\"high\"",
+      "\"low\"",
+      "\"medium\""
+    ],
+    "schemas/MultiEditImageRequest.aspect_ratio": [
+      "\"16:9\"",
+      "\"1:1\"",
+      "\"21:9\"",
+      "\"2:3\"",
+      "\"3:2\"",
+      "\"3:4\"",
+      "\"4:3\"",
+      "\"4:5\"",
+      "\"9:16\"",
+      "\"auto\""
+    ],
+    "schemas/MultiEditImageRequest.output_format": [
+      "\"jpeg\"",
+      "\"png\"",
+      "\"webp\""
+    ],
+    "schemas/MultiEditImageRequest.quality": [
+      "\"high\"",
+      "\"low\"",
+      "\"medium\""
+    ],
+    "schemas/PayloadTooLargeError.code": [
+      "\"PAYLOAD_TOO_LARGE\""
+    ],
+    "schemas/ProviderContentPolicyError.error.type": [
+      "\"provider_content_policy\""
+    ],
+    "schemas/QueueVideoRequest.aspect_ratio": [
+      "\"16:9\"",
+      "\"1:1\"",
+      "\"21:9\"",
+      "\"2:1\"",
+      "\"2:3\"",
+      "\"3:2\"",
+      "\"3:4\"",
+      "\"4:3\"",
+      "\"4:5\"",
+      "\"5:4\"",
+      "\"9:16\"",
+      "\"9:21\"",
+      "\"adaptive\"",
+      "\"auto\""
+    ],
+    "schemas/QueueVideoRequest.consents.seedance.confirmed_legal_right": [
+      "true"
+    ],
+    "schemas/QueueVideoRequest.consents.seedance.confirmed_screening_acknowledged": [
+      "true"
+    ],
+    "schemas/QueueVideoRequest.consents.seedance.confirmed_terms_and_privacy": [
+      "true"
+    ],
+    "schemas/QueueVideoRequest.duration": [
+      "\"-1\"",
+      "\"1 gen\"",
+      "\"10s\"",
+      "\"11s\"",
+      "\"12s\"",
+      "\"13s\"",
+      "\"14s\"",
+      "\"15s\"",
+      "\"16s\"",
+      "\"17s\"",
+      "\"18s\"",
+      "\"19s\"",
+      "\"1s\"",
+      "\"20s\"",
+      "\"21s\"",
+      "\"22s\"",
+      "\"23s\"",
+      "\"24s\"",
+      "\"25s\"",
+      "\"26s\"",
+      "\"27s\"",
+      "\"28s\"",
+      "\"29s\"",
+      "\"2s\"",
+      "\"30s\"",
+      "\"3s\"",
+      "\"4s\"",
+      "\"5s\"",
+      "\"6s\"",
+      "\"7s\"",
+      "\"8s\"",
+      "\"9s\"",
+      "\"Auto\"",
+      "\"auto\""
+    ],
+    "schemas/QueueVideoRequest.omni_reference_task_type": [
+      "\"auto\"",
+      "\"edit\"",
+      "\"extend\"",
+      "\"reference\""
+    ],
+    "schemas/QueueVideoRequest.output_format": [
+      "\"mp4\"",
+      "\"prores\""
+    ],
+    "schemas/QueueVideoRequest.resolution": [
+      "\"1080P\"",
+      "\"1080p\"",
+      "\"1440p\"",
+      "\"1x\"",
+      "\"2160p\"",
+      "\"256p\"",
+      "\"2K\"",
+      "\"2k\"",
+      "\"2x\"",
+      "\"360p\"",
+      "\"480P\"",
+      "\"480p\"",
+      "\"4k\"",
+      "\"4x\"",
+      "\"540p\"",
+      "\"580p\"",
+      "\"720p\"",
+      "\"768P\"",
+      "\"true_1080p\""
+    ],
+    "schemas/QueueVideoRequest.slowdown_factor": [
+      "1",
+      "2",
+      "4",
+      "8"
+    ],
+    "schemas/QueueVideoRequest.upscale_factor": [
+      "1",
+      "2",
+      "4"
+    ],
+    "schemas/QuoteVideoRequest.aspect_ratio": [
+      "\"16:9\"",
+      "\"1:1\"",
+      "\"21:9\"",
+      "\"2:1\"",
+      "\"2:3\"",
+      "\"3:2\"",
+      "\"3:4\"",
+      "\"4:3\"",
+      "\"4:5\"",
+      "\"5:4\"",
+      "\"9:16\"",
+      "\"9:21\"",
+      "\"adaptive\"",
+      "\"auto\""
+    ],
+    "schemas/QuoteVideoRequest.duration": [
+      "\"-1\"",
+      "\"1 gen\"",
+      "\"10s\"",
+      "\"11s\"",
+      "\"12s\"",
+      "\"13s\"",
+      "\"14s\"",
+      "\"15s\"",
+      "\"16s\"",
+      "\"17s\"",
+      "\"18s\"",
+      "\"19s\"",
+      "\"1s\"",
+      "\"20s\"",
+      "\"21s\"",
+      "\"22s\"",
+      "\"23s\"",
+      "\"24s\"",
+      "\"25s\"",
+      "\"26s\"",
+      "\"27s\"",
+      "\"28s\"",
+      "\"29s\"",
+      "\"2s\"",
+      "\"30s\"",
+      "\"3s\"",
+      "\"4s\"",
+      "\"5s\"",
+      "\"6s\"",
+      "\"7s\"",
+      "\"8s\"",
+      "\"9s\"",
+      "\"Auto\"",
+      "\"auto\""
+    ],
+    "schemas/QuoteVideoRequest.resolution": [
+      "\"1080P\"",
+      "\"1080p\"",
+      "\"1440p\"",
+      "\"1x\"",
+      "\"2160p\"",
+      "\"256p\"",
+      "\"2K\"",
+      "\"2k\"",
+      "\"2x\"",
+      "\"360p\"",
+      "\"480P\"",
+      "\"480p\"",
+      "\"4k\"",
+      "\"4x\"",
+      "\"540p\"",
+      "\"580p\"",
+      "\"720p\"",
+      "\"768P\"",
+      "\"true_1080p\""
+    ],
+    "schemas/QuoteVideoRequest.slowdown_factor": [
+      "1",
+      "2",
+      "4",
+      "8"
+    ],
+    "schemas/QuoteVideoRequest.upscale_factor": [
+      "1",
+      "2",
+      "4"
+    ],
+    "schemas/ResponsesRequest.input[].content[].detail": [
+      "\"auto\"",
+      "\"high\"",
+      "\"low\"",
+      "\"original\""
+    ],
+    "schemas/ResponsesRequest.input[].content[].image_url.detail": [
+      "\"auto\"",
+      "\"high\"",
+      "\"low\"",
+      "\"original\""
+    ],
+    "schemas/ResponsesRequest.input[].content[].type": [
+      "\"image_url\"",
+      "\"input_image\"",
+      "\"input_text\"",
+      "\"output_text\"",
+      "\"text\""
+    ],
+    "schemas/ResponsesRequest.input[].execution": [
+      "\"client\""
+    ],
+    "schemas/ResponsesRequest.input[].role": [
+      "\"assistant\"",
+      "\"developer\"",
+      "\"system\"",
+      "\"user\""
+    ],
+    "schemas/ResponsesRequest.input[].status": [
+      "\"completed\"",
+      "\"in_progress\"",
+      "\"incomplete\""
+    ],
+    "schemas/ResponsesRequest.input[].summary[].type": [
+      "\"summary_text\""
+    ],
+    "schemas/ResponsesRequest.input[].tools[].execution": [
+      "\"client\""
+    ],
+    "schemas/ResponsesRequest.input[].tools[].parameters.type": [
+      "\"object\""
+    ],
+    "schemas/ResponsesRequest.input[].tools[].search_context_size": [
+      "\"high\"",
+      "\"low\"",
+      "\"medium\""
+    ],
+    "schemas/ResponsesRequest.input[].tools[].type": [
+      "\"code_interpreter\"",
+      "\"computer_use_preview\"",
+      "\"file_search\"",
+      "\"function\"",
+      "\"tool_search\"",
+      "\"web_search\"",
+      "\"x_search\""
+    ],
+    "schemas/ResponsesRequest.input[].tools[].user_location.type": [
+      "\"approximate\""
+    ],
+    "schemas/ResponsesRequest.input[].type": [
+      "\"additional_tools\"",
+      "\"custom_tool_call\"",
+      "\"custom_tool_call_output\"",
+      "\"function_call\"",
+      "\"function_call_output\"",
+      "\"item_reference\"",
+      "\"message\"",
+      "\"reasoning\"",
+      "\"tool_search_call\"",
+      "\"tool_search_output\""
+    ],
+    "schemas/ResponsesRequest.prompt_cache_retention": [
+      "\"24h\"",
+      "\"default\"",
+      "\"extended\"",
+      "\"in_memory\""
+    ],
+    "schemas/ResponsesRequest.reasoning.effort": [
+      "\"high\"",
+      "\"low\"",
+      "\"max\"",
+      "\"medium\"",
+      "\"minimal\"",
+      "\"none\"",
+      "\"xhigh\""
+    ],
+    "schemas/ResponsesRequest.reasoning.summary": [
+      "\"auto\"",
+      "\"concise\"",
+      "\"detailed\""
+    ],
+    "schemas/ResponsesRequest.tool_choice": [
+      "\"auto\"",
+      "\"none\"",
+      "\"required\""
+    ],
+    "schemas/ResponsesRequest.tool_choice.type": [
+      "\"custom\"",
+      "\"function\""
+    ],
+    "schemas/ResponsesRequest.tools[].execution": [
+      "\"client\""
+    ],
+    "schemas/ResponsesRequest.tools[].parameters.type": [
+      "\"object\""
+    ],
+    "schemas/ResponsesRequest.tools[].search_context_size": [
+      "\"high\"",
+      "\"low\"",
+      "\"medium\""
+    ],
+    "schemas/ResponsesRequest.tools[].type": [
+      "\"code_interpreter\"",
+      "\"computer_use_preview\"",
+      "\"file_search\"",
+      "\"function\"",
+      "\"tool_search\"",
+      "\"web_search\"",
+      "\"x_search\""
+    ],
+    "schemas/ResponsesRequest.tools[].user_location.type": [
+      "\"approximate\""
+    ],
+    "schemas/ResponsesRequest.venice_parameters.enable_web_search": [
+      "\"auto\"",
+      "\"off\"",
+      "\"on\""
+    ],
+    "schemas/ResponsesResponse.incomplete_details.reason": [
+      "\"content_filter\"",
+      "\"max_output_tokens\""
+    ],
+    "schemas/ResponsesResponse.object": [
+      "\"response\""
+    ],
+    "schemas/ResponsesResponse.output[].content[].annotations[].type": [
+      "\"url_citation\""
+    ],
+    "schemas/ResponsesResponse.output[].content[].type": [
+      "\"output_text\""
+    ],
+    "schemas/ResponsesResponse.output[].execution": [
+      "\"client\""
+    ],
+    "schemas/ResponsesResponse.output[].role": [
+      "\"assistant\""
+    ],
+    "schemas/ResponsesResponse.output[].status": [
+      "\"completed\"",
+      "\"failed\"",
+      "\"in_progress\"",
+      "\"incomplete\""
+    ],
+    "schemas/ResponsesResponse.output[].type": [
+      "\"custom_tool_call\"",
+      "\"function_call\"",
+      "\"message\"",
+      "\"reasoning\"",
+      "\"tool_search_call\"",
+      "\"web_search_call\""
+    ],
+    "schemas/ResponsesResponse.status": [
+      "\"cancelled\"",
+      "\"completed\"",
+      "\"failed\"",
+      "\"in_progress\"",
+      "\"incomplete\""
+    ],
+    "schemas/SimpleGenerateImageRequest.background": [
+      "\"auto\"",
+      "\"opaque\"",
+      "\"transparent\""
+    ],
+    "schemas/SimpleGenerateImageRequest.moderation": [
+      "\"auto\"",
+      "\"low\""
+    ],
+    "schemas/SimpleGenerateImageRequest.output_format": [
+      "\"jpeg\"",
+      "\"png\"",
+      "\"webp\""
+    ],
+    "schemas/SimpleGenerateImageRequest.quality": [
+      "\"auto\"",
+      "\"hd\"",
+      "\"high\"",
+      "\"low\"",
+      "\"medium\"",
+      "\"standard\""
+    ],
+    "schemas/SimpleGenerateImageRequest.response_format": [
+      "\"b64_json\"",
+      "\"url\""
+    ],
+    "schemas/SimpleGenerateImageRequest.size": [
+      "\"1024x1024\"",
+      "\"1024x1536\"",
+      "\"1024x1792\"",
+      "\"1536x1024\"",
+      "\"1792x1024\"",
+      "\"256x256\"",
+      "\"512x512\"",
+      "\"auto\""
+    ],
+    "schemas/SimpleGenerateImageRequest.style": [
+      "\"natural\"",
+      "\"vivid\""
+    ],
+    "schemas/TextParserRequest.response_format": [
+      "\"json\"",
+      "\"text\""
+    ],
+    "schemas/WebScrapeResponse.format": [
+      "\"markdown\""
+    ],
+    "schemas/WebSearchRequest.search_provider": [
+      "\"brave\"",
+      "\"google\""
+    ],
+    "schemas/X402InferencePaymentRequired.accepts[].scheme": [
+      "\"exact\""
+    ],
+    "schemas/X402InferencePaymentRequired.code": [
+      "\"PAYMENT_REQUIRED\""
+    ],
+    "schemas/X402InferencePaymentRequired.error": [
+      "\"Payment required\""
+    ],
+    "schemas/X402InferencePaymentRequired.reason": [
+      "\"insufficient_balance\""
+    ],
+    "schemas/X402InferencePaymentRequired.siwxChallenge.supportedChains[].type": [
+      "\"ed25519\"",
+      "\"eip1271\"",
+      "\"eip191\""
+    ]
+  }
+}

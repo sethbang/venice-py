@@ -21,12 +21,12 @@ is active.
 
 ### Prerequisites
 
-- Python 3.13+
+- Python 3.11+
 - A Venice AI API key ([venice.ai](https://venice.ai))
 
 ### Install with pip
 
-Requires Python 3.13+. Quote the specifier — `[...]` is a glob in zsh.
+Requires Python 3.11+. Quote the specifier — `[...]` is a glob in zsh.
 
 ```bash
 pip install 'venice-py[cli]'
@@ -1195,7 +1195,7 @@ venice-py account usage [OPTIONS]
 | `--json` | `false` | Output as JSON |
 | `--start-date` | — | Start date (`YYYY-MM-DD` or ISO 8601) |
 | `--end-date` | — | End date (`YYYY-MM-DD` or ISO 8601) |
-| `--currency` | — | Filter entries by currency: `USD`, `DIEM`, `VCU`, `BUNDLED_CREDITS` |
+| `--currency` | — | Filter entries by currency: `USD`, `DIEM`, `BUNDLED_CREDITS`, `EARNED_CREDITS` |
 
 ```bash
 venice-py account usage

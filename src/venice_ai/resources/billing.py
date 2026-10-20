@@ -169,7 +169,7 @@ class Billing(APIResource["VeniceClient"]):
             format: ``JSON`` (default, structured) or ``CSV`` (a CSV document
                 per page).
             currency: Filter by consumable currency (``"USD"``, ``"DIEM"``,
-                ``"BUNDLED_CREDITS"``). First page only.
+                ``"BUNDLED_CREDITS"``, ``"EARNED_CREDITS"``). First page only.
             startTimestamp: Inclusive lower bound on entry timestamps (ISO 8601 UTC).
                 First page only.
             endTimestamp: Exclusive upper bound on entry timestamps (ISO 8601 UTC).

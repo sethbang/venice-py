@@ -5,9 +5,36 @@ This module contains Pydantic models for billing usage tracking,
 pagination, usage statistics, and aggregated usage analytics.
 """
 
-from typing import Any, Literal
+from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field
+
+KNOWN_CONSUMPTION_CURRENCIES: Final[tuple[str, ...]] = (
+    "USD",
+    "VCU",
+    "DIEM",
+    "BUNDLED_CREDITS",
+    "EARNED_CREDITS",
+)
+""":attr:`BillingBalanceResponse.consumption_currency` values this SDK release knows about.
+
+The field is a plain ``str`` so a currency Venice adds later is preserved
+rather than failing the whole balance parse. Narrow against this tuple when
+branching on a known currency.
+"""
+
+KNOWN_USAGE_CURRENCIES: Final[tuple[str, ...]] = (
+    "USD",
+    "DIEM",
+    "BUNDLED_CREDITS",
+    "EARNED_CREDITS",
+    "VCU",
+)
+""":attr:`BillingUsageEntry.currency` values this SDK release knows about.
+
+``VCU`` appears only on historical rows. The field is a plain ``str`` so a
+currency Venice adds later is preserved rather than failing the whole page.
+"""
 
 
 class InferenceDetails(BaseModel):
@@ -36,12 +63,12 @@ class BillingUsageEntry(BaseModel):
 
     sku: str = Field(..., description="Product SKU associated with the billing usage entry")
     amount: float = Field(..., description="Total amount charged for the entry")
-    # usage-history returns historical rows: the spec enum (USD/DIEM/BUNDLED_CREDITS)
-    # constrains new rows and the filter, but legacy rows may carry retired currencies
-    # (e.g. "VCU"). Keep the documented values visible to type-checkers while letting
-    # any unmodeled value round-trip rather than raising and killing the whole page.
-    currency: Literal["USD", "DIEM", "BUNDLED_CREDITS"] | str = Field(
-        ..., description="Currency charged for the entry"
+    currency: str = Field(
+        ...,
+        description=(
+            "Currency charged for the entry, e.g. ``'USD'`` or ``'BUNDLED_CREDITS'``. "
+            "Known values are in KNOWN_USAGE_CURRENCIES."
+        ),
     )
     units: float = Field(..., description="Number of units consumed")
     pricePerUnitUsd: float = Field(..., description="Price per unit in USD")
@@ -132,10 +159,13 @@ class BillingBalanceResponse(BaseModel):
         alias="canConsume",
         description="Whether the account can currently consume inference",
     )
-    consumption_currency: Literal["USD", "VCU", "DIEM", "BUNDLED_CREDITS"] | None = Field(
+    consumption_currency: str | None = Field(
         default=None,
         alias="consumptionCurrency",
-        description="Currency currently used for consumption",
+        description=(
+            "Currency currently used for consumption, e.g. ``'USD'``, ``'DIEM'`` or "
+            "``'EARNED_CREDITS'``. Known values are in KNOWN_CONSUMPTION_CURRENCIES."
+        ),
     )
     balances: BillingBalances | None = Field(
         default=None, description="Per-currency balance amounts"
@@ -336,6 +366,8 @@ class UsageAnalyticsQueryParams(BaseModel):
 
 
 __all__ = [
+    "KNOWN_CONSUMPTION_CURRENCIES",
+    "KNOWN_USAGE_CURRENCIES",
     "InferenceDetails",
     "BillingUsageEntry",
     "BillingUsageHistoryResponse",

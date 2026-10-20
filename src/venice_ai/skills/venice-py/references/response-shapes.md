@@ -50,7 +50,7 @@ There is no `pricing.unit` discriminator — branch on `model.type` (or `isinsta
 balance = await client.billing.get_balance()
 # BillingBalanceResponse:
 #   balance.can_consume          : bool | None
-#   balance.consumption_currency : Literal["USD", "VCU", "DIEM", "BUNDLED_CREDITS"] | None
+#   balance.consumption_currency : str | None              ← open; narrow with KNOWN_CONSUMPTION_CURRENCIES
 #   balance.balances             : BillingBalances | None  ← NESTED
 #   balance.diem_epoch_allocation: float | None
 # BillingBalances:

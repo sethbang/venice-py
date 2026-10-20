@@ -6,9 +6,37 @@ and Web3 authentication functionality.
 """
 
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+KNOWN_API_KEY_TYPES: Final[tuple[str, ...]] = ("INFERENCE", "ADMIN")
+""":attr:`ApiKey.apiKeyType` and :attr:`CreatedApiKey.apiKeyType` values this
+SDK release knows about.
+
+The field is a plain ``str`` so a key type Venice adds later is preserved
+rather than failing the whole key listing.
+"""
+
+KNOWN_API_KEY_MODEL_PRIVACY_TIERS: Final[tuple[str, ...]] = (
+    "ALL",
+    "PRIVATE_TEXT",
+    "PRIVATE_ONLY",
+)
+""":attr:`ApiKey.modelPrivacy` values this SDK release knows about.
+
+The field is a plain ``str`` so a tier Venice adds later is preserved rather
+than failing the whole key listing. A check that gates on privacy should fail
+closed: compare against the tier it requires rather than excluding known ones.
+"""
+
+KNOWN_API_KEY_LIMIT_PERIODS: Final[tuple[str, ...]] = ("EPOCH", "MONTH", "LIFETIME")
+""":attr:`ApiKey.limitPeriod` and :attr:`CreatedApiKey.limitPeriod` values this
+SDK release knows about.
+
+The field is a plain ``str`` so a period Venice adds later is preserved rather
+than failing the whole key listing.
+"""
 
 
 class ConsumptionLimits(BaseModel):
@@ -77,7 +105,10 @@ class ApiKey(BaseModel):
     """API key information"""
 
     id: str = Field(..., description="API Key ID")
-    apiKeyType: Literal["INFERENCE", "ADMIN"] = Field(..., description="API Key type")
+    apiKeyType: str = Field(
+        ...,
+        description="API Key type. Known values are in KNOWN_API_KEY_TYPES.",
+    )
     description: str = Field(..., description="API Key description")
     last6Chars: str = Field(..., description="Last 6 characters of the API Key")
     createdAt: str | None = Field(default=None, description="API Key creation date")
@@ -90,21 +121,23 @@ class ApiKey(BaseModel):
             "non-required response field."
         ),
     )
-    modelPrivacy: Literal["ALL", "PRIVATE_TEXT", "PRIVATE_ONLY"] | None = Field(
+    modelPrivacy: str | None = Field(
         default=None,
         description=(
             "Which models this key may call, by privacy tier. ``ALL`` allows every "
             "model. ``PRIVATE_TEXT`` requires text and embedding models to be "
             "Private, TEE, or E2EE while other modalities may be Anonymous or "
             "Private. ``PRIVATE_ONLY`` requires every model to be Private, TEE, or "
-            "E2EE; Anonymous models are rejected."
+            "E2EE; Anonymous models are rejected. Known values are in "
+            "KNOWN_API_KEY_MODEL_PRIVACY_TIERS."
         ),
     )
-    limitPeriod: Literal["EPOCH", "MONTH", "LIFETIME"] | None = Field(
+    limitPeriod: str | None = Field(
         default=None,
         description=(
-            "Period over which the consumption limit resets. One of "
-            "``EPOCH``, ``MONTH``, or ``LIFETIME``."
+            "Period over which the consumption limit resets, e.g. ``EPOCH``, "
+            "``MONTH`` or ``LIFETIME``. Known values are in "
+            "KNOWN_API_KEY_LIMIT_PERIODS."
         ),
     )
     usage: ApiKeyUsage | None = Field(default=None, description="Usage statistics")
@@ -125,12 +158,19 @@ class CreatedApiKey(BaseModel):
 
     id: str = Field(..., description="The API Key ID")
     apiKey: str = Field(..., description="The full API key - save immediately!")
-    apiKeyType: Literal["INFERENCE", "ADMIN"] = Field(..., description="The API Key type")
+    apiKeyType: str = Field(
+        ...,
+        description="The API Key type. Known values are in KNOWN_API_KEY_TYPES.",
+    )
     description: str = Field(..., description="The API Key description")
     expiresAt: str | None = Field(default=None, description="The API Key expiration date")
     consumptionLimit: ConsumptionLimits = Field(..., description="The API Key consumption limits")
-    limitPeriod: Literal["EPOCH", "MONTH", "LIFETIME"] | None = Field(
-        default=None, description="The consumption-limit period (EPOCH/MONTH/LIFETIME)."
+    limitPeriod: str | None = Field(
+        default=None,
+        description=(
+            "The consumption-limit period, e.g. ``EPOCH``, ``MONTH`` or ``LIFETIME``. "
+            "Known values are in KNOWN_API_KEY_LIMIT_PERIODS."
+        ),
     )
 
 
@@ -262,6 +302,9 @@ class RateLimitLogsResponse(BaseModel):
 
 
 __all__ = [
+    "KNOWN_API_KEY_LIMIT_PERIODS",
+    "KNOWN_API_KEY_MODEL_PRIVACY_TIERS",
+    "KNOWN_API_KEY_TYPES",
     "RateLimitType",
     "ConsumptionLimits",
     "TrailingSevenDaysUsage",

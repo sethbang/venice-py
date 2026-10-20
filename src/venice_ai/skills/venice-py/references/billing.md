@@ -8,7 +8,7 @@ Sourced from `src/venice_ai/resources/billing.py` and `src/venice_ai/types/api/b
 balance = await client.billing.get_balance()
 # BillingBalanceResponse:
 #   balance.can_consume          : bool | None
-#   balance.consumption_currency : Literal["USD", "VCU", "DIEM", "BUNDLED_CREDITS"] | None
+#   balance.consumption_currency : str | None                ← open; narrow with KNOWN_CONSUMPTION_CURRENCIES
 #   balance.balances             : BillingBalances | None    ← NESTED, can be None
 #   balance.diem_epoch_allocation: float | None
 # BillingBalances:
@@ -34,7 +34,7 @@ if balance.balances:
 page = await client.billing.get_usage_history(
     startTimestamp="2026-04-01T00:00:00Z",           # first page only
     endTimestamp="2026-05-01T00:00:00Z",             # first page only
-    currency="USD",                                  # "USD" | "DIEM" | "BUNDLED_CREDITS"; None for all
+    currency="USD",                                  # "USD" | "DIEM" | "BUNDLED_CREDITS" | "EARNED_CREDITS"; None for all
     pageSize=1000,                                    # 10..1000, default 1000
 )
 # BillingUsageHistoryResponse:

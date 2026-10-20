@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage question
+    url: https://github.com/sethbang/venice-py/discussions/categories/q-a
+    about: Ask how to do something with venice-py in GitHub Discussions.
+  - name: Report a security vulnerability
+    url: https://github.com/sethbang/venice-py/security/advisories/new
+    about: Report privately. Please do not open a public issue for security problems.
+  - name: Venice account, billing or API outage
+    url: https://discord.gg/askvenice
+    about: venice-py is unofficial. Venice support (Discord, or support@venice.ai) handles accounts, credits, rate limits and API outages.

@@ -113,7 +113,7 @@ async def _balance_async(ctx, output_json):
 )
 @click.option(
     "--currency",
-    type=click.Choice(["USD", "DIEM", "BUNDLED_CREDITS"]),
+    type=click.Choice(["USD", "DIEM", "BUNDLED_CREDITS", "EARNED_CREDITS"]),
     default=None,
     help="Filter usage entries by currency",
 )

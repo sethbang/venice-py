@@ -172,8 +172,12 @@ class AudioResponse(BaseModel):
         # Fallback for edge cases - convert iterable to bytes or single value to int
         return bytes(result) if hasattr(result, "__iter__") else int(result)
 
+    def __bytes__(self) -> bytes:
+        """Support ``bytes(response)``."""
+        return self.content
+
     def __buffer__(self, flags: int) -> Any:
-        """Support buffer protocol for file writing operations."""
+        """Support buffer protocol for file writing operations (Python 3.12+)."""
         return self.content.__buffer__(flags)
 
     def startswith(self, prefix: Any) -> bool:

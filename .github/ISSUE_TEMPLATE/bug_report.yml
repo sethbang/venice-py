@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in the venice-py SDK or CLI does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. **Never paste an API key, wallet key or signed header.** Redact `Authorization`, `X-Sign-In-With-X` and `X-402-Payment` values.
+
+        If the SDK and Venice's API or docs disagree, use the **API mismatch** form instead. Account, billing or outage problems that also happen without the SDK belong with [Venice support](https://discord.gg/askvenice).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: The smallest script or CLI command that shows the problem.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Traceback or output
+      description: The full traceback or error output, with secrets redacted.
+      render: text
+  - type: input
+    id: sdk-version
+    attributes:
+      label: venice-py version
+      description: Output of `python -c "import venice_ai; print(venice_ai.__version__)"`
+      placeholder: 2.7.0
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.13.2"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 15, Ubuntu 24.04, Windows 11…
+  - type: dropdown
+    id: client
+    attributes:
+      label: Which client
+      multiple: true
+      options:
+        - VeniceClient (async)
+        - SyncVeniceClient
+        - venice-py CLI
+        - Bundled Claude Code skill
+        - Other / not sure
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and discussions.
+          required: true
+        - label: I removed API keys and other secrets from everything above.
+          required: true

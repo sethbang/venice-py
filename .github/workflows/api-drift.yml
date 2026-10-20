@@ -1,0 +1,124 @@
+# .github/workflows/api-drift.yml
+# Daily scan of the live Venice OpenAPI spec against tools/api_drift_snapshot.json.
+#
+#   exit 0  no drift            -> nothing happens
+#   exit 1  drift found         -> one open issue labelled `api-drift` is
+#                                  created or updated with the report
+#   exit 2  spec unreadable     -> the run fails (red); the issue is untouched
+#
+# This workflow never runs on push or pull_request and must not be made a
+# required check. Fetching the spec needs no Venice API key.
+#
+# Action SHA pinning matches ci-validation.yaml; see that file's header for
+# the rationale.
+
+name: API Drift
+
+on:
+  schedule:
+    - cron: '17 9 * * *'  # daily, 09:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: api-drift
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    if: github.repository_owner == 'sethbang'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # The scanner needs only PyYAML; installing the locked version directly
+      # keeps this daily job far lighter than a full Poetry environment.
+      - name: Install PyYAML
+        run: python -m pip install --disable-pip-version-check "pyyaml==6.0.3"
+
+      - name: Compare live spec with snapshot
+        id: drift
+        run: |
+          set +e
+          python tools/api_drift.py --report drift-report.md > /dev/null
+          code=$?
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          if [ -f drift-report.md ]; then
+            cat drift-report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          case "$code" in
+            0) exit 0 ;;
+            1)
+              if [ ! -s drift-report.md ]; then
+                echo "::error::api_drift.py reported drift but wrote no report"
+                exit 1
+              fi
+              exit 0
+              ;;
+            2) echo "::error::Could not fetch or parse the Venice spec; see the log above."; exit 1 ;;
+            *) echo "::error::api_drift.py exited with unexpected code $code"; exit 1 ;;
+          esac
+
+      - name: Open or update the drift issue
+        if: steps.drift.outputs.code == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # The digest ignores the spec-version line, which changes on every
+          # Venice deploy, so a comment is posted only when the drift itself
+          # changes.
+          digest=$(grep -v '^Spec: ' drift-report.md | sha256sum | cut -c1-16)
+
+          {
+            echo "<!-- api-drift-digest: ${digest} -->"
+            echo "The daily scan found differences between the live Venice OpenAPI spec and \`tools/api_drift_snapshot.json\`. Last run: ${RUN_URL}"
+            echo
+            echo "To resolve: review the report, update the SDK where needed, then run \`python tools/api_drift.py --update-snapshot\` and commit the snapshot in the same PR. See \`tools/README.md\`."
+            echo
+            if [ "$(wc -c < drift-report.md)" -gt 60000 ]; then
+              head -c 60000 drift-report.md | sed '$d'
+              echo
+              echo
+              echo "_Report truncated; the full report is in the run summary: ${RUN_URL}_"
+            else
+              cat drift-report.md
+            fi
+          } > issue-body.md
+
+          gh label create api-drift --force \
+            --color D93F0B \
+            --description "Live Venice OpenAPI spec differs from the committed snapshot"
+
+          number=$(gh issue list --label api-drift --state open --limit 1 \
+            --json number --jq '.[0].number // empty')
+
+          if [ -z "$number" ]; then
+            gh issue create --title "Venice API drift detected" \
+              --label api-drift --body-file issue-body.md
+            exit 0
+          fi
+
+          previous=$(gh issue view "$number" --json body --jq '.body' \
+            | grep -o 'api-drift-digest: [0-9a-f]*' | head -n1 | cut -d' ' -f2 || true)
+          gh issue edit "$number" --body-file issue-body.md
+          if [ "$previous" != "$digest" ]; then
+            gh issue comment "$number" --body "The drift report changed. Updated report is in the issue description; run: ${RUN_URL}"
+          fi

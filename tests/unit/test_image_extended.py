@@ -4,6 +4,7 @@ This file addresses the gaps identified in the coverage report and test failures
 """
 
 import io
+import sys
 from unittest.mock import AsyncMock, Mock
 
 import aiohttp
@@ -407,6 +408,9 @@ class TestAudioResponseWrapper:
         assert bytes(response) == audio_data
         assert len(response) == len(audio_data)
 
+    @pytest.mark.skipif(
+        sys.version_info < (3, 12), reason="__buffer__ (PEP 688) needs Python 3.12+"
+    )
     def test_audio_response_file_operations(self):
         """Test AudioResponse can be written to file."""
         audio_data = b"test audio content"

@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [2.7.0] - 2026-10-19
+
+### Added
+
+- **Daily API drift scan.** `tools/api_drift.py` reads the public Venice OpenAPI spec (no API key) and compares it with the committed `tools/api_drift_snapshot.json`: endpoints, request parameters (query, path, header and body fields, following `$ref` and merging `allOf`/`anyOf`/`oneOf`), success-response fields, and every enum's members. It prints a Markdown report and exits 0 (no drift), 1 (drift) or 2 (the spec could not be fetched or parsed: non-200, HTML, empty body, invalid YAML, or no `paths`), so an unreadable spec never reads as "no drift". Scalars are read with YAML 1.2 rules, so unquoted aspect ratios such as `16:9` stay strings. The new `API Drift` workflow runs it daily and on dispatch, keeps a single open `api-drift` issue up to date with the report, and fails the run when the spec is unreadable. `--update-snapshot` refreshes the snapshot; see `tools/README.md` for handling a drift issue.
+
+- **Known-value tuples for more open response fields.** `KNOWN_CONSUMPTION_CURRENCIES`, `KNOWN_USAGE_CURRENCIES`, `KNOWN_API_KEY_TYPES`, `KNOWN_API_KEY_MODEL_PRIVACY_TIERS`, `KNOWN_API_KEY_LIMIT_PERIODS` and `KNOWN_WEB_SEARCH_MODES`, importable from `venice_ai.types` and `venice_ai.types.api`; `KNOWN_WEB_SEARCH_MODES` is also importable from `venice_ai.core.models`. Treat a value outside them as one this release predates, not as invalid.
+
+- **Project governance files.** `SECURITY.md` explains how to report a vulnerability privately through GitHub, which versions receive fixes, the response targets, and what belongs to Venice rather than to this SDK. `SUPPORT.md` says where to ask questions, what is in and out of scope, and expected response times. `RELEASING.md` is the maintainer runbook for cutting a release, from the version bump to verifying on PyPI, including rollback and the `venice-ai` bridge package. The repository also adopts the Contributor Covenant 2.1 code of conduct, adds issue forms for bug reports, feature requests and SDK/API mismatches plus a template for other reports, and adds a pull request checklist. `CONTRIBUTING.md` now runs tests and checks through `make` targets and says which targets call the live API and spend credit.
+
+### Changed
+
+- **Python 3.11 and 3.12 are supported.** venice-py now installs and runs on Python 3.11 through 3.14; every release since 2.0.0 required 3.13, so on 3.11 or 3.12 `pip install venice-py` failed with "No matching distribution found". There are no API changes. CI tests 3.11 through 3.14 (3.14 non-blocking), and type checking runs at the 3.11 floor so standard-library APIs that only exist in newer versions cannot slip back in. On 3.11 or 3.12, install `venice-py` by name: the legacy `venice-ai` 2.1.1 bridge declares Python 3.13+, so `pip install venice-ai` there resolves to the June 2025 1.3.0 release until a bridge with a lower floor is published.
+
+- **`typing-extensions` is now a declared runtime dependency** (`>=4.14.1`, the floor pydantic already requires), which supplies `TypeAliasType` and a pydantic-compatible `TypedDict` on Python 3.11. Installs that already have pydantic see no new package.
+
+- **`AudioResponse` supports `bytes(response)` on every Python version.** Passing an `AudioResponse` straight to `file.write()` relies on the buffer protocol, which Python only exposes to classes like this from 3.12; on 3.11, use `response.content` or `response.save(path)`, which work everywhere.
+
+- **More enum fields on responses are now open `str` instead of closed `Literal`s.** A new value from the server is kept rather than failing the whole response. This covers `ApiKey.apiKeyType`, `ApiKey.modelPrivacy`, `ApiKey.limitPeriod`, `CreatedApiKey.apiKeyType`, `CreatedApiKey.limitPeriod`, `VeniceParametersResponse.enable_web_search` (present on every chat completion) and `ChatCompletionChunkChoiceDelta.role`. `BillingUsageEntry.currency` already accepted any string at runtime and is now a plain `str`. Request-side parameters keep their `Literal`s.
+
+  Runtime behavior is strictly more permissive, but this widens public `Literal`s. A caller relying on exhaustiveness checking over these fields will see their type checker stop proving the match is exhaustive; narrow against the matching `KNOWN_*` tuple and handle the fallback. A check on `modelPrivacy` should fail closed: compare against the tier it requires rather than excluding the tiers you know about.
+
+- **aiohttp `>=3.14.4` is required.** aiohttp 3.14.3 and earlier carry CVE-2026-111063, CVE-2026-111064 and GHSA-2g87-pp6c-29x5, so the declared range moves from `>=3.13.4,<3.15` to `>=3.14.4,<3.15`, and upgrading venice-py upgrades aiohttp with it. The lock carries 3.14.5 (yarl 1.25.1).
+
+- **Dependencies.** pydantic moves to 2.14.1 and pydantic-settings to 2.16.0 within their existing ranges. The optional `dcap-qvl` (`e2ee-verify` extra) range widens to `>=0.6.1,<0.8.0` and locks 0.7.0. Development tools move to ruff 0.17.1, black 26.10.1, hypothesis 6.170.5 and pyflakes 4.0.3; the website moves to react 19.3.1 and docusaurus-plugin-llms 0.6.1.
+
+### Fixed
+
+- **`client.billing.get_balance()` raised a validation error for accounts whose consumption currency is `EARNED_CREDITS`.** `BillingBalanceResponse.consumption_currency` was a closed `Literal["USD", "VCU", "DIEM", "BUNDLED_CREDITS"]`, and Venice now reports `"EARNED_CREDITS"`, so every balance call on such an account failed with `APIResponseValidationError`. The field is now `str | None`, with the known values in `KNOWN_CONSUMPTION_CURRENCIES`. `venice-py account usage --currency` also accepts `EARNED_CREDITS`, and the CLI guide no longer lists `VCU`, which the option never accepted.
+
 ## [2.6.0] - 2026-10-04
 
 ### Added
@@ -1185,7 +1217,8 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.6.0...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.7.0...HEAD
+[2.7.0]: https://github.com/sethbang/venice-py/compare/v2.6.0...v2.7.0
 [2.6.0]: https://github.com/sethbang/venice-py/compare/v2.5.1...v2.6.0
 [2.5.1]: https://github.com/sethbang/venice-py/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/sethbang/venice-py/compare/v2.4.1...v2.5.0

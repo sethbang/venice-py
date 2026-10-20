@@ -20,7 +20,7 @@ unchanged.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Annotated, Any, Literal, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NotRequired
 
 from pydantic import (
     BaseModel,  # noqa: F401 — used by subclasses via wildcard
@@ -29,6 +29,8 @@ from pydantic import (
     ValidationInfo,
     field_validator,
 )
+
+from ..._compat import TypedDict
 
 if TYPE_CHECKING:
     from venice_ai.types.api.common import WebSearchCitation
@@ -488,6 +490,15 @@ class VeniceParameters(VeniceBaseModel):
     )
 
 
+KNOWN_WEB_SEARCH_MODES: Final[tuple[str, ...]] = ("auto", "off", "on")
+""":attr:`VeniceParametersResponse.enable_web_search` values this SDK release knows about.
+
+The response field is a plain ``str`` so a mode Venice adds later is preserved
+rather than failing the whole chat completion parse. The request-side
+:attr:`VeniceParameters.enable_web_search` stays a closed ``Literal``.
+"""
+
+
 class VeniceParametersResponse(VeniceBaseModel):
     """Venice-specific parameters returned in response."""
 
@@ -496,8 +507,9 @@ class VeniceParametersResponse(VeniceBaseModel):
     # new key doesn't ValidationError the whole chat response.
     model_config = ConfigDict(extra="allow")
 
-    enable_web_search: Literal["auto", "off", "on"] = Field(
-        ..., description="Web search setting used"
+    enable_web_search: str = Field(
+        ...,
+        description="Web search setting used. Known values are in KNOWN_WEB_SEARCH_MODES.",
     )
     enable_web_scraping: bool = Field(..., description="Whether web scraping was enabled")
     enable_web_citations: bool = Field(..., description="Whether web citations were enabled")
@@ -679,6 +691,7 @@ __all__ = [
     # Venice-specific
     "VeniceParameters",
     "VeniceParametersResponse",
+    "KNOWN_WEB_SEARCH_MODES",
     # Stream options
     "StreamOptions",
     # Generic responses

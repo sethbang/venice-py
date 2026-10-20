@@ -63,12 +63,13 @@ def _list_type_literal_members() -> frozenset[str]:
     """Pull the ``type`` Literal members off ``Models.list``'s annotations."""
     hints = typing.get_type_hints(Models.list)
     annotation = hints["type"]
-    # Annotation is ``ModelListType | None``. ``ModelListType`` is a PEP 695
-    # ``type`` alias (a ``TypeAliasType``), so unwrap to its underlying
-    # ``Literal[...]`` via ``__value__`` before reading the args.
+    # Annotation is ``ModelListType | None``. ``ModelListType`` is a
+    # ``TypeAliasType`` (from ``typing``, or ``typing_extensions`` on 3.11),
+    # so unwrap to its underlying ``Literal[...]`` via ``__value__`` before
+    # reading the args.
     args = typing.get_args(annotation)
     inner = next(a for a in args if a is not type(None))
-    if isinstance(inner, typing.TypeAliasType):
+    if hasattr(inner, "__value__"):
         inner = inner.__value__
     return frozenset(typing.get_args(inner))
 

@@ -79,6 +79,7 @@ from typing import (
     Any,
     Literal,
     NamedTuple,
+    TypeVar,
     cast,
     overload,
 )
@@ -135,6 +136,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _tools_logger = logging.getLogger("venice_ai.tools")
+
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 __all__ = ["ChatCompletions"]
 
@@ -1409,16 +1412,16 @@ class ChatCompletions(APIResource["VeniceClient"]):
             total_cost_usd=prompt_cost + completion_cost,
         )
 
-    async def parse[T: BaseModel](
+    async def parse(
         self,
         *,
         model: str,
         messages: Sequence[ChatMessageParam],
-        response_format: type[T],
+        response_format: type[_ModelT],
         schema_name: str | None = None,
         strict: bool = True,
         **kwargs: Any,
-    ) -> ParsedChatCompletion[T]:
+    ) -> ParsedChatCompletion[_ModelT]:
         """Auto-validating sibling of :meth:`create` for structured output.
 
         Pass a Pydantic ``BaseModel`` subclass as ``response_format``; the

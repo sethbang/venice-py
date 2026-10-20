@@ -47,7 +47,7 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # version-check (audit Phase 5D-9) — assert pyproject.version matches the
+  # version-check — assert pyproject.version matches the
   # GitHub release tag (with optional leading 'v' stripped) before building.
   # Fails fast with ::error:: if they diverge so we never publish a mismatched
   # artifact to PyPI.

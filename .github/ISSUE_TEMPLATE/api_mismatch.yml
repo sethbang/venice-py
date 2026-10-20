@@ -1,0 +1,65 @@
+name: API mismatch
+description: The SDK and Venice's API, OpenAPI spec or docs disagree.
+labels: ["bug"]
+title: "[API mismatch] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when the SDK sends or parses something differently from what Venice documents, or from what the API actually does. Venice's docs, its OpenAPI spec and the live API do not always agree with each other, so the most useful reports say which source you checked and what the API actually returned.
+
+        **Redact API keys and signed headers** (`Authorization`, `X-Sign-In-With-X`, `X-402-Payment`) before pasting anything.
+  - type: input
+    id: endpoint
+    attributes:
+      label: Endpoint
+      description: HTTP method and path, plus the SDK method you called.
+      placeholder: POST /image/generate via client.image.generate()
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected, per Venice's docs or spec
+      description: What the docs or spec say, with a link or a quoted excerpt.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed
+      description: What the SDK did or what the API returned. Include the status code and the response body if there was an error.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The SDK call or raw request that shows the difference.
+      render: python
+  - type: textarea
+    id: request-metadata
+    attributes:
+      label: Request ID and response headers
+      description: Any request ID and relevant response headers (for example `x-request-id`, `x-venice-version` or `x-ratelimit-*`). Remove keys and signed headers.
+      render: text
+  - type: input
+    id: sdk-version
+    attributes:
+      label: venice-py version
+      placeholder: 2.7.0
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model ID
+      description: If the behavior depends on the model.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed API keys and other secrets from everything above.
+          required: true

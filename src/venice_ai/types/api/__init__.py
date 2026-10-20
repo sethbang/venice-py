@@ -20,6 +20,9 @@ The models are organized by API category:
 
 # Import all models from sub-modules - explicit imports to avoid F403/F405 errors
 from .api_keys import (
+    KNOWN_API_KEY_LIMIT_PERIODS,
+    KNOWN_API_KEY_MODEL_PRIVACY_TIERS,
+    KNOWN_API_KEY_TYPES,
     ApiKey,
     ApiKeyDetailsResponse,
     ApiKeysListResponse,
@@ -64,6 +67,8 @@ from .base import (
     UsageData,
 )
 from .billing import (
+    KNOWN_CONSUMPTION_CURRENCIES,
+    KNOWN_USAGE_CURRENCIES,
     BillingBalanceResponse,
     BillingUsageEntry,
     BillingUsageHistoryCsvPage,
@@ -88,6 +93,7 @@ from .characters import (
 )
 from .chat import (
     KNOWN_FINISH_REASONS,
+    KNOWN_WEB_SEARCH_MODES,
     ChatChoice,
     ChatCompletionResponse,
     ChatMessage,
@@ -391,6 +397,10 @@ __all__ = [
     "EmbeddingModelSpec",
     "UpscaleModelSpec",
     "DecisionModelSpec",
+    "KNOWN_API_KEY_LIMIT_PERIODS",
+    "KNOWN_API_KEY_MODEL_PRIVACY_TIERS",
+    "KNOWN_API_KEY_TYPES",
+    "KNOWN_CONSUMPTION_CURRENCIES",
     "KNOWN_FINISH_REASONS",
     "KNOWN_MODEL_TYPES",
     "KNOWN_PRIVACY_MODES",
@@ -399,6 +409,8 @@ __all__ = [
     "KNOWN_RESPONSE_MESSAGE_STATUSES",
     "KNOWN_RESPONSE_STATUSES",
     "KNOWN_RESPONSE_WEB_SEARCH_CALL_STATUSES",
+    "KNOWN_USAGE_CURRENCIES",
+    "KNOWN_WEB_SEARCH_MODES",
     "ChoiceAnswer",
     "DecisionAnswer",
     "DecisionResponse",
