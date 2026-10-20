@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest a new capability or an improvement to venice-py.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        venice-py wraps the Venice.ai API. If you want a new **Venice API** feature (a new model, endpoint or parameter), ask Venice first. The SDK can only send what the API accepts. If the API already supports something the SDK is missing, this is the right place.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what makes it hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: The API you would like to have. A short code sketch helps.
+      render: python
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: What you have tried or are doing instead.
+  - type: input
+    id: venice-docs
+    attributes:
+      label: Related Venice API docs
+      description: A link to the endpoint or parameter in Venice's docs, if there is one.
+      placeholder: https://docs.venice.ai/...
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contributing
+      options:
+        - label: I would be willing to open a pull request for this.

@@ -657,6 +657,8 @@ Follow PEP 8, use type hints, write tests, and submit a PR.
 
 - [Documentation](https://venice-docs.sbang.dev/)
 - [Issue Tracker](https://github.com/sethbang/venice-py/issues)
+- [Questions and answers](https://github.com/sethbang/venice-py/discussions/categories/q-a)
+- [Getting help](https://github.com/sethbang/venice-py/blob/main/SUPPORT.md) · [Security policy](https://github.com/sethbang/venice-py/blob/main/SECURITY.md) · [Contributing](https://github.com/sethbang/venice-py/blob/main/CONTRIBUTING.md)
 - [Examples](https://github.com/sethbang/venice-py/tree/main/examples/)
 - [Changelog](https://github.com/sethbang/venice-py/blob/main/CHANGELOG.md)
 
