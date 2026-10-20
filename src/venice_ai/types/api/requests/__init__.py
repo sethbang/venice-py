@@ -86,7 +86,24 @@ from .music import (
     MusicQuoteRequest,
     MusicRetrieveRequest,
 )
-from .responses import ResponsesRequest
+from .responses import (
+    PromptCacheRetention,
+    ResponsesFunctionTool,
+    ResponsesFunctionToolChoice,
+    ResponsesFunctionToolDefinition,
+    ResponsesInputAdditionalTools,
+    ResponsesInputCustomToolCall,
+    ResponsesInputCustomToolCallOutput,
+    ResponsesInputItem,
+    ResponsesInputToolSearchCall,
+    ResponsesInputToolSearchOutput,
+    ResponsesNamedToolChoice,
+    ResponsesRequest,
+    ResponsesTool,
+    ResponsesToolChoice,
+    ResponsesToolChoiceFunctionName,
+    ResponsesToolSearchTool,
+)
 from .video import (
     CameraKeyframe,
     SeedanceConsents,
@@ -149,6 +166,21 @@ __all__ = [
     "ChatCompletionRequest",
     # Responses API (Alpha)
     "ResponsesRequest",
+    "PromptCacheRetention",
+    "ResponsesFunctionTool",
+    "ResponsesFunctionToolChoice",
+    "ResponsesFunctionToolDefinition",
+    "ResponsesInputAdditionalTools",
+    "ResponsesInputCustomToolCall",
+    "ResponsesInputCustomToolCallOutput",
+    "ResponsesInputItem",
+    "ResponsesInputToolSearchCall",
+    "ResponsesInputToolSearchOutput",
+    "ResponsesNamedToolChoice",
+    "ResponsesTool",
+    "ResponsesToolChoice",
+    "ResponsesToolChoiceFunctionName",
+    "ResponsesToolSearchTool",
     # Image requests
     "ImageGenerationRequest",
     "SimpleImageGenerationRequest",

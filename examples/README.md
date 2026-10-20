@@ -27,7 +27,7 @@ examples/
 │   ├── web_scraping.py          # Web scraping with chat completions
 │   ├── passthrough_fields.py    # OpenAI-compat store/text/include/metadata; prompt_cache_retention tiers, with cache reads reported per tier
 │   └── agent_loop.py            # Agent loop via run_with_tools (auto tool dispatch); answer checked against the tool results
-├── responses/                   # OpenAI-style Responses API (Alpha)
+├── responses/                   # OpenAI-style Responses API (beta)
 │   └── responses_api.py         # responses.create — typed output blocks, reasoning text, truncated (incomplete) responses
 ├── decisions/                   # Decision ("System One") models (Beta)
 │   └── ticket_routing.py        # Typed noul/choice/score judgments, checked against a calm control ticket; low confidence escalates

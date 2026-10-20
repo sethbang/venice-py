@@ -1,12 +1,13 @@
-"""Venice AI Responses API resource (Alpha).
+"""Venice AI Responses API resource (beta).
 
-Wraps ``POST /responses`` — the OpenAI-compatible Responses API endpoint
-described at ``swagger.yaml.md:7244``. The endpoint is currently tagged
-Alpha by Venice; request and response shapes may change without notice.
+Wraps ``POST /responses``, which accepts requests in OpenAI's Responses API
+format. The endpoint is currently tagged beta by Venice; request and response
+shapes may change without notice.
 
 Unlike ``/chat/completions``, this endpoint returns a typed ``output`` array
-containing ``reasoning``, ``message``, ``function_call``, and
-``web_search_call`` blocks. It is stateless — each request is independent
+containing ``reasoning``, ``message``, ``function_call``,
+``custom_tool_call``, ``tool_search_call``, and ``web_search_call`` blocks.
+It is stateless — each request is independent
 and no conversation state is persisted between calls. E2EE-capable models
 are not supported; use ``/chat/completions`` with E2EE headers instead.
 
@@ -18,13 +19,19 @@ returned :class:`~venice_ai.streaming.Stream` yields
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from .._resource import APIResource
 from ..streaming import Stream
 from ..types.api.requests.common import Tool
-from ..types.api.requests.responses import ResponsesRequest
+from ..types.api.requests.responses import (
+    PromptCacheRetention,
+    ResponsesInputItem,
+    ResponsesRequest,
+    ResponsesTool,
+    ResponsesToolChoice,
+)
 from ..types.api.responses import ResponsesResponse, ResponsesStreamEvent
 
 if TYPE_CHECKING:
@@ -36,7 +43,7 @@ __all__ = ["Responses"]
 
 
 class Responses(APIResource["VeniceClient"]):
-    """Access the Venice Responses API (Alpha).
+    """Access the Venice Responses API (beta).
 
     Access via :attr:`VeniceClient.responses`.
     """
@@ -46,15 +53,18 @@ class Responses(APIResource["VeniceClient"]):
         self,
         *,
         model: str,
-        input: str | list[dict[str, Any]],  # noqa: A002 - matches API field name
+        input: str | Sequence[ResponsesInputItem],  # noqa: A002 - matches API field name
+        instructions: str | None = None,
         include: list[str] | None = None,
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
         fallbacks: list[dict[str, str]] | None = None,
         reasoning: Any | None = None,
-        tools: list[Tool | dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
+        tools: Sequence[Tool | ResponsesTool] | None = None,
+        tool_choice: ResponsesToolChoice | None = None,
+        prompt_cache_retention: PromptCacheRetention | None = None,
         web_search: bool | None = None,
         venice_parameters: Any | None = None,
         anon_user_id: str | None = None,
@@ -66,15 +76,18 @@ class Responses(APIResource["VeniceClient"]):
         self,
         *,
         model: str,
-        input: str | list[dict[str, Any]],  # noqa: A002 - matches API field name
+        input: str | Sequence[ResponsesInputItem],  # noqa: A002 - matches API field name
+        instructions: str | None = None,
         include: list[str] | None = None,
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
         fallbacks: list[dict[str, str]] | None = None,
         reasoning: Any | None = None,
-        tools: list[Tool | dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
+        tools: Sequence[Tool | ResponsesTool] | None = None,
+        tool_choice: ResponsesToolChoice | None = None,
+        prompt_cache_retention: PromptCacheRetention | None = None,
         web_search: bool | None = None,
         venice_parameters: Any | None = None,
         anon_user_id: str | None = None,
@@ -86,15 +99,18 @@ class Responses(APIResource["VeniceClient"]):
         self,
         *,
         model: str,
-        input: str | list[dict[str, Any]],  # noqa: A002 - matches API field name
+        input: str | Sequence[ResponsesInputItem],  # noqa: A002 - matches API field name
+        instructions: str | None = None,
         include: list[str] | None = None,
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
         fallbacks: list[dict[str, str]] | None = None,
         reasoning: Any | None = None,
-        tools: list[Tool | dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
+        tools: Sequence[Tool | ResponsesTool] | None = None,
+        tool_choice: ResponsesToolChoice | None = None,
+        prompt_cache_retention: PromptCacheRetention | None = None,
         web_search: bool | None = None,
         venice_parameters: Any | None = None,
         anon_user_id: str | None = None,
@@ -105,21 +121,24 @@ class Responses(APIResource["VeniceClient"]):
         self,
         *,
         model: str,
-        input: str | list[dict[str, Any]],  # noqa: A002 - matches API field name
+        input: str | Sequence[ResponsesInputItem],  # noqa: A002 - matches API field name
+        instructions: str | None = None,
         include: list[str] | None = None,
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
         fallbacks: list[dict[str, str]] | None = None,
         reasoning: Any | None = None,
-        tools: list[Tool | dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, Any] | None = None,
+        parallel_tool_calls: bool | None = None,
+        tools: Sequence[Tool | ResponsesTool] | None = None,
+        tool_choice: ResponsesToolChoice | None = None,
+        prompt_cache_retention: PromptCacheRetention | None = None,
         web_search: bool | None = None,
         venice_parameters: Any | None = None,
         anon_user_id: str | None = None,
         stream: bool = False,
     ) -> ResponsesResponse | AsyncIterable[ResponsesStreamEvent]:
-        """Create a response using the Responses API (Alpha).
+        """Create a response using the Responses API (beta).
 
         Wraps ``POST /api/v1/responses``. Each call is stateless - no
         conversation history is persisted between requests.
@@ -128,8 +147,13 @@ class Responses(APIResource["VeniceClient"]):
             model: Model ID. E2EE-capable models are not supported; use
                 ``/chat/completions`` with E2EE headers instead.
             input: Prompt - either a plain string or a list of structured
-                input items (messages, reasoning blocks, function calls,
-                etc.) as documented in the OpenAI Responses API.
+                input items (messages, reasoning items, tool calls and their
+                outputs) as documented in the OpenAI Responses API. Items can
+                be dicts or the typed ``ResponsesInput*`` models
+                (``custom_tool_call``, ``custom_tool_call_output``,
+                ``additional_tools``, ``tool_search_call``,
+                ``tool_search_output``).
+            instructions: System instructions, applied before ``input``.
             include: Additional response fields to include.
             max_output_tokens: Maximum tokens to generate.
             temperature: Sampling temperature (0-2).
@@ -139,11 +163,21 @@ class Responses(APIResource["VeniceClient"]):
                 Forwarded only for direct Anthropic routes; ignored otherwise.
             reasoning: Nested reasoning config (``{"effort": "...",
                 "summary": "..."}`` or ``ReasoningConfig``).
-            tools: Tool definitions. Function tools plus the Alpha tool
-                types (``web_search``, ``x_search``, ``code_interpreter``,
-                ``file_search``, ``computer_use_preview``) are supported.
-            tool_choice: ``"auto" | "none" | "required"`` or a
-                ``{"type": "function", "function": {"name": ...}}`` dict.
+            parallel_tool_calls: Whether the model may call more than one
+                tool in a single turn.
+            tools: Tool definitions: function tools (``Tool`` or
+                ``ResponsesFunctionTool``, which adds ``defer_loading``), a
+                client-executed ``ResponsesToolSearchTool``, or dicts for
+                other types (``web_search``, ``x_search``,
+                ``code_interpreter``, ``file_search``,
+                ``computer_use_preview``).
+            tool_choice: ``"auto" | "none" | "required"``, a named tool
+                ``{"type": "function" | "custom", "name": ..., "namespace": ...}``,
+                or ``{"type": "function", "function": {"name": ...}}``.
+            prompt_cache_retention: Prompt cache retention for supported
+                OpenAI models: ``"in_memory"``, ``"24h"``, ``"default"``, or
+                ``"extended"``. ``"24h"`` and ``"extended"`` keep cached
+                prefixes for up to 24 hours.
             web_search: Enable web search for this request.
             venice_parameters: Venice-specific request parameters.
             stream: When ``True``, returns an async iterator of
@@ -153,7 +187,8 @@ class Responses(APIResource["VeniceClient"]):
 
         Returns:
             :class:`ResponsesResponse` with typed ``output`` blocks
-            (reasoning, message, function_call, web_search_call), or an
+            (reasoning, message, function_call, custom_tool_call,
+            tool_search_call, web_search_call), or an
             ``AsyncIterable[ResponsesStreamEvent]`` when ``stream=True``.
 
         Raises:
@@ -162,7 +197,7 @@ class Responses(APIResource["VeniceClient"]):
                 E2EE-capable model is supplied).
             AuthenticationError: If the API key is missing or invalid.
             PermissionDeniedError: If the account lacks access to the
-                Responses API alpha or the requested model.
+                Responses API or the requested model.
             NotFoundError: If the model id is unknown.
             RateLimitError: If account-level rate limits are exceeded.
             APIError: For other HTTP-level failures.
@@ -186,15 +221,18 @@ class Responses(APIResource["VeniceClient"]):
         """
         request = ResponsesRequest(
             model=model,
-            input=input,
+            input=input if isinstance(input, str) else list(input),
+            instructions=instructions,
             include=include,
             max_output_tokens=max_output_tokens,
             temperature=temperature,
             top_p=top_p,
             fallbacks=fallbacks,
             reasoning=reasoning,
-            tools=tools,
+            parallel_tool_calls=parallel_tool_calls,
+            tools=list(tools) if tools is not None else None,
             tool_choice=tool_choice,
+            prompt_cache_retention=prompt_cache_retention,
             web_search=web_search,
             venice_parameters=venice_parameters,
             anon_user_id=anon_user_id,

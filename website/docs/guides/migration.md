@@ -323,7 +323,7 @@ users know what's now available.
 - **`client.crypto`** — JSON-RPC proxy (`rpc()`, `batch_rpc()`) with billing/idempotency headers surfaced.
 - **`client.augment`** — `search()`, `scrape()`, `parse_text()` over Venice's `/augment/*` endpoints.
 - **`client.x402`** — wallet billing (`balance()`, `transactions()`, `top_up()`) via SIWE / EIP-4361 auth. See [Advanced Features § x402 Wallet Authentication](./advanced.md#x402-wallet-authentication).
-- **`client.responses`** — alpha OpenAI-compatible Responses API.
+- **`client.responses`** — beta OpenAI-compatible Responses API.
 - **`client.tee`** — Trusted Execution Environment attestation and confidential compute.
 
 `audio` also gained `transcribe()` (speech-to-text) and `create_voice()`.

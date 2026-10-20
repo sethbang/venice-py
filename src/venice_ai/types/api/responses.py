@@ -1,6 +1,6 @@
-"""Response models for ``POST /responses`` (Alpha).
+"""Response models for ``POST /responses`` (beta).
 
-The Venice Responses API is OpenAI-compatible and currently tagged Alpha,
+The Venice Responses API is OpenAI-compatible and currently tagged beta,
 so the output shape is expected to evolve. Models use ``extra="allow"`` to
 survive server-side additions; callers that want exhaustive coverage should
 read the OpenAPI spec.
@@ -41,6 +41,23 @@ KNOWN_RESPONSE_FUNCTION_CALL_STATUSES: Final[tuple[str, ...]] = (
     "incomplete",
 )
 """:attr:`ResponsesFunctionCallOutput.status` values this SDK release knows about."""
+
+KNOWN_RESPONSE_CUSTOM_TOOL_CALL_STATUSES: Final[tuple[str, ...]] = (
+    "completed",
+    "in_progress",
+    "incomplete",
+)
+""":attr:`ResponsesCustomToolCallOutput.status` values this SDK release knows about."""
+
+KNOWN_RESPONSE_TOOL_SEARCH_CALL_STATUSES: Final[tuple[str, ...]] = (
+    "completed",
+    "in_progress",
+    "incomplete",
+)
+""":attr:`ResponsesToolSearchCallOutput.status` values this SDK release knows about."""
+
+KNOWN_RESPONSE_TOOL_SEARCH_EXECUTIONS: Final[tuple[str, ...]] = ("client",)
+""":attr:`ResponsesToolSearchCallOutput.execution` values this SDK release knows about."""
 
 KNOWN_RESPONSE_WEB_SEARCH_CALL_STATUSES: Final[tuple[str, ...]] = ("completed",)
 """:attr:`ResponsesWebSearchCallOutput.status` values this SDK release knows about."""
@@ -107,6 +124,15 @@ class ResponsesIncompleteDetails(BaseModel):
     )
 
 
+class ResponsesReasoningSummaryText(BaseModel):
+    """``type='summary_text'`` part of a reasoning ``summary``."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["summary_text"]
+    text: str
+
+
 class ResponsesReasoningOutput(BaseModel):
     """``type='reasoning'`` block in the response ``output`` array."""
 
@@ -114,7 +140,13 @@ class ResponsesReasoningOutput(BaseModel):
 
     type: Literal["reasoning"]
     id: str
-    summary: list[str] | None = None
+    summary: list[str | ResponsesReasoningSummaryText] | None = Field(
+        default=None,
+        description=(
+            "Reasoning summary as plain strings or OpenAI-style "
+            "``{'type': 'summary_text', 'text': ...}`` parts."
+        ),
+    )
     encrypted_content: str | None = None
 
 
@@ -155,6 +187,9 @@ class ResponsesFunctionCallOutput(BaseModel):
     id: str
     call_id: str
     name: str
+    namespace: str | None = Field(
+        default=None, description="Namespace of the called tool, when it has one."
+    )
     arguments: str
     status: str = Field(
         ...,
@@ -162,6 +197,55 @@ class ResponsesFunctionCallOutput(BaseModel):
             "Call status. ``'incomplete'`` means ``arguments`` may be truncated JSON. "
             "Known values are in KNOWN_RESPONSE_FUNCTION_CALL_STATUSES."
         ),
+    )
+
+
+class ResponsesCustomToolCallOutput(BaseModel):
+    """``type='custom_tool_call'`` block: a call to a custom (freeform-input) tool.
+
+    ``input`` is the raw text the model produced. Send the item back in the
+    next request's ``input`` followed by a ``custom_tool_call_output`` item
+    carrying your result.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["custom_tool_call"]
+    id: str
+    call_id: str
+    name: str
+    namespace: str | None = Field(
+        default=None, description="Namespace of the called tool, when it has one."
+    )
+    input: str = Field(..., description="Raw input the model produced for the tool.")
+    status: str = Field(
+        ...,
+        description="Call status. Known values are in KNOWN_RESPONSE_CUSTOM_TOOL_CALL_STATUSES.",
+    )
+
+
+class ResponsesToolSearchCallOutput(BaseModel):
+    """``type='tool_search_call'`` block from a client-executed ``tool_search`` tool.
+
+    Run the search with ``arguments``, then send this item back in ``input``
+    followed by a ``tool_search_output`` item listing the tools found.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["tool_search_call"]
+    id: str
+    call_id: str
+    execution: str = Field(
+        ...,
+        description=(
+            "Where the search runs. Known values are in KNOWN_RESPONSE_TOOL_SEARCH_EXECUTIONS."
+        ),
+    )
+    arguments: dict[str, Any] = Field(..., description="Search arguments the model produced.")
+    status: str = Field(
+        ...,
+        description="Call status. Known values are in KNOWN_RESPONSE_TOOL_SEARCH_CALL_STATUSES.",
     )
 
 
@@ -196,6 +280,8 @@ ResponsesOutputItem = (
     ResponsesReasoningOutput
     | ResponsesMessageOutput
     | ResponsesFunctionCallOutput
+    | ResponsesCustomToolCallOutput
+    | ResponsesToolSearchCallOutput
     | ResponsesWebSearchCallOutput
     | ResponsesUnknownOutput
 )
@@ -260,6 +346,12 @@ __all__ = [
     "KNOWN_RESPONSE_MESSAGE_STATUSES",
     "KNOWN_RESPONSE_STATUSES",
     "KNOWN_RESPONSE_WEB_SEARCH_CALL_STATUSES",
+    "KNOWN_RESPONSE_CUSTOM_TOOL_CALL_STATUSES",
+    "KNOWN_RESPONSE_TOOL_SEARCH_CALL_STATUSES",
+    "KNOWN_RESPONSE_TOOL_SEARCH_EXECUTIONS",
+    "ResponsesCustomToolCallOutput",
+    "ResponsesReasoningSummaryText",
+    "ResponsesToolSearchCallOutput",
     "ResponsesError",
     "ResponsesFunctionCallOutput",
     "ResponsesIncompleteDetails",
