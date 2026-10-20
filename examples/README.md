@@ -118,7 +118,7 @@ If you're new to Venice AI, start with these examples:
 
 Before running these examples, ensure you have:
 
-1. **Python 3.13+** installed
+1. **Python 3.11+** installed
 2. **Venice AI SDK** installed — either `pip install venice-py` (end users) or
    `poetry install` from a repo checkout (development)
 3. **API Key** from [Venice AI](https://venice.ai)

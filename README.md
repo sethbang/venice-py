@@ -42,7 +42,7 @@
 
 ## Quick Start
 
-> **Requires Python 3.13+.** On earlier versions pip reports that no matching distribution
+> **Requires Python 3.11+.** On earlier versions pip reports that no matching distribution
 > is available.
 
 ```bash
@@ -637,7 +637,7 @@ make test-verbose   # With coverage
 
 ## Requirements
 
-- **Python 3.13+**
+- **Python 3.11+**
 - **Core deps:** aiohttp (>=3.13.4,<3.15), pydantic (^2.13.4)
 - **Platform:** Linux, macOS, Windows
 

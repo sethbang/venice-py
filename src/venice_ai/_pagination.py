@@ -19,15 +19,18 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from typing import Generic, TypeVar
 
 # Default page size when the caller doesn't specify one. 100 matches the
 # server-side max for most Venice list endpoints; smaller wastes round trips,
 # larger gets rejected. Per-endpoint iter_* methods may override.
 DEFAULT_PAGE_SIZE = 100
 
+T = TypeVar("T")
+
 
 @dataclass(frozen=True)
-class _PageResult[T]:
+class _PageResult(Generic[T]):
     """Result of a single page fetch.
 
     Per-endpoint adapters return one of these from their ``fetch_page``
@@ -38,7 +41,7 @@ class _PageResult[T]:
     has_more: bool
 
 
-class Paginator[T]:
+class Paginator(Generic[T]):
     """Async iterator that lazily exhausts a paginated endpoint.
 
     Wraps a per-endpoint ``fetch_page(page_index_zero_based)`` callback that

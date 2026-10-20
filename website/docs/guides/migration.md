@@ -12,7 +12,7 @@ rough order of impact. For the complete list of additions, see the
 
 ## 0. Change the package name — that is also your version floor
 
-v2 requires **Python 3.13+**, and it is published under a different name than v1. The
+v2 requires **Python 3.11+**, and it is published under a different name than v1. The
 v1 line (1.3.x and earlier) exists only as `venice-ai`; v2 lives on PyPI as
 [`venice-py`](https://pypi.org/project/venice-py/).
 
@@ -109,12 +109,13 @@ with SyncVeniceClient() as client:
 
 ---
 
-## 2. Python ≥3.13 required
+## 2. Python ≥3.11 required
 
-v2.0.0 requires **Python ≥3.13**. v1.3.x supported Python 3.11–3.12; support for
-both has been dropped.
+v2 requires **Python ≥3.11**, the same floor as v1.3.x. Releases 2.0.0 through 2.6.x
+required Python ≥3.13, so on 3.11 or 3.12 install 2.7.0 or later.
 
-**What to do:** Upgrade your runtime to 3.13 or later before upgrading the SDK.
+**What to do:** Nothing if you already run 3.11 or later. On an older interpreter, upgrade
+to 3.11+ before upgrading the SDK.
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "include": ["src"],
-  "pythonVersion": "3.13",
+  "pythonVersion": "3.11",
   "reportMissingImports": "error",
   "reportMissingTypeStubs": "none",
   "useLibraryCodeForTypes": true,

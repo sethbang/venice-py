@@ -162,7 +162,7 @@ class Audio(APIResource["VeniceClient"]):
 
                 # Save audio to file
                 with open("welcome.mp3", "wb") as f:
-                    f.write(audio_bytes)
+                    f.write(audio_bytes.content)
 
         Real-time streaming generation::
 
@@ -333,7 +333,7 @@ class Audio(APIResource["VeniceClient"]):
 
                         # Save to file
                         with open("speech.mp3", "wb") as f:
-                            f.write(audio_bytes)
+                            f.write(audio_bytes.content)
 
                         # Using string literals and different format
                         audio_bytes = await client.audio.create_speech(

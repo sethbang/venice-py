@@ -12,7 +12,7 @@ The Venice AI Python SDK is a production-ready, fully-typed async client for [Ve
 
 ## Install
 
-**Python 3.13+ is required.** On earlier versions pip reports that no matching
+**Python 3.11+ is required.** On earlier versions pip reports that no matching
 distribution is available.
 
 ```bash

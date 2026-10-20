@@ -20,7 +20,7 @@ If you encounter a bug or have an issue with the library:
 
 ## Development Setup
 
-This project uses [Poetry](https://python-poetry.org/) for dependency management and requires **Python ≥3.13**.
+This project uses [Poetry](https://python-poetry.org/) for dependency management and requires **Python ≥3.11**.
 
 ```bash
 # Install dependencies, dev tools and all extras

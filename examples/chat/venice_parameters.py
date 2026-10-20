@@ -25,7 +25,7 @@ if every section was skipped.
 
 Requirements:
     - Venice AI API key (set as VENICE_API_KEY environment variable)
-    - Python 3.13+
+    - Python 3.11+
     - venice-py SDK
 
 Performance note:

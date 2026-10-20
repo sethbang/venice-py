@@ -55,7 +55,7 @@ Example:
 
 import logging
 import threading
-from typing import Any
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -73,14 +73,16 @@ _validation_lock = threading.Lock()
 _validation_counters: dict[str, int] = {"successful": 0, "failed": 0}
 _validation_errors_by_model: dict[str, int] = {}
 
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
 
-def validate_response_model[T: BaseModel](
+
+def validate_response_model(
     response_data: Any,
-    model_class: type[T],
+    model_class: type[_ModelT],
     *,
     endpoint: str | None = None,
     method: str | None = None,
-) -> T:
+) -> _ModelT:
     """
     Validate API response data against a Pydantic model with comprehensive error handling.
 

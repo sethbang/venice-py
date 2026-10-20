@@ -20,7 +20,7 @@ unchanged.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NotRequired
 
 from pydantic import (
     BaseModel,  # noqa: F401 — used by subclasses via wildcard
@@ -29,6 +29,8 @@ from pydantic import (
     ValidationInfo,
     field_validator,
 )
+
+from ..._compat import TypedDict
 
 if TYPE_CHECKING:
     from venice_ai.types.api.common import WebSearchCitation

@@ -10,6 +10,7 @@ than to pydantic or SDK internals.
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 from collections.abc import Iterable
 
@@ -36,7 +37,17 @@ def _internal_prefixes() -> tuple[str, ...]:
 
 def warn_user(message: str, category: type[Warning] = UserWarning) -> None:
     """Emit ``message`` attributed to the first stack frame outside the SDK and pydantic."""
-    warnings.warn(message, category, skip_file_prefixes=_internal_prefixes())
+    prefixes = _internal_prefixes()
+    if sys.version_info >= (3, 12):
+        warnings.warn(message, category, skip_file_prefixes=prefixes)
+        return
+    # ``skip_file_prefixes`` needs Python 3.12; walk the stack to the same frame instead.
+    stacklevel = 2
+    frame = sys._getframe(1)
+    while frame.f_back is not None and frame.f_code.co_filename.startswith(prefixes):
+        frame = frame.f_back
+        stacklevel += 1
+    warnings.warn(message, category, stacklevel=stacklevel)
 
 
 def warn_on_deprecated_fields(model: BaseModel, names: Iterable[str]) -> None:

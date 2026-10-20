@@ -52,6 +52,7 @@ from collections.abc import AsyncIterator
 from typing import (
     TYPE_CHECKING,
     Any,
+    Generic,
     Protocol,
     Self,
     TypeVar,
@@ -75,6 +76,9 @@ logger = logging.getLogger(__name__)
 
 #: Covariant type variable for async iterator protocol
 T_co = TypeVar("T_co", covariant=True)
+
+#: Chunk type yielded by :class:`Stream`
+ChunkType = TypeVar("ChunkType", covariant=True)
 
 
 class AsyncClosableIterator(Protocol[T_co]):
@@ -109,7 +113,7 @@ class AsyncClosableIterator(Protocol[T_co]):
         ...
 
 
-class Stream[ChunkType]:
+class Stream(Generic[ChunkType]):
     """
     Wrapper for handling streaming responses from the Venice AI API.
 

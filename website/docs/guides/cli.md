@@ -21,12 +21,12 @@ is active.
 
 ### Prerequisites
 
-- Python 3.13+
+- Python 3.11+
 - A Venice AI API key ([venice.ai](https://venice.ai))
 
 ### Install with pip
 
-Requires Python 3.13+. Quote the specifier — `[...]` is a glob in zsh.
+Requires Python 3.11+. Quote the specifier — `[...]` is a glob in zsh.
 
 ```bash
 pip install 'venice-py[cli]'

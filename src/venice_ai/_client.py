@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
+    TypeVar,
     cast,
 )
 
@@ -54,6 +55,10 @@ from .utils import NOT_GIVEN, NotGiven, serialize_form_value
 from .utils.errors import read_body, resolve_timeout, wrap_aiohttp_errors
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+_U = TypeVar("_U")
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 if TYPE_CHECKING:
     from .auth.x402 import X402Auth
@@ -164,7 +169,7 @@ class VeniceClient:
         return {}
 
     @staticmethod
-    def _resolve_not_given[U](value: U | NotGiven, default: U | None = None) -> U | None:
+    def _resolve_not_given(value: _U | NotGiven, default: _U | None = None) -> _U | None:
         """
         Convert NOT_GIVEN sentinel to a default value, otherwise return the actual value.
 
@@ -175,9 +180,9 @@ class VeniceClient:
             default: The default value to return if value is NOT_GIVEN (defaults to None)
 
         Returns:
-            The default if value is NOT_GIVEN, otherwise the actual value cast to type U
+            The default if value is NOT_GIVEN, otherwise the actual value
         """
-        return default if value is NOT_GIVEN else cast(U, value)
+        return default if value is NOT_GIVEN else cast(_U, value)
 
     # -------------------------------------------------------------------
     # Initialization
@@ -662,15 +667,15 @@ class VeniceClient:
         finally:
             resp.release()
 
-    async def get[T: BaseModel](
+    async def get(
         self,
         path: str,
         *,
         params: dict[str, Any] | None = None,
-        cast_to: type[T] | None = None,
+        cast_to: type[_ModelT] | None = None,
         force_direct: bool = False,
         **kwargs: Any,
-    ) -> T | Any:
+    ) -> _ModelT | Any:
         """Convenience method for GET requests."""
         return await self._request(
             "GET",
@@ -681,17 +686,17 @@ class VeniceClient:
             **kwargs,
         )
 
-    async def post[T: BaseModel](
+    async def post(
         self,
         path: str,
         *,
         json_data: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
-        cast_to: type[T] | None = None,
+        cast_to: type[_ModelT] | None = None,
         force_direct: bool = False,
         **kwargs: Any,
-    ) -> T | Any:
+    ) -> _ModelT | Any:
         """Convenience method for POST requests."""
         return await self._request(
             "POST",
@@ -704,17 +709,17 @@ class VeniceClient:
             **kwargs,
         )
 
-    async def put[T: BaseModel](
+    async def put(
         self,
         path: str,
         *,
         json_data: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
-        cast_to: type[T] | None = None,
+        cast_to: type[_ModelT] | None = None,
         force_direct: bool = False,
         **kwargs: Any,
-    ) -> T | Any:
+    ) -> _ModelT | Any:
         """Convenience method for PUT requests."""
         return await self._request(
             "PUT",
@@ -727,30 +732,30 @@ class VeniceClient:
             **kwargs,
         )
 
-    async def delete[T: BaseModel](
+    async def delete(
         self,
         path: str,
         *,
-        cast_to: type[T] | None = None,
+        cast_to: type[_ModelT] | None = None,
         force_direct: bool = False,
         **kwargs: Any,
-    ) -> T | Any:
+    ) -> _ModelT | Any:
         """Convenience method for DELETE requests."""
         return await self._request(
             "DELETE", path, cast_to=cast_to, force_direct=force_direct, **kwargs
         )
 
-    async def patch[T: BaseModel](
+    async def patch(
         self,
         path: str,
         *,
         json_data: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
-        cast_to: type[T] | None = None,
+        cast_to: type[_ModelT] | None = None,
         force_direct: bool = False,
         **kwargs: Any,
-    ) -> T | Any:
+    ) -> _ModelT | Any:
         """Convenience method for PATCH requests."""
         return await self._request(
             "PATCH",
@@ -796,13 +801,13 @@ class VeniceClient:
         finally:
             _active_retry_options.reset(token)
 
-    async def gather[T](
+    async def gather(
         self,
-        awaitables: Iterable[Awaitable[T]],
+        awaitables: Iterable[Awaitable[_T]],
         *,
         max_concurrency: int = 10,
         return_exceptions: bool = True,
-    ) -> list[T | BaseException]:
+    ) -> list[_T | BaseException]:
         """Await many coroutines in parallel with a concurrency cap.
 
         Modality-agnostic alternative to :meth:`asyncio.gather`: accepts any
@@ -841,7 +846,7 @@ class VeniceClient:
 
         sem = asyncio.Semaphore(max_concurrency)
 
-        async def _wrapped(awaitable: Awaitable[T]) -> T:
+        async def _wrapped(awaitable: Awaitable[_T]) -> _T:
             async with sem:
                 return await awaitable
 
@@ -1342,7 +1347,7 @@ class VeniceClient:
             return None
         return None  # Not an empty response
 
-    async def _request[T: BaseModel](
+    async def _request(
         self,
         method: str,
         path: str,
@@ -1352,12 +1357,12 @@ class VeniceClient:
         files: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
-        cast_to: type[T] | None = None,
+        cast_to: type[_ModelT] | None = None,
         raw_response: bool = False,
         timeout: float | aiohttp.ClientTimeout | None = None,
         force_direct: bool = False,
         siwe_auth: X402Auth | SolanaX402Auth | None = None,
-    ) -> T | Any | aiohttp.ClientResponse | bytes:
+    ) -> _ModelT | Any | aiohttp.ClientResponse | bytes:
         """
         Makes an HTTP request to the Venice AI API.
 
@@ -1517,7 +1522,7 @@ class VeniceClient:
     # Streaming
     # -------------------------------------------------------------------
 
-    async def _stream_request[T: BaseModel](
+    async def _stream_request(
         self,
         method: str,
         path: str,
@@ -1525,9 +1530,9 @@ class VeniceClient:
         json_data: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
-        cast_to: type[T],
+        cast_to: type[_ModelT],
         timeout: float | aiohttp.ClientTimeout | None = None,
-    ) -> AsyncIterator[T]:
+    ) -> AsyncIterator[_ModelT]:
         """
         Makes a streaming HTTP request to the Venice AI API.
 
@@ -1603,9 +1608,9 @@ class VeniceClient:
             # Ensure the response is properly closed
             response.close()
 
-    async def _process_stream_line[T: BaseModel](
-        self, line_str: str, cast_to: type[T], response: Any | None = None
-    ) -> AsyncIterator[T]:
+    async def _process_stream_line(
+        self, line_str: str, cast_to: type[_ModelT], response: Any | None = None
+    ) -> AsyncIterator[_ModelT]:
         """Helper to process a single line from the stream.
 
         Args:

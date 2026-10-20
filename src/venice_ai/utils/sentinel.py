@@ -9,6 +9,8 @@ Exports:
 
 from __future__ import annotations
 
+from .._compat import TypeAliasType
+
 
 class NotGivenType:
     """
@@ -48,4 +50,4 @@ class NotGivenType:
 NOT_GIVEN = NotGivenType()
 
 #: Type alias for parameters that can be NotGiven, None, or a specific type
-type NotGiven = NotGivenType | None
+NotGiven = TypeAliasType("NotGiven", NotGivenType | None)

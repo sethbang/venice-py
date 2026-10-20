@@ -29,6 +29,7 @@ import builtins
 import time
 from typing import TYPE_CHECKING, Literal
 
+from .._compat import TypeAliasType
 from .._resource import APIResource
 from ..exceptions import NoMatchingModelError
 
@@ -74,26 +75,29 @@ _MODEL_LIST_CACHE_TTL_SECONDS = 30.0
 # Public type alias for the ``Models.list(type=...)`` kwarg. Callers that
 # fan out across multiple types (e.g. the CLI) should annotate their
 # local variables with this alias so the call-site type-check stays tight.
-type ModelListType = Literal[
-    "text",
-    "chat",
-    "image",
-    "embedding",
-    "tts",
-    "asr",
-    "music",
-    "upscale",
-    "inpaint",
-    "video",
-    "decision",
-    "all",
-    "code",
-]
+ModelListType = TypeAliasType(
+    "ModelListType",
+    Literal[
+        "text",
+        "chat",
+        "image",
+        "embedding",
+        "tts",
+        "asr",
+        "music",
+        "upscale",
+        "inpaint",
+        "video",
+        "decision",
+        "all",
+        "code",
+    ],
+)
 
 
 # Ranking applied by ``resolve(prefer=...)``. ``None`` keeps the catalog's own
 # ordering (Venice traits, then catalog order).
-type ModelPreference = Literal["cheapest"]
+ModelPreference = TypeAliasType("ModelPreference", Literal["cheapest"])
 
 
 class Models(APIResource["VeniceClient"]):

@@ -10,7 +10,7 @@ the response against it, and returns a typed instance — no manual
 
 Requirements:
     - Venice AI API key (set as VENICE_API_KEY environment variable)
-    - Python 3.13+
+    - Python 3.11+
     - venice-py SDK (with pydantic available)
 """
 

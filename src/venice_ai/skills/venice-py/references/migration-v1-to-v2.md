@@ -26,13 +26,12 @@ async with VeniceClient() as client:
 
 | Concern | v1.3.x | v2 |
 |---|---|---|
-| Python | ≥3.11 | **≥3.13** |
+| Python | ≥3.11 | ≥3.11 (venice-py 2.0–2.6 required ≥3.13) |
 | Install | `pip install venice-ai` | `pip install venice-py`; optional extras `[x402]`, `[redis]`, `[adaptive]`, `[e2ee]` |
 
 The v1 line was published as `venice-ai` and has no release under this name, so there is no
-wrong version to land on — on Python ≤3.12 pip reports that no matching distribution exists.
-
-If you're stuck on Python ≤3.12, stay on the latest v1 release by pinning `venice-ai<2`.
+wrong version to land on — on Python older than 3.11 pip reports that no matching distribution
+exists.
 
 ## 3. Renamed methods
 

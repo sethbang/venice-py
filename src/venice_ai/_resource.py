@@ -2,6 +2,8 @@ from collections.abc import Mapping
 from typing import (
     TYPE_CHECKING,
     Any,
+    Generic,
+    TypeVar,
 )
 
 import aiohttp
@@ -11,8 +13,10 @@ from .utils import serialize_form_value
 if TYPE_CHECKING:
     from ._client import VeniceClient
 
+ClientT = TypeVar("ClientT", bound="VeniceClient", covariant=True)
 
-class APIResource[ClientT: "VeniceClient"]:
+
+class APIResource(Generic[ClientT]):
     """
     Base class for all API resources.
 

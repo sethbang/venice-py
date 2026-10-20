@@ -7,7 +7,7 @@ including streaming, tool calling, and Venice-specific features.
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Final, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from .models import LLMModelPricing
 
 _T = TypeVar("_T", bound=BaseModel)
+_ParsedT = TypeVar("_ParsedT", bound=BaseModel, covariant=True)
 
 # ============================================================================
 # Tool Call Models (Response DTOs)
@@ -538,7 +539,7 @@ class ChatCompletionResponse(VeniceBaseModel):
 
 
 @dataclass(frozen=True)
-class ParsedChatCompletion[T: BaseModel]:
+class ParsedChatCompletion(Generic[_ParsedT]):
     """Result of :meth:`client.chat.completions.parse` — paired raw + validated.
 
     ``parse`` is the auto-validating sibling of ``create``: callers pass a
@@ -553,7 +554,7 @@ class ParsedChatCompletion[T: BaseModel]:
     """
 
     response: "ChatCompletionResponse"
-    parsed: T
+    parsed: _ParsedT
 
     @property
     def usage(self) -> "ChatUsage | None":

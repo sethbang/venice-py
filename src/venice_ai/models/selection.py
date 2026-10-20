@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from venice_ai._compat import TypeAliasType
 from venice_ai.exceptions import ModelQuotesUnavailableError, NoMatchingModelError
 from venice_ai.types.api.models import VideoModelConstraints
 
@@ -763,7 +764,10 @@ def cheapest_video_params(
 #: - ``"first_last_frame"``: a first and a last frame.
 #: - ``"transition"``: two images to transition between.
 #: - ``"multi_angle"``: several views of one subject.
-type VideoInputMode = Literal["image", "reference", "first_last_frame", "transition", "multi_angle"]
+VideoInputMode = TypeAliasType(
+    "VideoInputMode",
+    Literal["image", "reference", "first_last_frame", "transition", "multi_angle"],
+)
 
 # Venice types all of these models ``image-to-video`` and gives them
 # indistinguishable constraints, so the id and display name are the only signal.
