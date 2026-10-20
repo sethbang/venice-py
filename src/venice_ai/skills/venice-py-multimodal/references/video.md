@@ -43,8 +43,9 @@ await client.video.run(
     negative_prompt=None,                       # str | None — what to avoid
     resolution=None,                            # str | None — "720p", "1080p", "4k"
     audio=None,                                 # bool | None — include audio track
-    aspect_ratio=None,                          # str | None — "16:9", "9:16", "1:1"
+    aspect_ratio=None,                          # str | None — "16:9", "9:16", "1:1", "2:1"
     image_url=None,                             # str | None — seed frame for image-to-video
+    image_strength=None,                        # float | None — 0-1, how strongly image_url guides the clip (queue-only)
     upscale_factor=None,                        # 1 | 2 | 4 | None — for upscale models
     end_image_url=None,                         # str | None — target end frame (interpolation)
     audio_url=None,                             # str | None — source audio to sync to

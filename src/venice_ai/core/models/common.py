@@ -147,10 +147,26 @@ class TextContent(VeniceBaseModel):
     )
 
 
+ImageDetail = Literal["auto", "low", "high", "original"]
+"""Fidelity hint for an image content part (``image_url.detail``).
+
+``"auto"``, ``"low"`` and ``"high"`` are forwarded to the provider; explicit
+``"high"`` may increase image-token usage and cost. ``"original"`` is kept on
+direct OpenAI routes and treated as ``"high"`` elsewhere.
+"""
+
+
 class ImageUrl(VeniceBaseModel):
     """Image URL object."""
 
     url: str = Field(..., description="Image URL (data URL with base64 or public URL)")
+    detail: ImageDetail | None = Field(
+        default=None,
+        description=(
+            "Image detail level: 'auto', 'low', 'high' or 'original'. Explicit "
+            "'high' may increase image-token usage and cost. Omitted when unset."
+        ),
+    )
 
 
 class ImageContent(VeniceBaseModel):
@@ -240,6 +256,7 @@ class ImageUrlParam(TypedDict):
     """TypedDict shape of :class:`ImageUrl` for dict-form input."""
 
     url: str
+    detail: NotRequired[ImageDetail]
 
 
 class ImageContentParam(TypedDict):
@@ -678,6 +695,7 @@ __all__ = [
     "FileContentParam",
     "AudioContentParam",
     "VideoContentParam",
+    "ImageDetail",
     # Tools and functions
     "ToolFunction",
     "Tool",

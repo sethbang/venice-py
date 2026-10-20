@@ -208,6 +208,9 @@ async with VeniceClient() as client:
 public URL. Supported: PDF, EPUB, DOCX, PPTX, XLSX/XLS, txt, md, csv, json, and
 most source-code files. The builder chains `.text()` / `.image()` / `.audio()` /
 `.video()` / `.file()` parts and `.build()` returns the `UserMessage`.
+`.image(url, detail="low")` sets the image detail level (`"auto"`, `"low"`,
+`"high"`, `"original"`); explicit `"high"` may cost more image tokens, and
+`detail` is omitted from the request when unset.
 
 ## Discovering model capabilities & lifecycle
 

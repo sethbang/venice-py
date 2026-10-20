@@ -20,6 +20,7 @@ from .common import (
     FileContent,
     FileObject,
     ImageContent,
+    ImageDetail,
     ImageUrl,
     JSONObjectFormat,
     JSONSchemaFormat,
@@ -83,15 +84,22 @@ class UserMessageBuilder:
         self._parts.append(TextContent(type="text", text=text))
         return self
 
-    def image(self, url: str) -> Self:
+    def image(self, url: str, *, detail: ImageDetail | None = None) -> Self:
         """Append an image content part.
 
         :param url: A public image URL or a ``data:`` URI containing base64
             image bytes (e.g. ``data:image/png;base64,iVBORw0...``). Use
             :func:`venice_ai.detect_image_format` to build a data URI from
             raw bytes if needed.
+        :param detail: Image detail level: ``"auto"``, ``"low"``, ``"high"``
+            or ``"original"``. Explicit ``"high"`` may increase image-token
+            usage and cost; ``"original"`` is kept on direct OpenAI routes and
+            treated as ``"high"`` elsewhere. Omitted from the request when
+            unset.
         """
-        self._parts.append(ImageContent(type="image_url", image_url=ImageUrl(url=url)))
+        self._parts.append(
+            ImageContent(type="image_url", image_url=ImageUrl(url=url, detail=detail))
+        )
         return self
 
     def audio(self, data: str, format: str) -> Self:

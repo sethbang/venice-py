@@ -271,6 +271,17 @@ class VideoRequestBase(BaseModel):
             "(HTTP URL or data: URI)."
         ),
     )
+    image_strength: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description=(
+            "How strongly the input image guides an image-to-video generation, "
+            "from 0 to 1. Supported on models that declare image strength; "
+            "omit to use the provider default (1). Queue-only: it does not "
+            "change price, and ``/video/quote`` does not accept it."
+        ),
+    )
     audio_url: str | None = Field(
         default=None,
         description=(

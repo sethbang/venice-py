@@ -768,6 +768,7 @@ venice-py video from-image <INPUT_FILE> [OPTIONS]
 | `--reference-video-urls` | | — | Reference video URL for R2V models (repeatable, up to 3) |
 | `--reference-audio-urls` | | — | Reference audio donor URL for R2V models (repeatable, up to 3) |
 | `--end-image-url` | | — | End-frame image URL for models that support transitions |
+| `--image-strength` | | — | How strongly the input image guides the video, from 0 to 1, on models that declare image strength (provider default 1) |
 | `--output` | `-o` | `video_<timestamp>.mp4` | Output file path |
 | `--save-dir` | | `.` | Directory to save the video |
 | `--no-poll` | | `false` | Queue without waiting |
