@@ -176,6 +176,7 @@ class TestKeysUpdateLimitPeriod:
                 expires_at=None,
                 consumption_limit={"diem": 5.0},
                 limit_period="MONTH",
+                ip_allowlist=None,
             )
 
     def test_keys_update_limit_period_alone_is_valid(self):
@@ -386,6 +387,7 @@ class TestKeysUpdateAsync:
                 expires_at=None,
                 consumption_limit=None,
                 limit_period=None,
+                ip_allowlist=None,
             )
 
     @pytest.mark.asyncio
@@ -414,6 +416,7 @@ class TestKeysUpdateAsync:
                 expires_at="2026-12-31",
                 consumption_limit={"usd": 50.0, "diem": 5.0},
                 limit_period=None,
+                ip_allowlist=None,
             )
 
     @pytest.mark.asyncio

@@ -449,6 +449,23 @@ async def _keys_get_async(ctx, api_key_id, output_json):
     default=None,
     help="Period over which the consumption limit resets.",
 )
+@click.option(
+    "--ip-allow",
+    "ip_allow",
+    multiple=True,
+    metavar="IP_OR_CIDR",
+    help=(
+        "Replace the key's IP allowlist with these IPv4/IPv6 addresses or CIDR "
+        "subnets. Repeat for several (max 100)."
+    ),
+)
+@click.option(
+    "--clear-ip-allowlist",
+    "clear_ip_allowlist",
+    is_flag=True,
+    default=False,
+    help="Remove the key's IP allowlist so any IP address may use it.",
+)
 @click.option("--json", "output_json", is_flag=True, help="Output JSON for scripting.")
 @click.pass_context
 def keys_update(
@@ -460,12 +477,16 @@ def keys_update(
     limit_diem,
     limit_vcu,
     limit_period,
+    ip_allow,
+    clear_ip_allowlist,
     output_json,
 ):
     """Update an existing API key.
 
     At least one of ``--description``, ``--expiry``, ``--limit-usd``,
-    ``--limit-diem``, ``--limit-vcu``, or ``--limit-period`` must be provided.
+    ``--limit-diem``, ``--limit-vcu``, ``--limit-period``, ``--ip-allow``, or
+    ``--clear-ip-allowlist`` must be provided. Without either IP option the
+    key's allowlist is left unchanged.
 
     Examples:
 
@@ -473,6 +494,8 @@ def keys_update(
       venice-py account keys update key_abc123 --expiry 2026-12-31
       venice-py account keys update key_abc123 --limit-usd 50 --limit-diem 5
       venice-py account keys update key_abc123 --limit-period MONTH
+      venice-py account keys update key_abc123 --ip-allow 11.22.33.0/24
+      venice-py account keys update key_abc123 --clear-ip-allowlist
     """
     # ``--limit-vcu`` is the legacy alias for ``--limit-diem``; the request
     # model (ConsumptionLimit) has no ``vcu`` field, so fold it into ``diem``
@@ -486,15 +509,27 @@ def keys_update(
         if diem is not None:
             consumption_limit["diem"] = diem
 
+    if ip_allow and clear_ip_allowlist:
+        raise click.UsageError("--ip-allow and --clear-ip-allowlist are mutually exclusive.")
+    # An empty list clears the allowlist on the server, so only an explicit
+    # --clear-ip-allowlist may produce one; no IP option means omit the field.
+    ip_allowlist: list[str] | None = None
+    if clear_ip_allowlist:
+        ip_allowlist = []
+    elif ip_allow:
+        ip_allowlist = list(ip_allow)
+
     if (
         description is None
         and expires_at is None
         and consumption_limit is None
         and limit_period is None
+        and ip_allowlist is None
     ):
         raise click.UsageError(
             "Provide at least one of --description, --expiry, --limit-usd, "
-            "--limit-diem, --limit-vcu, or --limit-period."
+            "--limit-diem, --limit-vcu, --limit-period, --ip-allow, or "
+            "--clear-ip-allowlist."
         )
 
     asyncio.run(
@@ -505,6 +540,7 @@ def keys_update(
             expires_at=expires_at,
             consumption_limit=consumption_limit,
             limit_period=limit_period,
+            ip_allowlist=ip_allowlist,
             output_json=output_json,
         )
     )
@@ -518,6 +554,7 @@ async def _keys_update_async(
     expires_at: str | None,
     consumption_limit: dict[str, Any] | None,
     limit_period: str | None = None,
+    ip_allowlist: list[str] | None = None,
     output_json: bool,
 ):
     from venice_ai import VeniceClient
@@ -532,6 +569,7 @@ async def _keys_update_async(
             expires_at=expires_at,
             consumption_limit=consumption_limit,
             limit_period=limit_period,  # type: ignore[arg-type]
+            ip_allowlist=ip_allowlist,
         )
 
     _render_api_key(updated, plain=plain, output_json=output_json, title="Updated API Key")
@@ -552,6 +590,7 @@ def _render_api_key(api_key_obj, *, plain: bool, output_json: bool, title: str) 
                 "lastUsedAt": getattr(api_key_obj, "lastUsedAt", None),
                 "last6Chars": getattr(api_key_obj, "last6Chars", None),
                 "consumptionLimits": getattr(api_key_obj, "consumptionLimits", None),
+                "ipAllowlist": getattr(api_key_obj, "ipAllowlist", None),
                 "usage": getattr(api_key_obj, "usage", None),
             }
         click.echo(json.dumps(data, indent=2, default=str))
@@ -565,6 +604,9 @@ def _render_api_key(api_key_obj, *, plain: bool, output_json: bool, title: str) 
     last_used = getattr(api_key_obj, "lastUsedAt", None)
     last6 = getattr(api_key_obj, "last6Chars", None)
     limits = getattr(api_key_obj, "consumptionLimits", None)
+    ip_allowlist = getattr(api_key_obj, "ipAllowlist", None)
+    if not isinstance(ip_allowlist, list):
+        ip_allowlist = None
 
     if plain:
         click.echo(f"{title}:")
@@ -585,6 +627,8 @@ def _render_api_key(api_key_obj, *, plain: bool, output_json: bool, title: str) 
                 f"diem={getattr(limits, 'diem', None)} "
                 f"vcu={getattr(limits, 'vcu', None)}"
             )
+        if ip_allowlist:
+            click.echo(f"  IP allow:    {', '.join(ip_allowlist)}")
         return
 
     from rich.panel import Panel
@@ -615,6 +659,9 @@ def _render_api_key(api_key_obj, *, plain: bool, output_json: bool, title: str) 
         vcu = getattr(limits, "vcu", None)
         lines.append("Limits:      ", style="bold")
         lines.append(f"usd={usd}, diem={diem}" + (f", vcu={vcu}" if vcu is not None else "") + "\n")
+    if ip_allowlist:
+        lines.append("IP allow:    ", style="bold")
+        lines.append(f"{', '.join(ip_allowlist)}\n")
 
     console.print(Panel(lines, title=title, border_style="green"))
 

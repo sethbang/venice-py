@@ -189,6 +189,16 @@ def _build_consumption_limit(limit_usd, limit_diem, limit_vcu) -> "ConsumptionLi
     default=None,
     help='Expiration date (ISO 8601, e.g. "2026-12-31" or "2026-12-31T23:59:00Z").',
 )
+@click.option(
+    "--ip-allow",
+    "ip_allow",
+    multiple=True,
+    metavar="IP_OR_CIDR",
+    help=(
+        "Restrict the key to this IPv4/IPv6 address or CIDR subnet. Repeat for "
+        "several (max 100). Without it, the key works from any IP address."
+    ),
+)
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON for scripting")
 @click.pass_context
 def create_key(
@@ -201,6 +211,7 @@ def create_key(
     limit_period,
     model_privacy,
     expiry,
+    ip_allow,
     output_json,
 ):
     """Create a new API key.
@@ -217,6 +228,8 @@ def create_key(
 
       venice-py api-keys create --name "Private" --model-privacy PRIVATE_ONLY
 
+      venice-py api-keys create --name "Office" --ip-allow 11.22.33.0/24 --ip-allow 2a00:1::/48
+
       venice-py api-keys create --name "My App" --json
     """
     asyncio.run(
@@ -230,6 +243,7 @@ def create_key(
             limit_period=limit_period,
             model_privacy=model_privacy,
             expiry=expiry,
+            ip_allowlist=list(ip_allow) or None,
             output_json=output_json,
         )
     )
@@ -246,6 +260,7 @@ async def _create_key_async(
     limit_period=None,
     model_privacy=None,
     expiry=None,
+    ip_allowlist=None,
     output_json=False,
 ):
     from venice_ai import VeniceClient
@@ -264,6 +279,7 @@ async def _create_key_async(
         limitPeriod=limit_period,
         modelPrivacy=model_privacy,
         expiresAt=expiry,
+        ipAllowlist=ip_allowlist,
     )
 
     async with VeniceClient(**get_client_kwargs()) as client:
@@ -275,6 +291,9 @@ async def _create_key_async(
     api_key_type = getattr(new_key, "apiKeyType", None) or "INFERENCE"
     created_at = getattr(new_key, "createdAt", None)
     secret_key = getattr(new_key, "apiKey", None)
+    ip_allowlist_out = getattr(new_key, "ipAllowlist", None)
+    if not isinstance(ip_allowlist_out, list):
+        ip_allowlist_out = None
 
     if output_json:
         data = {
@@ -282,6 +301,7 @@ async def _create_key_async(
             "description": description,
             "apiKeyType": api_key_type,
             "createdAt": str(created_at) if created_at else None,
+            "ipAllowlist": ip_allowlist_out,
             "apiKey": secret_key,
         }
         click.echo(json.dumps(data, indent=2, default=str))
@@ -294,6 +314,8 @@ async def _create_key_async(
         click.echo(f"Type:        {api_key_type}")
         if created_at:
             click.echo(f"Created:     {created_at}")
+        if ip_allowlist_out:
+            click.echo(f"IP allow:    {', '.join(ip_allowlist_out)}")
         if secret_key:
             click.echo("")
             click.echo("WARNING: Save this key now — it will NOT be shown again!")
@@ -312,6 +334,9 @@ async def _create_key_async(
         if created_at:
             lines.append("Created:     ", style="bold")
             lines.append(f"{created_at}\n", style="dim")
+        if ip_allowlist_out:
+            lines.append("IP allow:    ", style="bold")
+            lines.append(f"{', '.join(ip_allowlist_out)}\n")
 
         if secret_key:
             lines.append("\n")

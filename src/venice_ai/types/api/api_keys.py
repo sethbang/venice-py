@@ -39,6 +39,14 @@ than failing the whole key listing.
 """
 
 
+_IP_ALLOWLIST_RESPONSE_DESCRIPTION = (
+    "IPv4 or IPv6 addresses and CIDR subnets allowed to use this key, in "
+    "canonical CIDR notation: a single address sent as ``11.22.33.44`` comes "
+    "back as ``11.22.33.44/32``. An empty list means any IP address may use "
+    "the key. ``None`` when the response carried no allowlist."
+)
+
+
 class ConsumptionLimits(BaseModel):
     """API key consumption limits"""
 
@@ -140,6 +148,9 @@ class ApiKey(BaseModel):
             "KNOWN_API_KEY_LIMIT_PERIODS."
         ),
     )
+    ipAllowlist: list[str] | None = Field(
+        default=None, description=_IP_ALLOWLIST_RESPONSE_DESCRIPTION
+    )
     usage: ApiKeyUsage | None = Field(default=None, description="Usage statistics")
     currentPeriodUsage: CurrentPeriodUsage | None = Field(
         default=None, description="Usage accrued in the current limit period"
@@ -171,6 +182,9 @@ class CreatedApiKey(BaseModel):
             "The consumption-limit period, e.g. ``EPOCH``, ``MONTH`` or ``LIFETIME``. "
             "Known values are in KNOWN_API_KEY_LIMIT_PERIODS."
         ),
+    )
+    ipAllowlist: list[str] | None = Field(
+        default=None, description=_IP_ALLOWLIST_RESPONSE_DESCRIPTION
     )
 
 

@@ -42,6 +42,16 @@ page = await client.billing.get_usage_history(
 #   page.nextCursor : str | None                      ← None on the last page
 ```
 
+Each `BillingUsageEntry` carries `apiKeyId`: the ID of the API key the entry was charged to (the same `id` that `client.api_keys.list()` returns), or `None` for Venice web-app usage and for non-usage entries such as credit purchases, grants and balance transfers. Group by it to attribute spend per key:
+
+```python
+from collections import defaultdict
+
+spend_by_key: defaultdict[str | None, float] = defaultdict(float)
+async for entry in client.billing.iter_usage_history(startTimestamp="2026-04-01T00:00:00Z"):
+    spend_by_key[entry.apiKeyId] += entry.amount
+```
+
 The endpoint is a **keyset walk**: the first request takes the filters, and every response carries a `nextCursor`. A continuation request sends **only** the cursor — the filters travel inside it, and the server rejects filters supplied alongside a cursor (the SDK raises `ValueError` before the request if you try):
 
 ```python

@@ -157,6 +157,7 @@ if response.deprecation_info and response.deprecation_info.is_deprecated:
 | `ServiceUnavailableError` (503) | Yes (with backoff) | Retry with cap |
 | `AuthenticationError` (401) | **No** | Surface; check API key |
 | `PermissionDeniedError` (403) | **No** | Surface; check ACLs |
+| `ApiKeyIpRestrictedError` (403, subclass of `PermissionDeniedError`) | **No** | Call from an allowed IP or widen the key's `ipAllowlist` |
 | `PaymentRequiredError` (402) | **No** | Top up balance; carries payment instructions |
 | `InvalidRequestError` (400) | **No** | Fix the request |
 | `NotFoundError` (404) | **No** | Surface |

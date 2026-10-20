@@ -20,6 +20,7 @@ Classes:
     ApiKeys: Asynchronous resource client for comprehensive API key management operations
 """
 
+import builtins
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -259,6 +260,10 @@ class ApiKeys(APIResource["VeniceClient"]):
                 - consumptionLimit: Optional usage quotas and restrictions
                 - modelPrivacy: Optional privacy tier restricting which models
                   the key may call ("ALL", "PRIVATE_TEXT", "PRIVATE_ONLY")
+                - ipAllowlist: Optional list of globally reachable IPv4/IPv6
+                  addresses and CIDR subnets allowed to use the key (max 100).
+                  Requests from any other source IP are rejected with
+                  :class:`~venice_ai.exceptions.ApiKeyIpRestrictedError`.
 
         Returns:
             Complete API key object including the secret key value, metadata,
@@ -367,6 +372,7 @@ class ApiKeys(APIResource["VeniceClient"]):
         consumption_limit: dict[str, Any] | None = None,
         limit_period: Literal["EPOCH", "MONTH", "LIFETIME"] | None = None,
         model_privacy: Literal["ALL", "PRIVATE_TEXT", "PRIVATE_ONLY"] | None = None,
+        ip_allowlist: builtins.list[str] | None = None,
     ) -> ApiKey:
         """Update an existing API key (PATCH /api_keys).
 
@@ -380,6 +386,11 @@ class ApiKeys(APIResource["VeniceClient"]):
                 key's current tier unchanged.
             limit_period: Period over which the consumption limit resets
                 (``EPOCH``, ``MONTH``, or ``LIFETIME``).
+            ip_allowlist: Replacement list of globally reachable IPv4/IPv6
+                addresses and CIDR subnets allowed to use the key (max 100).
+                Pass ``[]`` to remove the restriction; omit (``None``) to leave
+                the current allowlist unchanged. The server returns entries in
+                canonical CIDR form (``11.22.33.44`` becomes ``11.22.33.44/32``).
 
         Returns:
             Updated :class:`ApiKey` object.
@@ -397,6 +408,10 @@ class ApiKeys(APIResource["VeniceClient"]):
                     description="Updated description",
                     consumption_limit={"diem": 5, "usd": 50},
                 )
+
+                # Restrict the key to one office network, then lift it again
+                await client.api_keys.update(id="key_123", ip_allowlist=["11.22.33.0/24"])
+                await client.api_keys.update(id="key_123", ip_allowlist=[])
         """
         # Build the request body manually to support both dict and ConsumptionLimit
         request = UpdateApiKeyRequest(
@@ -406,6 +421,7 @@ class ApiKeys(APIResource["VeniceClient"]):
             consumptionLimit=consumption_limit,  # type: ignore[arg-type]  # Pydantic coerces dict to ConsumptionLimit at validate time
             limitPeriod=limit_period,
             modelPrivacy=model_privacy,
+            ipAllowlist=ip_allowlist,
         )
         body = request.model_dump(exclude_none=True, by_alias=True)
         # Per the docs (api-reference/endpoint/api_keys/update), the response is
@@ -497,6 +513,8 @@ class ApiKeys(APIResource["VeniceClient"]):
                 - limitPeriod (optional): Consumption-limit reset period
                   (``"EPOCH"``/``"MONTH"``/``"LIFETIME"``)
                 - expiresAt (optional): Expiration date
+                - ipAllowlist (optional): IPv4/IPv6 addresses and CIDR subnets
+                  allowed to use the key
 
         Returns:
             Response containing the newly created API key and associated metadata.

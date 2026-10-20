@@ -107,6 +107,7 @@ from .costs import (
 from .exceptions import (
     APIConnectionError,
     APIError,
+    ApiKeyIpRestrictedError,
     APIResponseProcessingError,
     APIResponseValidationError,
     APIStatusError,
@@ -426,6 +427,7 @@ __all__ = [
     "APIStatusError",
     "AuthenticationError",
     "PermissionDeniedError",
+    "ApiKeyIpRestrictedError",
     "InvalidRequestError",
     "ModelGoneError",
     "NotFoundError",

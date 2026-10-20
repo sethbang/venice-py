@@ -74,6 +74,15 @@ class BillingUsageEntry(BaseModel):
     pricePerUnitUsd: float = Field(..., description="Price per unit in USD")
     notes: str = Field(..., description="Notes about the billing usage entry")
     timestamp: str = Field(..., description="When the billing usage entry was created")
+    apiKeyId: str | None = Field(
+        default=None,
+        description=(
+            "ID of the API key the entry was charged to, matching ``ApiKey.id`` "
+            "from ``client.api_keys.list()``. ``None`` when the entry was not "
+            "charged to an API key: usage from the Venice web app, and non-usage "
+            "entries such as credit purchases, grants and balance transfers."
+        ),
+    )
     inferenceDetails: InferenceDetails | None = Field(
         default=None, description="Details about related inference request"
     )

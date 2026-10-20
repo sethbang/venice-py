@@ -1221,7 +1221,8 @@ venice-py account keys get key_abc123 --json
 
 Update an existing API key. Wraps `client.api_keys.update()`. At least one
 of `--description`, `--expiry`, `--limit-usd`, `--limit-diem`, `--limit-vcu`,
-or `--limit-period` must be provided.
+`--limit-period`, `--ip-allow`, or `--clear-ip-allowlist` must be provided.
+Without either IP option the key's allowlist is left unchanged.
 
 | Option | Description |
 |--------|-------------|
@@ -1231,6 +1232,8 @@ or `--limit-period` must be provided.
 | `--limit-diem` | DIEM consumption limit |
 | `--limit-vcu` | VCU consumption limit (legacy alias for diem) |
 | `--limit-period` | Period over which the consumption limit resets: `EPOCH`, `MONTH`, `LIFETIME` |
+| `--ip-allow` | Replace the key's IP allowlist with this IPv4/IPv6 address or CIDR subnet; repeat for several (max 100) |
+| `--clear-ip-allowlist` | Remove the key's IP allowlist so any IP address may use it (cannot be combined with `--ip-allow`) |
 | `--json` | Output JSON |
 
 ```bash
@@ -1238,6 +1241,8 @@ venice-py account keys update key_abc123 --description "Production"
 venice-py account keys update key_abc123 --expiry 2026-12-31
 venice-py account keys update key_abc123 --limit-usd 50 --limit-diem 5
 venice-py account keys update key_abc123 --limit-period MONTH
+venice-py account keys update key_abc123 --ip-allow 11.22.33.0/24 --ip-allow 2a00:1::/48
+venice-py account keys update key_abc123 --clear-ip-allowlist
 ```
 
 ### `venice-py account keys rate-limits`
@@ -1310,6 +1315,7 @@ venice-py api-keys create --name <NAME> [OPTIONS]
 | `--limit-vcu` | — | VCU consumption limit (legacy alias for `--limit-diem`; folds into `diem` unless `--limit-diem` is also given) |
 | `--limit-period` | — | Period over which the consumption limit resets: `EPOCH`, `MONTH`, `LIFETIME` |
 | `--expiry` | — | Expiration date (ISO 8601, e.g. `2026-12-31` or `2026-12-31T23:59:00Z`) |
+| `--ip-allow` | — | Restrict the key to this IPv4/IPv6 address or CIDR subnet; repeat for several (max 100). Requests from other addresses fail with 403 (`ApiKeyIpRestrictedError`) |
 | `--json` | `false` | Output as JSON |
 
 ```bash
@@ -1317,6 +1323,7 @@ venice-py api-keys create --name "Production Key"
 venice-py api-keys create --name "Admin" --type ADMIN
 venice-py api-keys create --name "Capped" --limit-usd 50 --limit-period MONTH
 venice-py api-keys create --name "Expiring" --expiry 2026-12-31
+venice-py api-keys create --name "Office" --ip-allow 11.22.33.0/24
 venice-py api-keys create --name "CI/CD Pipeline" --json
 ```
 
