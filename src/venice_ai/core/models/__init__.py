@@ -36,6 +36,7 @@ from .metrics import CacheStats, SchedulerMetrics, TimingInfo, UsageInfo
 # Import remaining types from common (which also re-exports all of the above)
 # ---------------------------------------------------------------------------
 from .common import (
+    KNOWN_WEB_SEARCH_MODES,
     AudioContent,
     Balances,
     ConsumptionLimit,
@@ -114,6 +115,7 @@ __all__ = [
     # From common module — Venice-specific
     "VeniceParameters",
     "VeniceParametersResponse",
+    "KNOWN_WEB_SEARCH_MODES",
     # From common module — Stream options
     "StreamOptions",
     # From common module — Generic responses

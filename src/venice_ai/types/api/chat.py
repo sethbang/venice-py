@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ...core.models.common import (
+    KNOWN_WEB_SEARCH_MODES,
     ImageContent,
     TextContent,
     VeniceBaseModel,
@@ -621,6 +622,7 @@ __all__ = [
     "ChatCost",
     "WebSearchCitation",
     "VeniceParametersResponse",
+    "KNOWN_WEB_SEARCH_MODES",
     "ChatCompletionResponse",
     "ParsedChatCompletion",
     "ToolLoopResult",

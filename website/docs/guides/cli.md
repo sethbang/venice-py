@@ -1195,7 +1195,7 @@ venice-py account usage [OPTIONS]
 | `--json` | `false` | Output as JSON |
 | `--start-date` | — | Start date (`YYYY-MM-DD` or ISO 8601) |
 | `--end-date` | — | End date (`YYYY-MM-DD` or ISO 8601) |
-| `--currency` | — | Filter entries by currency: `USD`, `DIEM`, `VCU`, `BUNDLED_CREDITS` |
+| `--currency` | — | Filter entries by currency: `USD`, `DIEM`, `BUNDLED_CREDITS`, `EARNED_CREDITS` |
 
 ```bash
 venice-py account usage

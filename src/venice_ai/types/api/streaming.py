@@ -201,11 +201,13 @@ class ChatCompletionChunkChoiceDelta(BaseModel):
     Contains the incremental changes for a choice in a streaming chat completion.
     """
 
-    role: Literal["system", "user", "assistant", "tool"] | None = Field(default=None)
-    """The role for this delta.
+    role: str | None = Field(default=None)
+    """The role for this delta, usually ``"assistant"``.
 
     Typically only present in the first chunk of a streaming response to
-    indicate the role of the message being streamed.
+    indicate the role of the message being streamed. A plain ``str``, like
+    :attr:`~venice_ai.types.api.chat.ChatMessage.role`, so a role the server
+    adds later does not fail the chunk parse mid-stream.
     """
 
     content: str | None = Field(default=None)

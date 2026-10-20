@@ -37,6 +37,8 @@ def _is_outcome_field(name: str) -> bool:
 
 
 def _literal_args(annotation: Any) -> list[tuple[Any, ...]]:
+    if type(annotation).__name__ == "TypeAliasType":
+        return _literal_args(annotation.__value__)
     if typing.get_origin(annotation) is Literal:
         return [typing.get_args(annotation)]
     found: list[tuple[Any, ...]] = []
@@ -122,3 +124,48 @@ def test_response_outcome_field_is_open(model: type[BaseModel], field: str) -> N
         f"{model.__module__}.{model.__name__}.{field} is a closed Literal {closed}; "
         "a new server value would fail the whole response parse"
     )
+
+
+# Multi-value ``Literal`` fields on non-request models that are closed on
+# purpose. Every other enum-like response field is an open ``str``.
+CLOSED_ENUM_EXEMPTIONS: dict[str, str] = {
+    "venice_ai.core.models.common.VeniceParameters.enable_web_search": (
+        "request-side parameters model; a typo must fail before the request is sent"
+    ),
+    "venice_ai.types.api.audio.VoiceDetail.gender": (
+        "derived client-side from the voice ID prefix, never read from the server"
+    ),
+    "venice_ai.types.api.audio.VoiceList.gender_filter": (
+        "echoes the caller's own gender filter argument"
+    ),
+    "venice_ai.types.api.embeddings.EmbeddingObject.encoding_format": (
+        "absent from the spec's response schema; can only echo the request value, "
+        "which EmbeddingRequest constrains to the same Literal"
+    ),
+}
+
+
+def _closed_enum_fields(models: list[type[BaseModel]]) -> dict[str, tuple[Any, ...]]:
+    found: dict[str, tuple[Any, ...]] = {}
+    for cls in models:
+        for name, field in cls.model_fields.items():
+            closed = _closed_literal_values(field.annotation)
+            if closed is not None:
+                found[f"{cls.__module__}.{cls.__qualname__}.{name}"] = closed
+    return found
+
+
+CLOSED_ENUM_FIELDS = _closed_enum_fields(RESPONSE_MODELS)
+
+
+def test_no_unexempted_closed_enum_on_response_models() -> None:
+    unexpected = {k: v for k, v in CLOSED_ENUM_FIELDS.items() if k not in CLOSED_ENUM_EXEMPTIONS}
+    assert not unexpected, (
+        "closed multi-value Literal on a response model; type it as str and publish "
+        f"the documented values as a KNOWN_* tuple: {unexpected}"
+    )
+
+
+def test_closed_enum_exemptions_are_current() -> None:
+    stale = sorted(set(CLOSED_ENUM_EXEMPTIONS) - set(CLOSED_ENUM_FIELDS))
+    assert not stale, f"exempted fields are no longer closed Literals: {stale}"
