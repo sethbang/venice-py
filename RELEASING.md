@@ -8,7 +8,7 @@ This runbook is for maintainers with write access to `sethbang/venice-py` and ap
 
 On a branch off an up-to-date `main` (for example `release/2.7.0`):
 
-1. **Bump the version in `pyproject.toml`, and only there.** `venice_ai.__version__` is read from the installed package metadata, and the Makefile reads `VERSION` from `pyproject.toml`, so neither needs editing. Do not add a `__version__` literal. Run `make install` and then `make smoke-test` to confirm the installed version matches.
+1. **Bump the version in `pyproject.toml`, and only there.** `venice_ai.__version__` is read from the installed package metadata, and the Makefile reads `VERSION` from `pyproject.toml`, so neither needs editing. Do not add a `__version__` literal. Run `make install`, then `make smoke-test`, and check that the version it prints matches.
 2. **Update `CHANGELOG.md`** ([Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and SemVer):
    - Rename the `## [Unreleased]` entries to `## [X.Y.Z] - YYYY-MM-DD`, using the date you will publish.
    - Keep the usual subsections (`### Added`, `### Changed`, `### Fixed`, `### Removed`, plus `### Upgrading` notes for anything breaking or behavior-changing).
@@ -21,7 +21,7 @@ On a branch off an up-to-date `main` (for example `release/2.7.0`):
    - `pyright (project)`
    - `Vulture (dead-code gate)`
 
-   Four of them only start after `validate (3.13)` finishes, so they will not appear in the checks list at first. Wait for all five by name, not for "everything currently listed is green". Required approvals are 0, because GitHub does not let a PR's author approve it and the project has one maintainer. Admins can bypass the ruleset, but releases should not: go through the PR and the checks. The `main-integrity` ruleset blocks force-pushes and deletion of `main` for everyone.
+   Some checks can take a minute to appear in the list. Wait for all five by name, not for "everything currently listed is green". Required approvals are 0, because GitHub does not let a PR's author approve it and the project has one maintainer. Admins can bypass the ruleset, but releases should not: go through the PR and the checks. The `main-integrity` ruleset blocks force-pushes and deletion of `main` for everyone.
 5. **Merge the PR.** Nothing is published yet.
 
 ## 2. Optional: dry run on TestPyPI
@@ -47,7 +47,7 @@ Never create the tag by pushing it, and never run `git push --tags`. A pushed ta
 
 ## 4. Approve and verify
 
-1. In **Actions → Publish to PyPI**, check that `version-check` passed, then approve the `pypi` environment deployment. The job waits for that approval.
+1. In **Actions → Publish to PyPI**, check that the `version-check` job (*Verify pyproject.version matches release tag*) passed, then approve the `pypi` environment deployment. The job waits for that approval.
 2. When the job finishes, confirm:
    - <https://pypi.org/project/venice-py/> shows the new version, with both an sdist and a wheel.
    - In a fresh virtualenv, `pip install "venice-py==X.Y.Z"` and then `python -c "import venice_ai; print(venice_ai.__version__)"` prints `X.Y.Z`.

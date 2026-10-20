@@ -34,7 +34,7 @@ body:
     attributes:
       label: venice-py version
       description: Output of `python -c "import venice_ai; print(venice_ai.__version__)"`
-      placeholder: 2.6.0
+      placeholder: 2.7.0
     validations:
       required: true
   - type: input

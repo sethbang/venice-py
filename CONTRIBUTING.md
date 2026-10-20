@@ -32,7 +32,7 @@ eval "$(poetry env activate)"
 
 ## Running Tests
 
-Use the Makefile targets rather than calling `pytest` directly. They set the parallelism, coverage and ignore flags CI uses. `make help` lists every target.
+Use the Makefile targets rather than calling `pytest` directly. They set the parallelism, coverage and ignore flags the project uses. `make help` lists every target.
 
 ```bash
 make install     # install dependencies, dev tools and all extras
@@ -75,7 +75,7 @@ Run `make check-all` and `make type-check-strict` before opening a PR. `check-al
 
 ## Questions?
 
-If you have general questions about using the library that aren't bug reports, you can open an issue for discussion.
+Usage questions go to [GitHub Discussions (Q&A)](https://github.com/sethbang/venice-py/discussions/categories/q-a). See [SUPPORT.md](SUPPORT.md).
 
 ---
 

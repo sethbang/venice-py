@@ -92,7 +92,7 @@ jobs:
 
       - name: Upload type coverage report
         if: matrix.python-version == '3.13'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: mypy-coverage-report
           path: mypy-report/
@@ -137,7 +137,7 @@ jobs:
           files: ./tests/reports/coverage/coverage.xml
 
   # ---------------------------------------------------------------------------
-  # build (audit Phase 5D-1) — sdist + wheel via Poetry, twine-checked, archived
+  # build — sdist + wheel via Poetry, twine-checked, archived
   # ---------------------------------------------------------------------------
   build:
     name: Build sdist + wheel
@@ -167,14 +167,14 @@ jobs:
           poetry run twine check dist/*
 
       - name: Upload dist artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist
           path: dist/
           retention-days: 14
 
   # ---------------------------------------------------------------------------
-  # install-matrix (audit Phase 5D-2) — wheel install + smoke import per extra
+  # install-matrix — wheel install + smoke import per extra
   # ---------------------------------------------------------------------------
   install-matrix:
     name: Install matrix (py${{ matrix.python-version }} ${{ matrix.extra }})
@@ -237,7 +237,7 @@ jobs:
           /tmp/venv/bin/python -c "from venice_ai import VeniceClient, __version__; print(f'venice-py v{__version__} OK extra=${{ matrix.extra }}')"
 
   # ---------------------------------------------------------------------------
-  # vulture (audit Phase 5D-4) — dead-code gate at min_confidence=80
+  # vulture — dead-code gate at min_confidence=80
   # ---------------------------------------------------------------------------
   vulture:
     name: Vulture (dead-code gate)
@@ -262,7 +262,7 @@ jobs:
         run: poetry run vulture src/ --min-confidence 80
 
   # ---------------------------------------------------------------------------
-  # mypy-strict (audit Phase 5D-5) — strict typecheck on critical modules
+  # mypy-strict — strict typecheck on critical modules
   # ---------------------------------------------------------------------------
   mypy-strict:
     name: mypy --strict (critical modules)
@@ -287,7 +287,7 @@ jobs:
         run: make type-check-strict
 
   # ---------------------------------------------------------------------------
-  # pyright (audit Phase 5D-6) — full project pyright sanity
+  # pyright — full project pyright sanity
   # ---------------------------------------------------------------------------
   pyright:
     name: pyright (project)
@@ -315,7 +315,7 @@ jobs:
         run: poetry run pyright src/
 
   # ---------------------------------------------------------------------------
-  # sbom (audit Phase 5D-7) — CycloneDX JSON SBOM as 90-day artifact
+  # sbom — CycloneDX JSON SBOM as 90-day artifact
   # ---------------------------------------------------------------------------
   sbom:
     name: CycloneDX SBOM
@@ -345,7 +345,7 @@ jobs:
         run: poetry run cyclonedx-py poetry --all-extras --of JSON -o sbom.json
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sbom-cyclonedx
           path: sbom.json

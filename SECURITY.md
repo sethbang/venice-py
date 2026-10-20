@@ -34,7 +34,7 @@ The maintainer will keep you updated, coordinate a disclosure date with you, and
 | Older 2.x releases | Not supported; upgrade to the latest minor |
 | 1.x (`venice-ai<2`) | Not supported |
 
-Fixes ship as new patch releases on PyPI under the `venice-py` name. The `venice-ai` distribution is a metadata-only alias that installs `venice-py`, so upgrading `venice-py` covers it.
+Fixes ship as new patch releases on PyPI under the `venice-py` name. `venice-ai` 2.1.1 and later are metadata-only aliases that install `venice-py`, so upgrading `venice-py` covers them.
 
 ## Scope
 

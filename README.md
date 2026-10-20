@@ -638,7 +638,7 @@ make test-verbose   # With coverage
 ## Requirements
 
 - **Python 3.11+**
-- **Core deps:** aiohttp (>=3.13.4,<3.15), pydantic (^2.13.4)
+- **Core deps:** aiohttp (>=3.14.4,<3.15), pydantic (^2.13.4), typing-extensions (>=4.14.1)
 - **Platform:** Linux, macOS, Windows
 
 See [Installation Options](#installation-options) for optional dependencies.
@@ -648,7 +648,7 @@ See [Installation Options](#installation-options) for optional dependencies.
 ```bash
 git clone https://github.com/sethbang/venice-py.git && cd venice-py
 make install
-make test
+make test-unit
 ```
 
 Follow PEP 8, use type hints, write tests, and submit a PR.
