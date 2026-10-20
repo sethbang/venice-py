@@ -40,7 +40,12 @@
     "minimatch@9.0.3": "9.0.9",
     "qs@6.15.2": "6.16.0",
     "yaml@2.8.1": "2.9.0",
-    "uuid@8.3.2": "11.1.1"
+    "uuid@8.3.2": "11.1.1",
+    "tinypool@1.1.1": "2.2.0",
+    "postcss-selector-parser@6.1.4": "7.1.6",
+    "postcss-selector-parser@7.1.5": "7.1.6",
+    "webpack-dev-middleware@7.4.5": "7.4.6",
+    "http-cache-semantics@4.2.0": "4.3.0"
   },
   "browserslist": {
     "production": [
