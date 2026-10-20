@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Venice AI SDK - Responses API Example (Alpha)
+Venice AI SDK - Responses API Example (beta)
 =============================================
 
 Venice exposes an OpenAI-compatible **Responses API** at ``POST /responses``,
@@ -22,7 +22,7 @@ This example demonstrates:
 ``status`` is the Responses API's equivalent of ``finish_reason``: only
 ``"completed"`` means the model finished its answer.
 
-The endpoint is tagged **Alpha** by Venice; request/response shapes may change
+The endpoint is tagged **beta** by Venice; request/response shapes may change
 without notice, and some accounts may not be entitled. A demo the account
 cannot access (HTTP 403), or one whose kind of model the catalog lacks, prints
 a ``Section skipped:`` line. The basic call is the core of the example: when it
@@ -319,7 +319,7 @@ async def main() -> int:
     otherwise. Other demos may be skipped individually; the basic call
     decides whether the example as a whole was verified.
     """
-    print("🚀 Venice AI Responses API Example (Alpha)")
+    print("🚀 Venice AI Responses API Example (beta)")
     print("=" * 50)
 
     results: list[tuple[str, bool]] = []
@@ -346,8 +346,8 @@ async def main() -> int:
             try:
                 outcome = await section()
             except PermissionDeniedError as e:
-                # The Responses API is Alpha and not every account (or model)
-                # is entitled. That is an access condition, not a failure.
+                # The Responses API is beta; a model or account may still
+                # reject it. That is an access condition, not a failure.
                 print(f"\nSection skipped: {name} is not available on this account: {e}")
                 skipped.append(name)
                 continue
@@ -366,7 +366,7 @@ async def main() -> int:
         return 1
 
     if "basic_responses_create" in skipped:
-        print("\nSKIPPED: this account has no access to the Responses API (Alpha)")
+        print("\nSKIPPED: this account has no access to the Responses API (beta)")
         return EXIT_SKIPPED
     if skipped:
         print(f"\n✅ {len(results)} demos passed, {len(skipped)} skipped: {', '.join(skipped)}")
@@ -392,7 +392,7 @@ if __name__ == "__main__":
         print(f"\n❌ Error: {e}", file=sys.stderr)
         print(
             "Check that your API key is valid and your account has access to the "
-            "Responses API (Alpha).",
+            "Responses API (beta).",
             file=sys.stderr,
         )
         sys.exit(1)

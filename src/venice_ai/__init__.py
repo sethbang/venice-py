@@ -337,7 +337,7 @@ __all__ = [
     "VideoCapabilities",
     "InpaintCapabilities",
     "GenericCapabilities",
-    # Responses API (Alpha)
+    # Responses API (beta)
     "ResponsesRequest",
     "ResponsesResponse",
     "ImageGenerationResponse",

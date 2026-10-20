@@ -12,7 +12,7 @@ accepts can still be passed.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -95,7 +95,10 @@ class ResponsesToolSearchTool(BaseModel):
     description: str | None = Field(default=None, description="What the search tool does.")
 
 
-ResponsesTool = ResponsesFunctionTool | ResponsesToolSearchTool | dict[str, Any]
+ResponsesTool = Annotated[
+    dict[str, Any] | ResponsesFunctionTool | ResponsesToolSearchTool,
+    Field(union_mode="left_to_right"),
+]
 """A tool definition: a typed model or a raw dict for any other tool type
 (``web_search``, ``x_search``, ``code_interpreter``, ``file_search``,
 ``computer_use_preview``, or a generic ``{"type": ...}`` tool)."""
@@ -138,12 +141,13 @@ class ResponsesFunctionToolChoice(BaseModel):
     function: ResponsesToolChoiceFunctionName
 
 
-ResponsesToolChoice = (
+ResponsesToolChoice = Annotated[
     Literal["auto", "none", "required"]
-    | ResponsesNamedToolChoice
-    | ResponsesFunctionToolChoice
     | dict[str, Any]
-)
+    | ResponsesNamedToolChoice
+    | ResponsesFunctionToolChoice,
+    Field(union_mode="left_to_right"),
+]
 """Which tool the model calls: a mode string, a named tool, or a raw dict."""
 
 
@@ -222,14 +226,15 @@ class ResponsesInputToolSearchOutput(BaseModel):
     status: Literal["completed"] | None = Field(default=None, description="Item status.")
 
 
-ResponsesInputItem = (
-    ResponsesInputCustomToolCall
+ResponsesInputItem = Annotated[
+    dict[str, Any]
+    | ResponsesInputCustomToolCall
     | ResponsesInputCustomToolCallOutput
     | ResponsesInputAdditionalTools
     | ResponsesInputToolSearchCall
-    | ResponsesInputToolSearchOutput
-    | dict[str, Any]
-)
+    | ResponsesInputToolSearchOutput,
+    Field(union_mode="left_to_right"),
+]
 """One entry of a list ``input``: a typed item or a raw dict (messages,
 reasoning items, function calls and their outputs, item references)."""
 
@@ -289,7 +294,7 @@ class ResponsesRequest(BaseModel):
         default=None,
         description="Whether the model may call more than one tool in a single turn.",
     )
-    tools: list[Tool | ResponsesTool] | None = Field(
+    tools: list[Annotated[Tool | ResponsesTool, Field(union_mode="left_to_right")]] | None = Field(
         default=None,
         description=(
             "Tool definitions. Accepts the shared ``Tool`` model, "

@@ -400,8 +400,9 @@ funded, publicly known in the test suite). The root conftest scrubs
 ## Responses API (beta)
 
 `client.responses.create()` wraps `POST /responses`, which accepts requests in
-OpenAI's Responses format. Requests for OpenAI models are served natively;
-every other model goes through a translation layer onto Chat Completions. The
+OpenAI's Responses format. Most OpenAI models are served natively; other
+models, and requests that use Venice features such as web search, go through a
+translation layer onto Chat Completions. The
 `x-venice-responses-lane` response header says which mode served a call.
 Venice stores nothing, so send the full conversation in `input` every time.
 

@@ -36,6 +36,7 @@ from .common import (
     FileContent,
     FileObject,
     ImageContent,
+    ImageDetail,
     ImageUrl,
     JSONObjectFormat,
     # Response format components
@@ -97,6 +98,7 @@ from .responses import (
     ResponsesInputItem,
     ResponsesInputToolSearchCall,
     ResponsesInputToolSearchOutput,
+    ResponsesItemStatus,
     ResponsesNamedToolChoice,
     ResponsesRequest,
     ResponsesTool,
@@ -131,6 +133,7 @@ from .voice_changer import (
 __all__ = [
     # Content types
     "TextContent",
+    "ImageDetail",
     "ImageUrl",
     "ImageContent",
     "FileObject",
@@ -164,7 +167,7 @@ __all__ = [
     "DeveloperMessage",
     # Chat completion
     "ChatCompletionRequest",
-    # Responses API (Alpha)
+    # Responses API (beta)
     "ResponsesRequest",
     "PromptCacheRetention",
     "ResponsesFunctionTool",
@@ -176,6 +179,7 @@ __all__ = [
     "ResponsesInputItem",
     "ResponsesInputToolSearchCall",
     "ResponsesInputToolSearchOutput",
+    "ResponsesItemStatus",
     "ResponsesNamedToolChoice",
     "ResponsesTool",
     "ResponsesToolChoice",

@@ -85,10 +85,19 @@ def test_cli_update_ip_allow_is_repeatable() -> None:
     result, kwargs = _invoke_cli(
         "account",
         "_keys_update_async",
-        ["account", "keys", "update", KEY_ID, "--ip-allow", "1.1.1.1", "--ip-allow", "2a00:1::/48"],
+        [
+            "account",
+            "keys",
+            "update",
+            KEY_ID,
+            "--ip-allow",
+            "203.0.113.1",
+            "--ip-allow",
+            "2a00:1::/48",
+        ],
     )
     assert result.exit_code == 0, result.output
-    assert kwargs["ip_allowlist"] == ["1.1.1.1", "2a00:1::/48"]
+    assert kwargs["ip_allowlist"] == ["203.0.113.1", "2a00:1::/48"]
 
 
 def test_cli_update_clear_sends_empty_list_and_counts_as_an_option() -> None:
@@ -105,7 +114,7 @@ def test_cli_update_ip_options_are_mutually_exclusive() -> None:
     result, kwargs = _invoke_cli(
         "account",
         "_keys_update_async",
-        ["account", "keys", "update", KEY_ID, "--ip-allow", "1.1.1.1", "--clear-ip-allowlist"],
+        ["account", "keys", "update", KEY_ID, "--ip-allow", "203.0.113.1", "--clear-ip-allowlist"],
     )
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output
@@ -138,10 +147,10 @@ async def test_cli_create_body_against_local_server(monkeypatch: pytest.MonkeyPa
         )
         ctx = SimpleNamespace(obj={"plain": True})
         await _create_key_async(ctx, name="k", output_json=True)
-        await _create_key_async(ctx, name="k", ip_allowlist=["1.1.1.1"], output_json=True)
+        await _create_key_async(ctx, name="k", ip_allowlist=["203.0.113.1"], output_json=True)
 
     assert b"ipAllowlist" not in seen[0][1]
-    assert _body(seen[1][1])["ipAllowlist"] == ["1.1.1.1"]
+    assert _body(seen[1][1])["ipAllowlist"] == ["203.0.113.1"]
 
 
 async def test_cli_update_body_against_local_server(monkeypatch: pytest.MonkeyPatch) -> None:

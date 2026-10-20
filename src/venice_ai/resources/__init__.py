@@ -16,7 +16,7 @@ Available Resources:
         streaming responses, function calling, and character-based interactions.
 
     Responses: Stateless multi-modal generation via the OpenAI-compatible
-        ``/responses`` endpoint (Alpha).
+        ``/responses`` endpoint (beta).
 
     Models: Model discovery and capability analysis including semantic traits,
         compatibility mappings, and detailed model specifications.

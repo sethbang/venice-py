@@ -2,7 +2,7 @@
 
 Sourced from `src/venice_ai/resources/responses.py`. The Responses API is a **separate, beta** endpoint at `client.responses`, distinct from `client.chat.completions`. It accepts requests in OpenAI's Responses API format and returns typed output items.
 
-Venice serves each request in one of two modes. Requests for OpenAI models (except `openai-gpt-oss-120b`) are forwarded to OpenAI's Responses API natively. Every other model goes through a translation layer onto Chat Completions, which ignores or rejects what Chat Completions cannot express. The `x-venice-responses-lane` response header says which mode served a call.
+Venice serves each request in one of two modes. Most OpenAI models are forwarded to OpenAI's Responses API natively. Other models, and OpenAI requests that use Venice features such as web search, go through a translation layer onto Chat Completions, which ignores or rejects what Chat Completions cannot express. The `x-venice-responses-lane` response header says which mode served a call.
 
 ## When to use Responses vs chat.completions
 

@@ -312,9 +312,10 @@ class _Resp:
         IP_RESTRICTED_BODY,
         json.dumps(IP_RESTRICTED_BODY),
         {"error": {"message": IP_RESTRICTED_BODY["error"]}},
+        {"error": {"detail": IP_RESTRICTED_BODY["error"]}},
         {"error": IP_RESTRICTED_BODY["error"].upper()},
     ],
-    ids=["parsed", "raw-text", "nested-message", "case-insensitive"],
+    ids=["parsed", "raw-text", "nested-message", "nested-detail", "case-insensitive"],
 )
 def test_make_status_error_recognises_ip_restriction(body: Any) -> None:
     exc = _make_status_error(None, body=body, response=_Resp(403))

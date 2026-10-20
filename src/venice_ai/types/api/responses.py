@@ -322,7 +322,7 @@ class ResponsesStreamEvent(BaseModel):
     Mirrors the OpenAI Responses streaming spec — many discrete event types
     (``response.created``, ``response.output_text.delta``,
     ``response.completed``, etc.) all share a common envelope. Because the
-    spec is rich and Venice-side Alpha, this model accepts any extra fields
+    spec is rich and in beta at Venice, this model accepts any extra fields
     rather than enumerating every event variant.
 
     The ``type`` field identifies the event; payload fields like ``delta``,

@@ -952,7 +952,7 @@ def _is_api_key_ip_restricted(body: Any) -> bool:
         return False
     error = parsed.get("error")
     if isinstance(error, dict):
-        error = error.get("message")
+        error = error.get("message") or error.get("detail")
     if not isinstance(error, str):
         return False
     return error.strip().lower().startswith(_API_KEY_IP_RESTRICTED_PREFIX)

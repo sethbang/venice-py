@@ -1916,8 +1916,8 @@ class DynamicModelSelector:
         require_web_search: bool = False,
         require_quality: str | None = None,
         require_custom_size: bool = False,
-        require_transparent_background: bool = False,
         exclude_uncensored: bool = False,
+        require_transparent_background: bool = False,
     ) -> str:
         """
         Select a suitable image generation model.

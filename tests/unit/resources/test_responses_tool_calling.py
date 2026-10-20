@@ -606,3 +606,45 @@ class TestSequenceArguments:
         body = _body(resource)
         assert body["input"] == [{"type": "message", "role": "user", "content": "hi"}]
         assert body["tools"] == [{"type": "web_search"}]
+
+
+class TestDictsSentAsWritten:
+    """A dict that happens to match a typed model is still sent exactly as
+    written: same key order, explicit ``None`` values kept."""
+
+    @pytest.mark.asyncio
+    async def test_input_dict_matching_typed_item(self, resource: Responses) -> None:
+        item = {
+            "input": "i",
+            "type": "custom_tool_call",
+            "name": "n",
+            "call_id": "c",
+            "namespace": None,
+        }
+        await resource.create(model="m", input=[item])
+        sent = _body(resource)["input"][0]
+        assert json.dumps(sent) == json.dumps(item)
+
+    @pytest.mark.asyncio
+    async def test_tool_choice_dict_matching_named_choice(self, resource: Responses) -> None:
+        choice = {"name": "f", "type": "function"}
+        await resource.create(model="m", input="x", tool_choice=choice)
+        assert json.dumps(_body(resource)["tool_choice"]) == json.dumps(choice)
+
+    @pytest.mark.asyncio
+    async def test_tool_dicts_matching_typed_tools(self, resource: Responses) -> None:
+        tools = [
+            {"type": "tool_search", "execution": "client", "parameters": {}, "description": None},
+            {"type": "function", "defer_loading": True, "function": {"name": "f"}},
+        ]
+        await resource.create(model="m", input="x", tools=tools)
+        assert json.dumps(_body(resource)["tools"]) == json.dumps(tools)
+
+    @pytest.mark.asyncio
+    async def test_typed_models_still_serialize_typed(self, resource: Responses) -> None:
+        await resource.create(
+            model="m",
+            input="x",
+            tool_choice=ResponsesNamedToolChoice(type="custom", name="apply_patch"),
+        )
+        assert _body(resource)["tool_choice"] == {"type": "custom", "name": "apply_patch"}

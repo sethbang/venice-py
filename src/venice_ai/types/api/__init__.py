@@ -212,6 +212,7 @@ from .requests import (
     FileObject,
     ImageBackgroundRemoveRequest,
     ImageContent,
+    ImageDetail,
     ImageEditRequest,
     # Image generation models
     ImageGenerationRequest,
@@ -248,8 +249,9 @@ from .requests import (
     ResponsesInputItem,
     ResponsesInputToolSearchCall,
     ResponsesInputToolSearchOutput,
+    ResponsesItemStatus,
     ResponsesNamedToolChoice,
-    # Responses API (Alpha)
+    # Responses API (beta)
     ResponsesRequest,
     ResponsesTool,
     ResponsesToolChoice,
@@ -554,6 +556,7 @@ __all__ = [
     "ChatCompletionChunk",
     # From requests module - Chat completion models
     "TextContent",
+    "ImageDetail",
     "ImageUrl",
     "ImageContent",
     "FileObject",
@@ -577,7 +580,7 @@ __all__ = [
     "ReasoningSummary",
     "ReasoningConfig",
     "ChatCompletionRequest",
-    # From requests module - Responses API (Alpha)
+    # From requests module - Responses API (beta)
     "ResponsesRequest",
     "PromptCacheRetention",
     "ResponsesFunctionTool",
@@ -589,12 +592,13 @@ __all__ = [
     "ResponsesInputItem",
     "ResponsesInputToolSearchCall",
     "ResponsesInputToolSearchOutput",
+    "ResponsesItemStatus",
     "ResponsesNamedToolChoice",
     "ResponsesTool",
     "ResponsesToolChoice",
     "ResponsesToolChoiceFunctionName",
     "ResponsesToolSearchTool",
-    # From responses module - Responses API (Alpha)
+    # From responses module - Responses API (beta)
     "ResponsesError",
     "ResponsesFunctionCallOutput",
     "ResponsesIncompleteDetails",

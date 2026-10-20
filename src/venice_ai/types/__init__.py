@@ -149,6 +149,7 @@ from .api import (
     ErrorDetails,
     ImageBackgroundRemoveRequest,
     ImageContent,
+    ImageDetail,
     ImageEditRequest,
     # From requests module - Image generation models
     ImageGenerationRequest,
@@ -216,7 +217,7 @@ from .api import (
     ReasoningEffortLevel,
     ReasoningSummary,
     ResponsesCustomToolCallOutput,
-    # From responses module + requests.responses — Responses API (Alpha)
+    # From responses module + requests.responses — Responses API (beta)
     ResponsesError,
     ResponsesFunctionCallOutput,
     ResponsesFunctionTool,
@@ -229,6 +230,7 @@ from .api import (
     ResponsesInputItem,
     ResponsesInputToolSearchCall,
     ResponsesInputToolSearchOutput,
+    ResponsesItemStatus,
     ResponsesMessageOutput,
     ResponsesNamedToolChoice,
     ResponsesOutputItem,
@@ -571,6 +573,7 @@ __all__ = [
     "MusicCompleteRequest",
     # From requests module - Chat completion models
     "TextContent",
+    "ImageDetail",
     "ImageUrl",
     "ImageContent",
     "UserMessage",
@@ -593,7 +596,7 @@ __all__ = [
     "ReasoningSummary",
     "ReasoningConfig",
     "ChatCompletionRequest",
-    # From responses module + requests.responses - Responses API (Alpha)
+    # From responses module + requests.responses - Responses API (beta)
     "ResponsesRequest",
     "PromptCacheRetention",
     "ResponsesFunctionTool",
@@ -605,6 +608,7 @@ __all__ = [
     "ResponsesInputItem",
     "ResponsesInputToolSearchCall",
     "ResponsesInputToolSearchOutput",
+    "ResponsesItemStatus",
     "ResponsesNamedToolChoice",
     "ResponsesTool",
     "ResponsesToolChoice",
