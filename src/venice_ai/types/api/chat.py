@@ -77,11 +77,21 @@ class ToolCallFunction(BaseModel):
 
 
 class ToolCall(BaseModel):
-    """Tool call made by the model in a chat completion response."""
+    """Tool call made by the model in a chat completion response.
+
+    A ``"function"`` call carries :attr:`function`. A call of another type
+    (for example a ``"custom"`` tool call) has ``function`` set to ``None`` and
+    keeps its own payload in :attr:`model_extra`, e.g. ``call.model_extra["custom"]``.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     id: str = Field(..., description="The ID of the tool call")
     type: str = Field(..., description='The type of the tool call, e.g. ``"function"``')
-    function: ToolCallFunction = Field(..., description="The function that the model called")
+    function: ToolCallFunction | None = Field(
+        default=None,
+        description='The function that the model called; ``None`` for a non-``"function"`` call',
+    )
 
 
 # ============================================================================
@@ -98,7 +108,15 @@ class ChatMessageTextContent(TextContent):
 
     model_config = ConfigDict(extra="allow")
 
-    text: str = Field(..., description="The text content")
+    text: str = Field(..., description="The text content; ``null`` from the API reads as empty")
+    cache_control: dict[str, Any] | None = Field(
+        default=None, description="Cache control echoed by the API, as sent"
+    )
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def _null_text_is_empty(cls, v: Any) -> Any:
+        return "" if v is None else v
 
 
 class ChatMessageImageUrl(ImageUrl):
@@ -127,6 +145,9 @@ class ChatMessageImageContent(ImageContent):
     # flags any narrowing of a mutable field's declared type.
     image_url: ChatMessageImageUrl = Field(  # pyright: ignore[reportIncompatibleVariableOverride]
         ..., description="Image URL information"
+    )
+    cache_control: dict[str, Any] | None = Field(
+        default=None, description="Cache control echoed by the API, as sent"
     )
 
 

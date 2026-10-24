@@ -293,7 +293,7 @@ class RateLimitDiscovery:
 
             bucket = RateLimitBucket(
                 bucket_id=bucket_id,
-                rpm_limit=rpm or 60,
+                rpm_limit=rpm if rpm and rpm > 0 else 60,
                 rpd_limit=rpd if rpd and rpd > 0 else None,
                 tpm_limit=tpm if tpm and tpm > 0 else None,
                 models={model_id},

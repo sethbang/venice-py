@@ -157,3 +157,23 @@ class TestLocalValidation:
         with pytest.raises(InvalidRequestError):
             await _create(decisions, mock_client, images=images)
         mock_client.post.assert_not_awaited()
+
+
+class TestSpecPatterns:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "images",
+        [
+            pytest.param(["data:image/png;base64,"], id="empty-data-uri-payload"),
+            pytest.param(["data:image/png;base64,not base64!"], id="bad-data-uri-payload"),
+            pytest.param(
+                [{"content_type": "image/png", "base64": "data:image/png;base64,QQ=="}],
+                id="prefix-inside-base64",
+            ),
+            pytest.param([{"content_type": "image/png", "base64": "a b"}], id="space-in-base64"),
+        ],
+    )
+    async def test_rejects_what_the_api_rejects(self, decisions, mock_client, images):
+        with pytest.raises(InvalidRequestError):
+            await _create(decisions, mock_client, images=images)
+        mock_client.post.assert_not_awaited()

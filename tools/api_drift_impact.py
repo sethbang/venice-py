@@ -193,8 +193,8 @@ def _step(arm: Any, token: str) -> list[Any] | None:
             return [args[1]] if len(args) == 2 else [Any]
         return None
     if arm is dict or origin is dict:
-        args = typing.get_args(arm)
-        return [args[1]] if len(args) == 2 else [Any]
+        # A named key on a plain dict is whatever the caller writes: untyped.
+        return [PASSTHROUGH]
     if isinstance(arm, type) and issubclass(arm, BaseModel):
         for name, field in arm.model_fields.items():
             if token in (name, field.alias, field.validation_alias):
@@ -235,11 +235,16 @@ def _passthrough_only(leaves: list[Any]) -> bool:
     return all(leaf is PASSTHROUGH for leaf in leaves)
 
 
+def _typed(leaves: list[Any]) -> list[Any]:
+    """The leaves a typed SDK model declares, without untyped passthrough."""
+    return [leaf for leaf in leaves if leaf is not PASSTHROUGH]
+
+
 def _accepts(leaves: list[Any], value: Any) -> bool:
     """Whether a field typed with ``leaves`` accepts the JSON value ``value``."""
     for annotation in leaves:
         for arm in _arms(annotation):
-            if _is_open(arm) or arm is PASSTHROUGH:
+            if _is_open(arm):
                 return True
             if typing.get_origin(arm) is Literal:
                 if value in typing.get_args(arm):
@@ -448,7 +453,8 @@ def _classify_enum_added(item: drift.Item, usages: dict[str, list[Usage]]) -> dr
                 (drift.REVIEW, f"`{usage.path}` on {usage.endpoint} is not typed by the SDK")
             )
             continue
-        rejected = [v for v in values if not _accepts(leaves, v)]
+        typed = _typed(leaves)
+        rejected = [v for v in values if not _accepts(typed, v)]
         if rejected:
             shown = ", ".join(json.dumps(v) for v in rejected)
             verdicts.append(
@@ -458,7 +464,7 @@ def _classify_enum_added(item: drift.Item, usages: dict[str, list[Usage]]) -> dr
                     f"that does not include {shown}",
                 )
             )
-        elif _open_type(leaves):
+        elif _open_type(typed):
             verdicts.append((drift.NO_CHANGE, f"The SDK accepts any value for `{usage.path}`"))
         else:
             verdicts.append(

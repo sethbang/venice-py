@@ -7,9 +7,9 @@ Endpoints covered:
 - POST /api/v1/audio/voice-changer/complete -> VoiceChangerCompleteResponse
 """
 
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Discriminator, Field, PrivateAttr, Tag
 
 from ...core.models.common import VeniceBaseModel
 from .audio_format import audio_format_for
@@ -150,7 +150,21 @@ class VoiceChangerCompleteResponse(VeniceBaseModel):
 # there is no FAILED status and no COMPLETED JSON arm. Failures surface as
 # HTTP errors (404 media gone, 500 inference failed, 504 never reached the
 # provider), carrying ``credits_refunded``.
-VoiceChangerRetrieveResponse = VoiceChangerProcessingStatus | VoiceChangerCompletedStatus
+def _retrieve_status_tag(value: Any) -> str:
+    """Pick the retrieve arm by ``status``; a status this SDK does not know is in progress."""
+    status = value.get("status") if isinstance(value, dict) else getattr(value, "status", None)
+    return (
+        {"COMPLETED": "completed"}.get(status, "processing")
+        if isinstance(status, str)
+        else "processing"
+    )
+
+
+VoiceChangerRetrieveResponse = Annotated[
+    Annotated[VoiceChangerProcessingStatus, Tag("processing")]
+    | Annotated[VoiceChangerCompletedStatus, Tag("completed")],
+    Discriminator(_retrieve_status_tag),
+]
 
 
 __all__ = [

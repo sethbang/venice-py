@@ -28,6 +28,7 @@ ignored by the server.
 """
 
 import base64
+import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -58,9 +59,10 @@ _IMAGE_SUFFIX_CONTENT_TYPES: dict[str, DecisionImageContentType] = {
     ".jpeg": "image/jpeg",
 }
 
-_DATA_URI_PREFIXES = tuple(
-    f"data:{content_type};base64," for content_type in ("image/png", "image/jpeg", "image/jpg")
-)
+# The API's own limits for one image (``maxLength`` and ``pattern`` in the spec).
+_MAX_IMAGE_CHARS = 13_631_488
+_BASE64_PATTERN = r"^[A-Za-z0-9+/]+=*$"
+_DATA_URI = re.compile(r"data:image/(?:png|jpeg|jpg);base64,[A-Za-z0-9+/]+=*")
 
 
 # ============================================================================
@@ -84,6 +86,8 @@ class DecisionImage(BaseModel):
     base64: str = Field(
         ...,
         min_length=1,
+        max_length=_MAX_IMAGE_CHARS,
+        pattern=_BASE64_PATTERN,
         description="Raw base64 image bytes, without a ``data:`` prefix.",
     )
 
@@ -256,10 +260,14 @@ class CreateDecisionRequest(BaseModel):
     ) -> list[DecisionImageInput] | None:
         """String images must be PNG or JPEG ``data:`` URIs; the API fetches no URLs."""
         for image in v or ():
-            if isinstance(image, str) and not image.startswith(_DATA_URI_PREFIXES):
+            if not isinstance(image, str):
+                continue
+            if len(image) > _MAX_IMAGE_CHARS:
+                raise ValueError(f"each image must be at most {_MAX_IMAGE_CHARS} characters.")
+            if not _DATA_URI.fullmatch(image):
                 raise ValueError(
-                    "each string image must be a PNG or JPEG data: URI "
-                    "(data:image/png;base64,...); remote URLs are not fetched."
+                    "each string image must be a PNG or JPEG data: URI with a base64 "
+                    "payload (data:image/png;base64,...); remote URLs are not fetched."
                 )
         return v
 

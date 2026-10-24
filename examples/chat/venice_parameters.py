@@ -434,6 +434,8 @@ async def web_search_example(client: VeniceClient) -> bool | None:
     documents: list[dict] = []
     print_subsection("Search Results as Tool Calls", "🔧")
     for tool_call in tool_calls:
+        if tool_call.function is None:  # not a function call
+            continue
         arguments = json.loads(tool_call.function.arguments or "{}")
         docs = arguments.get("documents") or []
         documents.extend(docs)

@@ -654,3 +654,24 @@ def test_mapped_request_models_cover_the_committed_snapshot():
             if impact.resolve(models, path) is None:
                 unresolved.add((ep, path))
     assert unresolved == known_gaps
+
+
+def test_a_dict_arm_is_untyped_not_a_typed_hit():
+    from venice_ai.types.api.requests.responses import ResponsesRequest
+
+    assert impact.resolve([ResponsesRequest], "input[].zzz_bogus") == [impact.PASSTHROUGH]
+    item = drift.Item("param_added", "POST /responses", "body.tools[].brand_new_flag")
+    assert impact._classify_param_added(item).group == drift.REVIEW
+
+
+def test_enum_on_a_union_with_a_dict_arm_is_judged_by_the_typed_arms():
+    usage = impact.Usage("POST /responses", "body", "tool_choice.type")
+    usages = {"schemas/ResponsesRequest.tool_choice.type": [usage]}
+    gained = drift.Item(
+        "enum_members_added", "schemas/ResponsesRequest.tool_choice.type", values=('"brand_new"',)
+    )
+    known = drift.Item(
+        "enum_members_added", "schemas/ResponsesRequest.tool_choice.type", values=('"custom"',)
+    )
+    assert impact._classify_enum_added(gained, usages).group == drift.NEEDS_WORK
+    assert impact._classify_enum_added(known, usages).group == drift.NO_CHANGE

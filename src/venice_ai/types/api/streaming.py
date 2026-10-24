@@ -27,12 +27,11 @@ on streaming-specific functionality.
 
 from typing import (
     Any,
-    Literal,
     Protocol,
     TypeVar,
 )
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # Import ChatUsage from the chat module so streaming chunks expose the same
 # rich usage shape (detail + cache breakdowns, extra="allow") as non-streaming
@@ -178,13 +177,18 @@ class ChatCompletionChunkToolCall(BaseModel):
     Fields are optional as they arrive incrementally.
     """
 
+    model_config = ConfigDict(extra="allow")
+
     id: str | None = Field(
         default=None,
         description="Unique identifier for this tool call, present once the tool call begins streaming",
     )
-    type: Literal["function"] | None = Field(
+    type: str | None = Field(
         default=None,
-        description="Type of tool being called, currently only 'function' is supported",
+        description=(
+            "Type of tool being called, e.g. 'function'. A call of another type "
+            "(such as 'custom') keeps its payload in model_extra."
+        ),
     )
     function: ChatCompletionChunkToolCallFunction | None = Field(
         default=None,

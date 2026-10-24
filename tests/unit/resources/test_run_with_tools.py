@@ -563,3 +563,21 @@ class TestConversationRunWithTools:
         assert len(conv.messages) == starting + 3  # asst-tool-call, tool-result, asst-final
         # And matches the result.messages tail
         assert conv.messages[-len(result.messages) + (starting - 0) :] == result.messages[starting:]
+
+
+class TestNonFunctionToolCalls:
+    @pytest.mark.asyncio
+    async def test_custom_tool_call_raises_a_clear_error(self):
+        response = _make_tool_call_response(calls=[])
+        response.choices[0].message.tool_calls = [
+            ToolCall.model_validate(
+                {"id": "c1", "type": "custom", "custom": {"name": "x", "input": "y"}}
+            )
+        ]
+        chat, _ = _build_chat(side_effect=[response])
+        with pytest.raises(ValueError, match="'custom' tool call .*only dispatches function tools"):
+            await chat.run_with_tools(
+                model="m",
+                messages=[UserMessage(content="hi")],
+                tools=[get_weather],
+            )

@@ -75,6 +75,55 @@ NOT_FROM_SERVER: dict[str, str] = {
     "venice_ai.types.api.common.ErrorDetails": "not used by any resource or the error parser",
 }
 
+# Modules whose models are configuration or bookkeeping the SDK fills in itself.
+LOCAL_MODULES: dict[str, str] = {
+    "venice_ai.core.config.": "client configuration the caller supplies",
+    "venice_ai.core.models.metrics": "scheduler metrics the SDK records",
+    "venice_ai.costs": "cost tracking the SDK computes",
+    "venice_ai.observability.": "observability settings the caller supplies",
+}
+
+NOT_FROM_SERVER.update(
+    {
+        "venice_ai.core.models.base.VeniceBaseModel": "base class; subclasses are checked",
+        "venice_ai.core.models.base.TimestampMixin": "mixin; models using it are checked",
+        "venice_ai.core.models.common.AudioContent": "request content part",
+        "venice_ai.core.models.common.ConsumptionLimit": "request-side API key limit",
+        "venice_ai.core.models.common.FileContent": "request content part",
+        "venice_ai.core.models.common.FileObject": "request content part payload",
+        "venice_ai.core.models.common.VideoContent": "request content part",
+        "venice_ai.core.models.common.JSONObjectFormat": "request response_format",
+        "venice_ai.core.models.common.JSONSchemaFormat": "request response_format",
+        "venice_ai.core.models.common.TextResponseFormat": "request response_format",
+        "venice_ai.core.models.common.SpecificToolChoice": "request tool_choice",
+        "venice_ai.core.models.common.ToolChoiceFunction": "request tool_choice",
+        "venice_ai.core.models.common.Tool": "request tool definition",
+        "venice_ai.core.models.common.ToolFunction": "request tool definition",
+        "venice_ai.core.models.common.StreamOptions": "request stream_options",
+        "venice_ai.core.models.common.VeniceParameters": "request venice_parameters",
+        "venice_ai.core.models.common.HealthCheckResult": "built by the rate-limit backends",
+        "venice_ai.core.models.common.ValidationResult": "not used by any resource",
+        "venice_ai.core.models.common.ListResponse": "not used by any resource",
+        "venice_ai.core.models.common.SuccessResponse": "not used by any resource",
+        "venice_ai.core.models.common.RequestEcho": "not used by any resource",
+        "venice_ai.core.rate_limit_discovery.RateLimitBucket": (
+            "built by TierDiscovery from rate limits it sanitizes first"
+        ),
+        "venice_ai.tee.types.TeeVerificationResult": "built by the attestation verifier",
+    }
+)
+
+# Built by the SDK from response header values it parses and picks itself, so
+# no unknown field can reach them, but each value still comes from the server.
+HEADER_MODELS: tuple[str, ...] = (
+    "venice_ai.core.models.headers.BalanceInfo",
+    "venice_ai.core.models.headers.ContentSafetyInfo",
+    "venice_ai.core.models.headers.DeprecationInfo",
+    "venice_ai.core.models.headers.ModelInfo",
+    "venice_ai.core.models.headers.PaginationInfo",
+    "venice_ai.core.models.headers.RateLimitInfo",
+)
+
 # Request models that appear as union arms in a response field only so that
 # instances the caller built are kept. Server data never reaches them: the
 # union is left_to_right and the response-side arms come first.
@@ -241,12 +290,20 @@ def _union_arms(annotation: Any) -> list[Any]:
     return [annotation]
 
 
+def _single_literal(annotation: Any) -> tuple[Any, ...] | None:
+    """The value of a one-value ``Literal``, optionally ``| None``; else ``None``."""
+    arms = [arm for arm in _union_arms(annotation) if arm is not type(None)]
+    if len(arms) == 1 and typing.get_origin(arms[0]) is Literal:
+        values = typing.get_args(arms[0])
+        return values if len(values) == 1 else None
+    return None
+
+
 def _single_literal_fields(cls: type[BaseModel]) -> list[str]:
     return [
         name
         for name, field in cls.model_fields.items()
-        if typing.get_origin(field.annotation) is Literal
-        and len(typing.get_args(field.annotation)) == 1
+        if _single_literal(field.annotation) is not None
     ]
 
 
@@ -315,7 +372,7 @@ def _fixed_literal_problems(models: list[type[BaseModel]]) -> dict[str, tuple[An
         if cls in tags and fields:
             fields = fields[1:] if fields[0] in ("type", "status", "object") else fields
         for name in fields:
-            problems[_key(cls, name)] = typing.get_args(cls.model_fields[name].annotation)
+            problems[_key(cls, name)] = _single_literal(cls.model_fields[name].annotation) or ()
     return problems
 
 
@@ -345,6 +402,7 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     object: Literal["list"]
+    kind: Literal["x"] | None = None
     count: int = Field(..., ge=0)
 
 
@@ -368,7 +426,10 @@ class _Holder(BaseModel):
 
 def test_detectors_flag_each_failure_mode() -> None:
     assert _Strict.model_config.get("extra") == "forbid"
-    assert _fixed_literal_problems([_Strict]) == {_key(_Strict, "object"): ("list",)}
+    assert _fixed_literal_problems([_Strict]) == {
+        _key(_Strict, "object"): ("list",),
+        _key(_Strict, "kind"): ("x",),
+    }
     assert _constraint_problems([_Strict]) == {_key(_Strict, "count"): ["Ge(ge=0)"]}
     closed = {
         name: _closed_unions(field.annotation) for name, field in _Holder.model_fields.items()
@@ -443,18 +504,32 @@ def test_unions_of_tagged_models_have_a_catch_all() -> None:
 
 def test_every_server_model_is_checked() -> None:
     checked = {_key(cls) for cls in RESPONSE_MODELS}
+    accounted = checked | set(NOT_FROM_SERVER) | set(CALLER_BUILT_ARMS) | set(HEADER_MODELS)
     candidates = {
         key
         for key, cls in ALL_MODELS.items()
-        if cls.__module__.startswith("venice_ai.types.") and not _is_request_model(cls)
+        if not _is_request_model(cls) and not cls.__module__.startswith(tuple(LOCAL_MODULES))
     }
-    missing = sorted(candidates - checked - set(NOT_FROM_SERVER))
+    missing = sorted(candidates - accounted)
     assert not missing, (
-        "non-request models under venice_ai.types that no resource returns; make "
-        f"them reachable from a resource return type or list them in NOT_FROM_SERVER: {missing}"
+        "non-request models that no resource returns; make them reachable from a "
+        f"resource return type or list them, with a reason, in NOT_FROM_SERVER: {missing}"
     )
 
 
+def test_header_models_take_any_server_value() -> None:
+    models = [ALL_MODELS[key] for key in HEADER_MODELS]
+    assert not _constraint_problems(models)
+    assert not _fixed_literal_problems(models)
+
+
 def test_exclusion_lists_are_current() -> None:
-    stale = sorted(k for k in {**NOT_FROM_SERVER, **CALLER_BUILT_ARMS} if k not in ALL_MODELS)
+    listed = {**NOT_FROM_SERVER, **CALLER_BUILT_ARMS, **dict.fromkeys(HEADER_MODELS, "")}
+    stale = sorted(k for k in listed if k not in ALL_MODELS)
     assert not stale, f"exclusion lists name models that no longer exist: {stale}"
+
+
+def test_response_models_are_fully_defined() -> None:
+    """An unresolved forward reference would hide a field's real type from these gates."""
+    incomplete = [_key(cls) for cls in RESPONSE_MODELS if not cls.__pydantic_complete__]
+    assert not incomplete, f"response models with unresolved annotations: {incomplete}"

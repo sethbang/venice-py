@@ -403,7 +403,8 @@ class VoiceChanger(APIResource["VeniceClient"]):
         The endpoint answers in one of two ways, discriminated by content type
         rather than by a status field:
 
-        * ``application/json`` with ``status: "PROCESSING"`` — still running.
+        * ``application/json`` with ``status: "PROCESSING"`` (or a status this
+          SDK release does not know, logged as a warning) — still running.
         * an audio body (``audio/mpeg`` per the API spec) — the converted
           audio, returned inline. ``application/octet-stream`` is accepted
           when the bytes are a known audio container. The completed status

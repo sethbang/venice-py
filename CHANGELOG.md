@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-10-24
+
+Response models no longer fail on fields or values Venice adds before the SDK models them, decision requests take images (the Venice API change of 2026-10-23), the Pillow and OpenTelemetry floors move to versions that fix the October 2026 security advisories, and the daily drift report now sorts each change by its impact on the SDK.
+
+### Fixed
+
+- **A new field or value from Venice no longer fails the whole response.** Several response models rejected anything the SDK had not seen, so one server-side addition broke every call to that endpoint until the SDK was updated:
+  - `ModelsListResponse`, `ModelTraitsResponse` and `ModelCompatibilityResponse` rejected unknown fields. A new top-level field on `/models` would have broken `models.list()` and every `resolve_*()` call. The same applied to `VideoQueueResponse`, `VideoQuoteResponse`, `VideoCompleteResponse`, `VideoTranscriptionResponse`, `MusicQueueResponse` and `SimpleImageGenerationResponse`. All now keep unknown fields in `model_extra`.
+  - Fields typed to one fixed value now accept any string: every `object` marker (`"list"`, `"chat.completion"`, `"model"`, ...), `AugmentScrapeResponse.format`, the `QUEUED` status on music and voice-changer queue responses, and `ResponsesMessageOutput.role`. `EmbeddingObject.encoding_format` is a `str`, with the known values in `KNOWN_EMBEDDING_ENCODING_FORMATS`.
+  - A tool call of a type other than `"function"` (such as a `custom` tool call) no longer fails the chat response. `ToolCall.type` is a `str`, `ToolCall.function` is `None` for such a call, and its payload is kept in `model_extra` (e.g. `call.model_extra["custom"]`). `run_with_tools()` raises a clear `ValueError` if the model makes one, since it dispatches only function tools. Streaming does the same: `ChatCompletionChunkToolCall.type` is a `str`, and the assembled final response keeps the call's real type and payload instead of labelling it `"function"`.
+  - Range and length checks were removed from response fields: token counts, decision `noul`, `score` and `confidence`, and the `pagination_info` header values.
+  - Chat message `content` parts from the API parse into `ChatMessageTextContent` and `ChatMessageImageContent`, subclasses of `TextContent` and `ImageContent` that keep unknown fields, accept empty or `null` text, any `cache_control` value and any `detail` level. A part of a type the SDK does not know stays a `dict`. Parts you build yourself are kept as they are. `AssistantMessage.from_response()` passes every part back: text parts as `TextContent`, any other part as the dict the API returned, so a reply with a refusal or image part can go back into history (a malformed text part is still rejected).
+  - In Responses API output, an unknown content part in a `message` block (such as a refusal) or in a reasoning `summary` stays a `dict`. Previously the whole message was demoted to `ResponsesUnknownOutput` and its text dropped out of the typed message.
+  - `video.retrieve()`, `music.retrieve()` and `voice_changer.retrieve()` raised on a job status other than `PROCESSING`, `FAILED` or `COMPLETED` (voice changer on anything but `PROCESSING`). An unknown status now returns the processing status with the raw value on `status`, logs a warning, and polling continues until the job finishes or `max_polls` is reached. The processing statuses' `status` is a `str`, and their timing fields default to 0 when the server omits them. `VideoRetrieveResponse`, `MusicRetrieveResponse` and `VoiceChangerRetrieveResponse` choose their arm by `status`, so validating a body against them yields the completed or failed status rather than the processing one.
+
+  Two typing changes follow: `ToolCall.function` is optional, and `ChatMessage.content` and Responses `content` / `summary` lists can hold a `dict`, so a type checker wants a `None` or `isinstance` check before `.function.name` or `.text`. Unknown fields now appear in `model_dump()`, so a response dumped into a new request sends them too. A new test fails if any model reachable from a resource's return type forbids unknown fields, fixes a field to one value outside a union tag, constrains a value, or has a union of tagged models with no catch-all.
+
+- **Tier discovery accepts a zero or negative RPM limit.** It no longer fails when `/api_keys/rate_limits` reports a requests-per-minute limit of zero or less; it falls back to 60, as it already did for a missing limit.
+
+### Added
+
+- **Images on decision requests.** `client.decisions.create()` takes `images=`: up to four PNG or JPEG images for the model to look at, each a `data:` URI string or a `DecisionImage`. `DecisionImage.from_file()` reads a `.png`, `.jpg` or `.jpeg` file and `DecisionImage.from_bytes()` encodes bytes; plain `{"content_type", "base64"}` dicts are accepted too. An empty list, more than four images, a remote URL, a non-PNG/JPEG image, or a payload that is not base64 or longer than the API's limit is rejected before the request is sent. Not every decision model accepts images: one that does not rejects the request with a 400 (`InvalidRequestError`), and the catalog does not say which do. `images` is left out of the request body when not passed. `venice-py decisions` gains a repeatable `--image PATH`.
+
+- **SDK impact in the drift report.** `tools/api_drift.py` sorts each change into **Needs SDK work**, **Review** or **No SDK change**, with the reason, by resolving it against the SDK's request models through nested fields; the full diff follows in a collapsed section. `--title PATH` writes an issue title such as `Venice API drift: 1 needs SDK work` or `no SDK impact`, and the `API Drift` workflow keeps the open issue's title current. If the SDK cannot be imported or classification fails, every change is listed under **Review** with a note, and the exit code is unchanged.
+
+### Changed
+
+- **Security floors.** The `Pillow` dependency (the `cli` and `all` extras) is now `^13.0.0`; the old `^12.2.0` constraint kept installs on 12.x, which has the advisories fixed in 13.0.0. `opentelemetry-api` and `opentelemetry-sdk` (the `observability`, `enterprise` and `all` extras) are now `^1.45.1`, for CVE-2026-114603. The lock file also picks up patched `certifi`, `brotli` and `setuptools`.
+
+- **Decision pricing wording.** `DecisionUsage`, the decisions skill reference and the ticket-routing example no longer say decision models bill output tokens at zero; some decision models now bill output, so check the model's catalog pricing.
+
+The new decision model `clef-api`, the `tts-heygen-voice` and `tts-heygen-voice-turbo` speech models and the `768p` video resolution need no SDK change: model IDs and resolutions are passed through as strings.
+
 ## [2.8.0] - 2026-10-19
 
 Adds the Venice API surface that shipped between 2026-10-02 and 2026-10-19. Each new request parameter is left out of the request body when it is not passed, so existing requests are byte-identical.
@@ -1257,7 +1290,8 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.8.0...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.9.0...HEAD
+[2.9.0]: https://github.com/sethbang/venice-py/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/sethbang/venice-py/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/sethbang/venice-py/compare/v2.6.0...v2.7.0
 [2.6.0]: https://github.com/sethbang/venice-py/compare/v2.5.1...v2.6.0

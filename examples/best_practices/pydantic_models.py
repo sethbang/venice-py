@@ -576,6 +576,9 @@ async def example_tool_calling_correct() -> bool:
             messages.append(AssistantMessage.from_response(response))
 
             for tool_call in tool_calls:
+                if tool_call.function is None:  # ✅ not a function call (e.g. "custom")
+                    print(f"\n❌ Unexpected {tool_call.type!r} tool call")
+                    return False
                 func_name = tool_call.function.name  # ✅ Pydantic property
                 func_args_str = tool_call.function.arguments  # ✅ JSON string
                 print(f"\n   Function name: {func_name}")

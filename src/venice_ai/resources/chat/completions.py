@@ -216,14 +216,15 @@ def _default_on_tool_error(call: ToolCall, exc: Exception) -> str:
     (real bugs surface in the ``venice_ai.tools`` logger). Pass
     ``on_tool_error=raise_it`` to ``run_with_tools`` for strict propagation.
     """
+    name = call.function.name if call.function is not None else call.type
     _tools_logger.error(
         "Tool %s raised %s: %s",
-        call.function.name,
+        name,
         type(exc).__name__,
         exc,
         exc_info=True,
     )
-    return f"Error calling {call.function.name}: {type(exc).__name__}: {exc}"
+    return f"Error calling {name}: {type(exc).__name__}: {exc}"
 
 
 async def _execute_tool_call(
@@ -233,6 +234,11 @@ async def _execute_tool_call(
     on_tool_error: Callable[[ToolCall, Exception], str],
 ) -> str:
     """Dispatch a single tool call and return a string for the ``ToolMessage``."""
+    if call.function is None:
+        raise ValueError(
+            f"Model made a {call.type!r} tool call (id {call.id!r}); run_with_tools "
+            "only dispatches function tools."
+        )
     name = call.function.name
     entry = registry.get(name)
     if entry is None:

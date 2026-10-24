@@ -8,9 +8,9 @@ Endpoints covered:
 - POST /api/v1/video/complete -> VideoCompleteResponse
 """
 
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Discriminator, Field, PrivateAttr, Tag
 
 from ...core.models.common import VeniceBaseModel
 
@@ -159,7 +159,22 @@ class VideoCompleteResponse(VeniceBaseModel):
 # 2. VideoFailedStatus - when generation failed
 # 3. VideoCompletedStatus - when complete (JSON response)
 # 4. bytes - when complete (binary video data, handled at HTTP level)
-VideoRetrieveResponse = VideoProcessingStatus | VideoFailedStatus | VideoCompletedStatus
+def _retrieve_status_tag(value: Any) -> str:
+    """Pick the retrieve arm by ``status``; a status this SDK does not know is in progress."""
+    status = value.get("status") if isinstance(value, dict) else getattr(value, "status", None)
+    return (
+        {"FAILED": "failed", "COMPLETED": "completed"}.get(status, "processing")
+        if isinstance(status, str)
+        else "processing"
+    )
+
+
+VideoRetrieveResponse = Annotated[
+    Annotated[VideoProcessingStatus, Tag("processing")]
+    | Annotated[VideoFailedStatus, Tag("failed")]
+    | Annotated[VideoCompletedStatus, Tag("completed")],
+    Discriminator(_retrieve_status_tag),
+]
 
 
 class VideoTranscriptionResponse(VeniceBaseModel):
