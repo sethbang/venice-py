@@ -1409,6 +1409,9 @@
     },
     "POST /decisions": {
       "params": [
+        "body.images",
+        "body.images[].base64",
+        "body.images[].content_type",
         "body.model",
         "body.questions",
         "body.questions{}.criteria",
@@ -1849,6 +1852,9 @@
     },
     "POST /systemone": {
       "params": [
+        "body.images",
+        "body.images[].base64",
+        "body.images[].content_type",
         "body.model",
         "body.questions",
         "body.questions{}.criteria",
@@ -2644,8 +2650,14 @@
       "\"tts-chatterbox-hd\"",
       "\"tts-minimax-speech-02-hd\""
     ],
+    "schemas/CreateDecisionRequestSchema.images[].content_type": [
+      "\"image/jpeg\"",
+      "\"image/jpg\"",
+      "\"image/png\""
+    ],
     "schemas/CreateDecisionRequestSchema.model": [
       "\"clef\"",
+      "\"clef-api\"",
       "\"jev-latest\""
     ],
     "schemas/CreateDecisionRequestSchema.questions{}.type": [
@@ -2673,6 +2685,8 @@
       "\"tts-elevenlabs-turbo-v2-5\"",
       "\"tts-gemini-3-1-flash\"",
       "\"tts-gradium-v1\"",
+      "\"tts-heygen-voice\"",
+      "\"tts-heygen-voice-turbo\"",
       "\"tts-inworld-1-5-max\"",
       "\"tts-kokoro\"",
       "\"tts-minimax-speech-02-hd\"",
@@ -2935,6 +2949,7 @@
       "\"580p\"",
       "\"720p\"",
       "\"768P\"",
+      "\"768p\"",
       "\"true_1080p\""
     ],
     "schemas/QueueVideoRequest.slowdown_factor": [
@@ -3019,6 +3034,7 @@
       "\"580p\"",
       "\"720p\"",
       "\"768P\"",
+      "\"768p\"",
       "\"true_1080p\""
     ],
     "schemas/QuoteVideoRequest.slowdown_factor": [

@@ -343,7 +343,7 @@ To catch these patterns automatically in user code, run **`venice-py lint <path>
 - `references/characters-and-augment.md` — `client.characters`, `client.augment.search/scrape/parse_text`
 - `references/response-shapes.md` — where fields actually live (`model_spec` per type, billing balance nesting, augment results, audio response, etc.)
 - `references/billing.md` — `client.billing.*` (`get_balance`, `get_usage_history`, `iter_usage_history`, `iter_usage_history_csv`, beta analytics)
-- `references/decisions.md` — beta `client.decisions` (typed `noul` / `choice` / `score` judgments from "System One" models)
+- `references/decisions.md` — beta `client.decisions` (typed `noul` / `choice` / `score` judgments from "System One" models, optionally about up to four images)
 
 ## Scripts
 

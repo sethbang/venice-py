@@ -89,6 +89,25 @@ response = await client.decisions.create(
 
 A chat transcript (a list of message dicts) is a valid `state` too.
 
+## Images
+
+A request can carry up to four PNG or JPEG images for the model to look at. Pass each as a `data:` URI string or a `DecisionImage`; build one from a file with `DecisionImage.from_file()` or from bytes with `DecisionImage.from_bytes()`:
+
+```python
+from venice_ai.types.api import DecisionImage, NoulQuestion
+
+response = await client.decisions.create(
+    model=model,
+    state="A photo submitted with a damage claim.",
+    questions={"damaged": NoulQuestion(instructions="Does the item look damaged?")},
+    images=[DecisionImage.from_file("claim.jpg")],
+)
+```
+
+- **Not every decision model accepts images.** One that doesn't rejects the whole request with a 400 (`InvalidRequestError`), and the catalog carries no flag that says which do. The model `resolve_decision()` returns may be one that rejects them, so try your chosen model once with an image before relying on it, and list the alternatives with `client.models.list(type="decision")`.
+- **Remote URLs are not fetched.** A string must be a `data:image/png;base64,...` or `data:image/jpeg;base64,...` URI; anything else fails locally before the request is sent.
+- **Images add input tokens**, so a request with images costs more than the same request without them.
+
 ## Cost
 
-Decision models price input only — output tokens bill at zero on the current catalog. `response.usage` reports both, so `output_tokens` being non-zero is expected and not a billing signal.
+Pricing differs by decision model: some bill input tokens only, others bill output too. Read the model's `model_spec.pricing` from the catalog rather than assuming. `response.usage` reports both counts on every model, so `output_tokens` being non-zero is expected and not a billing signal.

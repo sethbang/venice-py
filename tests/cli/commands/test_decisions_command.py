@@ -18,8 +18,8 @@ import pytest
 from click.testing import CliRunner
 
 from venice_ai.cli.cli import cli
-from venice_ai.exceptions import AuthenticationError, NotFoundError
-from venice_ai.types.api import ChoiceQuestion, NoulQuestion, ScoreQuestion
+from venice_ai.exceptions import AuthenticationError, InvalidRequestError, NotFoundError
+from venice_ai.types.api import ChoiceQuestion, DecisionImage, NoulQuestion, ScoreQuestion
 from venice_ai.types.api.decisions import DecisionResponse
 
 RESOLVED_MODEL = "resolved-decision-model"
@@ -333,3 +333,83 @@ class TestErrors:
         assert "Could not resolve a default decision model" in result.output
         assert "--model" in result.output
         mock_client.decisions.create.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Images
+# ---------------------------------------------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\nfake-png"
+
+
+class TestImages:
+    def test_help_lists_image_flag(self):
+        result = CliRunner().invoke(cli, ["decisions", "--help"])
+        assert "--image" in result.output
+
+    def test_no_image_sends_none(self, mock_client):
+        result = _invoke(["state", "--noul", "q", "Yes?"])
+
+        assert result.exit_code == 0, result.output
+        assert _sent(mock_client)["images"] is None
+
+    def test_images_are_read_and_typed(self, mock_client, tmp_path):
+        png = tmp_path / "a.png"
+        png.write_bytes(PNG_BYTES)
+        jpg = tmp_path / "b.JPG"
+        jpg.write_bytes(b"\xff\xd8fake-jpeg")
+
+        result = _invoke(["state", "--noul", "q", "Yes?", "--image", str(png), "--image", str(jpg)])
+
+        assert result.exit_code == 0, result.output
+        images = _sent(mock_client)["images"]
+        assert [image.content_type for image in images] == ["image/png", "image/jpeg"]
+        assert images[0] == DecisionImage.from_bytes(PNG_BYTES, content_type="image/png")
+
+    def test_more_than_four_images_exit_2(self, mock_client, tmp_path):
+        png = tmp_path / "a.png"
+        png.write_bytes(PNG_BYTES)
+
+        result = _invoke(["state", "--noul", "q", "Yes?", *["--image", str(png)] * 5])
+
+        assert result.exit_code == 2
+        assert "at most 4 images" in result.output
+        mock_client.decisions.create.assert_not_called()
+
+    def test_unsupported_image_type_exits_2(self, mock_client, tmp_path):
+        gif = tmp_path / "a.gif"
+        gif.write_bytes(b"GIF89a")
+
+        result = _invoke(["state", "--noul", "q", "Yes?", "--image", str(gif)])
+
+        assert result.exit_code == 2
+        assert "not a PNG or JPEG file" in result.output
+        mock_client.decisions.create.assert_not_called()
+
+    def test_missing_image_file_exits_2(self, mock_client, tmp_path):
+        result = _invoke(["state", "--noul", "q", "Yes?", "--image", str(tmp_path / "nope.png")])
+
+        assert result.exit_code == 2
+        mock_client.decisions.create.assert_not_called()
+
+    def test_rejected_images_print_model_hint(self, mock_client, tmp_path):
+        png = tmp_path / "a.png"
+        png.write_bytes(PNG_BYTES)
+        mock_client.decisions.create.side_effect = InvalidRequestError(
+            "Invalid request.", request=None, response=None, body=None
+        )
+
+        result = _invoke(["state", "--noul", "q", "Yes?", "--image", str(png)], plain=True)
+
+        assert result.exit_code == 1
+        assert "Not every decision model accepts images" in result.output
+
+    def test_invalid_request_without_images_has_no_hint(self, mock_client):
+        mock_client.decisions.create.side_effect = InvalidRequestError(
+            "Invalid request.", request=None, response=None, body=None
+        )
+
+        result = _invoke(["state", "--noul", "q", "Yes?"], plain=True)
+
+        assert result.exit_code == 1
+        assert "Not every decision model accepts images" not in result.output

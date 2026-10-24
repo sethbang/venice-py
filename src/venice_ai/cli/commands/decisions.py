@@ -12,7 +12,7 @@ import click
 from pydantic import TypeAdapter, ValidationError
 
 from venice_ai.cli.utils.console import console, print_error
-from venice_ai.exceptions import VeniceError
+from venice_ai.exceptions import InvalidRequestError, VeniceError
 from venice_ai.types.api.decisions import (
     ChoiceAnswer,
     DecisionResponse,
@@ -21,6 +21,7 @@ from venice_ai.types.api.decisions import (
 )
 from venice_ai.types.api.requests.decisions import (
     ChoiceQuestion,
+    DecisionImage,
     DecisionQuestion,
     DecisionState,
     NoulQuestion,
@@ -28,6 +29,9 @@ from venice_ai.types.api.requests.decisions import (
 )
 
 _QUESTION_ADAPTER: TypeAdapter[Any] = TypeAdapter(DecisionQuestion)
+
+#: Most images one decision request accepts.
+_MAX_IMAGES = 4
 
 #: How many entries of a probability distribution the table shows.
 _TOP_PROBABILITIES = 3
@@ -73,6 +77,13 @@ _TOP_PROBABILITIES = 3
     help="Parse STATE as JSON and send it as structured state (object or array)",
 )
 @click.option(
+    "--image",
+    "image_paths",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="PNG or JPEG file for the model to look at (repeatable, up to 4)",
+)
+@click.option(
     "--model",
     "-m",
     default=None,
@@ -88,6 +99,7 @@ def decisions(
     score_questions,
     questions_path,
     state_json,
+    image_paths,
     model,
     output_json,
 ):
@@ -100,7 +112,9 @@ def decisions(
     STATE in one request. The endpoint is beta.
 
     STATE is text to evaluate; pipe it via stdin to omit the argument. With
-    --state-json it is parsed as JSON, for records or chat logs.
+    --state-json it is parsed as JSON, for records or chat logs. --image
+    attaches up to four PNG or JPEG files; not every decision model accepts
+    images.
 
     Examples:
 
@@ -119,10 +133,16 @@ def decisions(
     \b
       # Full question definitions (choice descriptions, noul labels) from a file
       cat ticket.txt | venice-py decisions --questions questions.json --json
+
+    \b
+      # Ask about an image
+      venice-py decisions "A photo submitted with a damage claim" \\
+        --image claim.jpg --noul damaged "Does the item look damaged?"
     """
     resolved_state = read_state(state, state_json=state_json, stdin_taken=questions_path == "-")
     questions = build_questions(noul_questions, choice_questions, score_questions, questions_path)
-    asyncio.run(_decisions_async(ctx, resolved_state, questions, model, output_json))
+    images = load_images(image_paths)
+    asyncio.run(_decisions_async(ctx, resolved_state, questions, images, model, output_json))
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +248,25 @@ def build_questions(
     return questions
 
 
+def load_images(image_paths: tuple[str, ...]) -> list[DecisionImage] | None:
+    """Read each ``--image`` file into a :class:`DecisionImage`; ``None`` when none are given.
+
+    :raises click.BadParameter: If more than four images are given, or a file
+        is not a PNG or JPEG.
+    """
+    if not image_paths:
+        return None
+    if len(image_paths) > _MAX_IMAGES:
+        raise click.BadParameter(
+            f"at most {_MAX_IMAGES} images are allowed, got {len(image_paths)}.",
+            param_hint="--image",
+        )
+    try:
+        return [DecisionImage.from_file(path) for path in image_paths]
+    except (ValueError, OSError) as exc:
+        raise click.BadParameter(str(exc), param_hint="--image") from exc
+
+
 def read_state(state: str | None, *, state_json: bool, stdin_taken: bool) -> DecisionState:
     """Return the state to evaluate, from the argument or piped stdin.
 
@@ -273,6 +312,7 @@ async def _decisions_async(
     ctx: click.Context,
     state: DecisionState,
     questions: dict[str, Any],
+    images: list[DecisionImage] | None,
     model: str | None,
     output_json: bool,
 ) -> None:
@@ -289,7 +329,17 @@ async def _decisions_async(
     try:
         async with VeniceClient(**get_client_kwargs()) as client:
             model = await resolve_default_model(client, config, "decision", explicit=model)
-            response = await client.decisions.create(model=model, state=state, questions=questions)
+            response = await client.decisions.create(
+                model=model, state=state, questions=questions, images=images
+            )
+    except InvalidRequestError as e:
+        print_error(f"Venice API error: {e}")
+        if images:
+            print_error(
+                "Not every decision model accepts images; pick another with --model "
+                "(see 'venice-py models list --type decision')."
+            )
+        raise SystemExit(1) from e
     except VeniceError as e:
         print_error(f"Venice API error: {e}")
         raise SystemExit(1) from e

@@ -137,8 +137,8 @@ Match on the concrete class rather than on ``type``::
 class DecisionUsage(BaseModel):
     """Token accounting for a decision request.
 
-    Decision models price input only; output tokens are billed at zero on the
-    current catalog, but are reported so callers can see the real work done.
+    Some decision models bill input tokens only and others bill both; check
+    the model's pricing in the catalog. Both counts are always reported.
     """
 
     model_config = ConfigDict(extra="allow")
