@@ -13,7 +13,11 @@ The spec is normalized into a stable summary:
   ``POST /chat/completions body.foo`` for an inline operation schema.
 
 The summary is compared with ``tools/api_drift_snapshot.json`` and the
-differences are printed as a Markdown report.
+differences are printed as a Markdown report. Each difference is sorted by its
+impact on venice-py (``tools/api_drift_impact.py``, which needs the SDK
+installed): *needs SDK work*, *review*, or *no SDK change*. If the SDK cannot
+be imported or classification fails, every difference is listed under
+*review* and the report says why; the exit code is unaffected.
 
 Exit codes:
     0  no drift
@@ -24,11 +28,13 @@ Usage:
     python tools/api_drift.py                      # fetch live spec, compare
     python tools/api_drift.py --spec swagger.yaml  # compare a local spec
     python tools/api_drift.py --update-snapshot    # rewrite the snapshot
+    python tools/api_drift.py --title title.txt    # also write an issue title
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import re
 import sys
@@ -444,13 +450,22 @@ def _code_list(values: list[str]) -> str:
     return ", ".join(_code(v) for v in values)
 
 
-def render_report(result: dict[str, Any], source: str, spec_version: str) -> str:
+def render_report(
+    result: dict[str, Any],
+    source: str,
+    spec_version: str,
+    items: list[Item] | None = None,
+    note: str = "",
+) -> str:
     lines = ["# Venice API drift report", ""]
     lines.append(f"Spec: {_code(source)} (info.version {_code(spec_version)})")
     lines.append("")
     if not has_drift(result):
         lines.append("No drift: the spec matches `tools/api_drift_snapshot.json`.")
         return "\n".join(lines) + "\n"
+    if items is not None:
+        lines.append(render_impact(items, note))
+        lines += ["<details>", "<summary>Full diff</summary>", ""]
 
     counts = [
         ("endpoints added", len(result["added_endpoints"])),
@@ -500,7 +515,173 @@ def render_report(result: dict[str, Any], source: str, spec_version: str) -> str
         for key, members in result["removed_enums"].items():
             lines.append(f"- enum removed {_code(key)} (was {_code_list(members)})")
         lines.append("")
+    if items is not None:
+        lines += ["</details>", ""]
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# Impact groups
+# --------------------------------------------------------------------------- #
+
+NEEDS_WORK = "needs_work"
+REVIEW = "review"
+NO_CHANGE = "no_change"
+GROUP_TITLES = {
+    NEEDS_WORK: "Needs SDK work",
+    REVIEW: "Review",
+    NO_CHANGE: "No SDK change",
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class Item:
+    """One drift change, with its impact on the SDK once classified.
+
+    ``kind`` is one of ``endpoint_added``, ``endpoint_removed``,
+    ``param_added``, ``param_removed``, ``request_content_types``,
+    ``status_codes``, ``response_content_types``, ``response_fields_added``,
+    ``response_fields_removed``, ``enum_members_added``,
+    ``enum_members_removed``, ``enum_added`` or ``enum_removed``.
+    """
+
+    kind: str
+    subject: str
+    detail: str = ""
+    values: tuple[str, ...] = ()
+    nested: int = 0
+    group: str = REVIEW
+    reason: str = ""
+
+
+def _fold_nested(paths: list[str]) -> list[tuple[str, int]]:
+    """Keep each path whose parent is not also listed, with its nested count."""
+    listed = set(paths)
+
+    def parents(path: str) -> list[str]:
+        out = []
+        for match in re.finditer(r"\.|\[\]|\{\}", path):
+            out.append(path[: match.start()])
+        return out
+
+    kept = [p for p in sorted(paths) if not any(q in listed for q in parents(p))]
+    return [(p, sum(1 for q in paths if q != p and p in parents(q))) for p in kept]
+
+
+def drift_items(result: dict[str, Any]) -> list[Item]:
+    """Every change in ``result`` as an unclassified :class:`Item`."""
+    items: list[Item] = []
+    items += [Item("endpoint_added", ep) for ep in result["added_endpoints"]]
+    items += [Item("endpoint_removed", ep) for ep in result["removed_endpoints"]]
+    for ep, entry in result["changed_endpoints"].items():
+        for label, (added, removed) in entry.items():
+            if label == "params":
+                items += [Item("param_added", ep, p, nested=n) for p, n in _fold_nested(added)]
+                items += [Item("param_removed", ep, p, nested=n) for p, n in _fold_nested(removed)]
+                continue
+            if label == "request content types":
+                kind = "request_content_types"
+            elif label == "success status codes":
+                kind = "status_codes"
+            elif label.endswith(" content types"):
+                kind = "response_content_types"
+            else:
+                status = label.split()[1]
+                if added:
+                    items.append(Item("response_fields_added", ep, status, tuple(added)))
+                if removed:
+                    items.append(Item("response_fields_removed", ep, status, tuple(removed)))
+                continue
+            changes = tuple(f"+{v}" for v in added) + tuple(f"-{v}" for v in removed)
+            items.append(Item(kind, ep, label, changes))
+    for key, (added, removed) in result["changed_enums"].items():
+        if added:
+            items.append(Item("enum_members_added", key, values=tuple(added)))
+        if removed:
+            items.append(Item("enum_members_removed", key, values=tuple(removed)))
+    items += [Item("enum_added", k, values=tuple(v)) for k, v in result["added_enums"].items()]
+    items += [Item("enum_removed", k, values=tuple(v)) for k, v in result["removed_enums"].items()]
+    return items
+
+
+def _describe(item: Item) -> str:
+    subject = _code(item.subject)
+    values = _code_list(list(item.values))
+    nested = f" (and {item.nested} nested field{'s' if item.nested != 1 else ''})"
+    nested = nested if item.nested else ""
+    text = {
+        "endpoint_added": f"{subject} added",
+        "endpoint_removed": f"{subject} removed",
+        "param_added": f"{subject} request field {_code(item.detail)} added{nested}",
+        "param_removed": f"{subject} request field {_code(item.detail)} removed{nested}",
+        "request_content_types": f"{subject} request content types changed: {values}",
+        "status_codes": f"{subject} success status codes changed: {values}",
+        "response_content_types": f"{subject} {item.detail} changed: {values}",
+        "response_fields_added": f"{subject} response {item.detail} fields added: {values}",
+        "response_fields_removed": f"{subject} response {item.detail} fields removed: {values}",
+        "enum_members_added": f"{subject} gained {values}",
+        "enum_members_removed": f"{subject} lost {values}",
+        "enum_added": f"new enum {subject}: {values}",
+        "enum_removed": f"enum {subject} removed (was {values})",
+    }[item.kind]
+    return f"- {text}" + (f". {item.reason}" if item.reason else "")
+
+
+def impact_counts(items: list[Item]) -> dict[str, int]:
+    return {group: sum(1 for i in items if i.group == group) for group in GROUP_TITLES}
+
+
+def issue_title(items: list[Item]) -> str:
+    counts = impact_counts(items)
+    if not counts[NEEDS_WORK] and not counts[REVIEW]:
+        return "Venice API drift: no SDK impact"
+    parts = []
+    if counts[NEEDS_WORK]:
+        parts.append(f"{counts[NEEDS_WORK]} need{'s' if counts[NEEDS_WORK] == 1 else ''} SDK work")
+    if counts[REVIEW]:
+        parts.append(f"{counts[REVIEW]} to review")
+    return "Venice API drift: " + ", ".join(parts)
+
+
+def render_impact(items: list[Item], note: str = "") -> str:
+    counts = impact_counts(items)
+    lines = [
+        f"**SDK impact:** {counts[NEEDS_WORK]} need SDK work, {counts[REVIEW]} to review, "
+        f"{counts[NO_CHANGE]} need no SDK change",
+        "",
+    ]
+    if note:
+        lines += [f"> {note}", ""]
+    for group, title in GROUP_TITLES.items():
+        members = [i for i in items if i.group == group]
+        if not members:
+            continue
+        lines += [f"## {title}", ""]
+        lines += [_describe(i) for i in members]
+        lines.append("")
+    return "\n".join(lines)
+
+
+def classify(result: dict[str, Any], spec: dict[str, Any]) -> tuple[list[Item], str]:
+    """Classify every change; on any failure, list everything under review.
+
+    The classifier imports venice-py, so a missing or broken install, or a
+    classifier bug, must not hide drift or turn the run red.
+    """
+    items = drift_items(result)
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import api_drift_impact
+
+        classified = api_drift_impact.classify(items, spec)
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}".replace("\n", " ")
+        note = f"SDK impact classification failed ({reason}); every change is listed under Review."
+        return [dataclasses.replace(i, group=REVIEW, reason="") for i in items], note
+    if len(classified) != len(items):
+        note = "SDK impact classification dropped changes; every change is listed under Review."
+        return [dataclasses.replace(i, group=REVIEW, reason="") for i in items], note
+    return classified, ""
 
 
 def write_snapshot(summary: dict[str, Any], path: Path) -> None:
@@ -527,6 +708,7 @@ def main(argv: list[str] | None = None) -> int:
         help="rewrite the snapshot from the spec instead of comparing",
     )
     parser.add_argument("--report", type=Path, help="also write the Markdown report to this file")
+    parser.add_argument("--title", type=Path, help="also write a one-line issue title to this file")
     args = parser.parse_args(argv)
 
     try:
@@ -553,9 +735,12 @@ def _run(args: argparse.Namespace) -> int:
     result = diff(snapshot, summary)
     info = spec.get("info")
     spec_version = str(info.get("version", "unknown")) if isinstance(info, dict) else "unknown"
-    report = render_report(result, source, spec_version)
+    items, note = classify(result, spec) if has_drift(result) else ([], "")
+    report = render_report(result, source, spec_version, items if has_drift(result) else None, note)
     if args.report:
         args.report.write_text(report, encoding="utf-8")
+    if args.title:
+        args.title.write_text(issue_title(items) + "\n", encoding="utf-8")
     print(report, end="")
     return EXIT_DRIFT if has_drift(result) else EXIT_OK
 
