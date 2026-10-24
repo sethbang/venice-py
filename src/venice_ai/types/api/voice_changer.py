@@ -25,9 +25,7 @@ class VoiceChangerQueueResponse(VeniceBaseModel):
         ...,
         description="Pass to ``retrieve`` to poll for the audio, and to ``complete`` when done.",
     )
-    status: Literal["QUEUED"] = Field(
-        ..., description="Always ``QUEUED`` — the provider has accepted the job."
-    )
+    status: str = Field(..., description="Normally ``QUEUED``: the provider has accepted the job.")
     duration_seconds: float = Field(
         ...,
         description=(
@@ -52,20 +50,26 @@ class VoiceChangerQuoteResponse(VeniceBaseModel):
 
 
 class VoiceChangerProcessingStatus(VeniceBaseModel):
-    """The conversion is still running — poll again."""
+    """The conversion is still running — poll again.
+
+    Also returned for a status this SDK release does not know yet (the raw
+    value is kept on ``status``): the job is treated as still in progress, so
+    polling continues until it finishes or the poll limit is reached.
+    """
 
     model_config = ConfigDict(extra="allow")
 
-    status: Literal["PROCESSING"] = Field(..., description="Conversion still running.")
+    status: str = Field(..., description='Conversion status, normally ``"PROCESSING"``.')
     average_execution_time: float = Field(
-        ...,
+        default=0.0,
         description=(
-            "Recent average end-to-end time for this model, in milliseconds. "
-            "Use it to pace polling."
+            "Recent average end-to-end time for this model, in milliseconds "
+            "(0 when not reported). Use it to pace polling."
         ),
     )
     execution_duration: float = Field(
-        ..., description="Milliseconds elapsed since the conversion was queued."
+        default=0.0,
+        description="Milliseconds elapsed since the conversion was queued (0 when not reported).",
     )
 
     @property

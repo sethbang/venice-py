@@ -580,7 +580,7 @@ class SuccessResponse(VeniceBaseModel):
 class ListResponse(VeniceBaseModel):
     """Generic list response."""
 
-    object: Literal["list"] = Field(..., description="Object type")
+    object: str = Field(..., description='Object type, normally ``"list"``')
     data: list[Any] = Field(..., description="List data")
 
 

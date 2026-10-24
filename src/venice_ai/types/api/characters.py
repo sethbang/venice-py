@@ -5,8 +5,6 @@ This module contains Pydantic models for character management and information,
 including character listings and statistics.
 """
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field
 
 # Cross-package import: VeniceBaseModel provides shared configuration and
@@ -70,7 +68,7 @@ class CharactersListResponse(VeniceBaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    object: Literal["list"] = Field(..., description="Object type")
+    object: str = Field(..., description='Object type, normally ``"list"``')
     data: list[Character] = Field(..., description="Array of character objects")
 
 
@@ -79,7 +77,7 @@ class CharacterResponse(VeniceBaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    object: Literal["character"] = Field(..., description="Object type")
+    object: str = Field(..., description='Object type, normally ``"character"``')
     data: Character = Field(..., description="Character object")
 
 
@@ -130,7 +128,7 @@ class CharacterReviewsResponse(VeniceBaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    object: Literal["list"] = Field(..., description="Object type")
+    object: str = Field(..., description='Object type, normally ``"list"``')
     data: list[CharacterReview] = Field(..., description="Array of review objects for this page")
     pagination: CharacterReviewsPagination = Field(..., description="Pagination metadata")
     summary: CharacterReviewsSummary = Field(..., description="Aggregate rating summary")

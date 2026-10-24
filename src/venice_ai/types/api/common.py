@@ -42,11 +42,9 @@ class PromptTokensDetails(BaseModel):
     cached_tokens: int | None = Field(
         default=None,
         description="Number of tokens retrieved from prompt cache",
-        ge=0,
     )
     cache_creation_input_tokens: int | None = Field(
         default=None,
-        ge=0,
         description=(
             "Number of prompt tokens written to cache (cache write); charged at "
             "a premium rate by some providers."
@@ -55,7 +53,6 @@ class PromptTokensDetails(BaseModel):
     audio_tokens: int | None = Field(
         default=None,
         description="Number of audio tokens in the prompt",
-        ge=0,
     )
 
 
@@ -87,17 +84,14 @@ class CompletionTokensDetails(BaseModel):
     reasoning_tokens: int | None = Field(
         default=None,
         description="Number of reasoning/thinking tokens included in the completion",
-        ge=0,
     )
     audio_tokens: int | None = Field(
         default=None,
         description="Number of audio tokens in the completion",
-        ge=0,
     )
     image_tokens: int | None = Field(
         default=None,
         description="Number of image tokens in the completion",
-        ge=0,
     )
 
 

@@ -80,12 +80,14 @@ from venice_ai.types.api import (
     ResponsesCustomToolCallOutput,
     ResponsesFunctionCallOutput,
     ResponsesMessageOutput,
+    ResponsesOutputText,
     ResponsesReasoningOutput,
 )
 
 for block in response.output:
     if isinstance(block, ResponsesMessageOutput):
-        print("REPLY:", "".join(part.text for part in block.content))
+        # Content of a type the SDK doesn't know (e.g. a refusal) stays a dict.
+        print("REPLY:", "".join(p.text for p in block.content if isinstance(p, ResponsesOutputText)))
     elif isinstance(block, ResponsesReasoningOutput):
         print("REASONING:", block.summary)
     elif isinstance(block, ResponsesFunctionCallOutput):

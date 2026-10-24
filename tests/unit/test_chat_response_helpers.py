@@ -735,11 +735,11 @@ class TestCacheCreationInputTokens:
         details = PromptTokensDetails.model_validate({"cached_tokens": 5})
         assert details.cache_creation_input_tokens is None
 
-    def test_prompt_tokens_details_cache_creation_rejects_negative(self):
+    def test_prompt_tokens_details_keeps_unexpected_server_values(self):
         from venice_ai.types.api.common import PromptTokensDetails
 
-        with pytest.raises(ValueError):
-            PromptTokensDetails.model_validate({"cache_creation_input_tokens": -1})
+        details = PromptTokensDetails.model_validate({"cache_creation_input_tokens": -1})
+        assert details.cache_creation_input_tokens == -1
 
     def test_chat_usage_round_trips_both_cache_fields(self):
         usage = ChatUsage.model_validate(

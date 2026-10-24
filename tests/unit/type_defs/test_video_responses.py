@@ -135,14 +135,11 @@ class TestVideoProcessingStatus:
         )
         assert response.estimated_remaining_ms == 0.0
 
-    def test_status_literal(self):
-        """Test that only PROCESSING status is accepted."""
-        with pytest.raises(ValidationError):
-            VideoProcessingStatus(
-                status="COMPLETED",  # Wrong status  # type: ignore
-                average_execution_time=60000.0,
-                execution_duration=30000.0,
-            )
+    def test_unknown_status_is_kept(self):
+        """A status the SDK does not know parses, with the timings defaulting to 0."""
+        status = VideoProcessingStatus.model_validate({"status": "QUEUED"})
+        assert status.status == "QUEUED"
+        assert status.progress_percent == 0.0
 
 
 class TestVideoFailedStatus:

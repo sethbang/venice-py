@@ -24,6 +24,8 @@ class VideoQueueResponse(VeniceBaseModel):
     Contains the queue_id needed to poll for results.
     """
 
+    model_config = ConfigDict(extra="allow")
+
     model: str = Field(..., description="Model ID used for generation")
     queue_id: str = Field(..., description="Unique queue ID for tracking")
     download_url: str | None = Field(
@@ -47,6 +49,8 @@ class VideoQuoteResponse(VeniceBaseModel):
     Note: Quote may be returned as integer or float depending on value.
     """
 
+    model_config = ConfigDict(extra="allow")
+
     quote: int | float = Field(..., description="Estimated cost in USD")
 
 
@@ -57,13 +61,23 @@ class VideoProcessingStatus(VeniceBaseModel):
     POST /api/v1/video/retrieve -> 200 OK (when processing)
 
     Returned when the video is not yet ready. Poll again after delay.
+
+    Also returned for a status this SDK release does not know yet (the raw
+    value is kept on ``status``): the job is treated as still in progress, so
+    polling continues until it finishes or the poll limit is reached.
     """
 
     model_config = ConfigDict(extra="allow")
 
-    status: Literal["PROCESSING"] = Field(..., description="Current status")
-    average_execution_time: float = Field(..., description="Average execution time in milliseconds")
-    execution_duration: float = Field(..., description="Current execution duration in milliseconds")
+    status: str = Field(..., description='Current status, normally ``"PROCESSING"``')
+    average_execution_time: float = Field(
+        default=0.0,
+        description="Average execution time in milliseconds (0 when not reported)",
+    )
+    execution_duration: float = Field(
+        default=0.0,
+        description="Current execution duration in milliseconds (0 when not reported)",
+    )
 
     @property
     def progress_percent(self) -> float:
@@ -134,6 +148,8 @@ class VideoCompleteResponse(VeniceBaseModel):
     POST /api/v1/video/complete -> 200 OK
     """
 
+    model_config = ConfigDict(extra="allow")
+
     success: bool = Field(..., description="Whether cleanup succeeded")
 
 
@@ -148,6 +164,8 @@ VideoRetrieveResponse = VideoProcessingStatus | VideoFailedStatus | VideoComplet
 
 class VideoTranscriptionResponse(VeniceBaseModel):
     """Response from ``POST /api/v1/video/transcriptions`` (JSON format)."""
+
+    model_config = ConfigDict(extra="allow")
 
     transcript: str = Field(..., description="The transcribed text from the video")
     lang: str | None = Field(

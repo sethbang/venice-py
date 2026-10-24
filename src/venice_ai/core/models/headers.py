@@ -24,10 +24,10 @@ from .base import VeniceBaseModel
 class PaginationInfo(VeniceBaseModel):
     """Pagination information for list responses."""
 
-    page: int = Field(..., ge=1, description="Current page number")
-    limit: int = Field(..., ge=1, le=500, description="Items per page")
-    total: int = Field(..., ge=0, description="Total number of items")
-    total_pages: int = Field(..., ge=0, description="Total number of pages")
+    page: int = Field(..., description="Current page number")
+    limit: int = Field(..., description="Items per page")
+    total: int = Field(..., description="Total number of items")
+    total_pages: int = Field(..., description="Total number of pages")
 
 
 # ============================================================================

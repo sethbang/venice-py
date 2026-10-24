@@ -303,8 +303,8 @@ class ChatCompletionChunk(BaseModel):
     Format: ``"chatcmpl-{random_string}"``
     """
 
-    object: Literal["chat.completion.chunk"]
-    """Object type identifier, always ``"chat.completion.chunk"`` for streaming chunks.
+    object: str
+    """Object type identifier, normally ``"chat.completion.chunk"`` for streaming chunks.
 
     Distinguishes streaming responses from non-streaming completions which
     use ``"chat.completion"``.

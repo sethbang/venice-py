@@ -31,8 +31,8 @@ class AugmentScrapeResponse(VeniceBaseModel):
 
     url: str = Field(..., description="The URL that was scraped.")
     content: str = Field(..., description="The scraped content in markdown format.")
-    format: Literal["markdown"] = Field(
-        ..., description="The format of the scraped content (always ``markdown``)."
+    format: str = Field(
+        ..., description="The format of the scraped content, normally ``markdown``."
     )
 
 

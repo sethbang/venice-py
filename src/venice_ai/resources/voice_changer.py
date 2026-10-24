@@ -485,6 +485,13 @@ class VoiceChanger(APIResource["VeniceClient"]):
             )
             raise
 
+        if isinstance(response_data, dict):
+            status = response_data.get("status")
+            if isinstance(status, str) and status != "PROCESSING":
+                logger.warning(
+                    "voice_changer.retrieve returned unknown status %r; treating it as in progress",
+                    status,
+                )
         return VoiceChangerProcessingStatus.model_validate(response_data)
 
     async def cancel(

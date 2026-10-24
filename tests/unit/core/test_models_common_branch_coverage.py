@@ -758,23 +758,14 @@ class TestComplexHeaderParsing:
 class TestEdgeCases:
     """Test edge cases and error conditions."""
 
-    def test_pagination_info_validation(self):
-        """Test PaginationInfo field validation."""
-        # Valid pagination
+    def test_pagination_info_accepts_any_server_values(self):
+        """PaginationInfo is parsed from response headers, so it keeps whatever
+        the server sends rather than raising on a value outside the documented range."""
         pagination = PaginationInfo(page=1, limit=50, total=100, total_pages=2)
         assert pagination.page == 1
 
-        # Invalid page (< 1)
-        with pytest.raises(ValidationError):
-            PaginationInfo(page=0, limit=50, total=100, total_pages=2)
-
-        # Invalid limit (> 500)
-        with pytest.raises(ValidationError):
-            PaginationInfo(page=1, limit=501, total=100, total_pages=2)
-
-        # Invalid total (< 0)
-        with pytest.raises(ValidationError):
-            PaginationInfo(page=1, limit=50, total=-1, total_pages=2)
+        unusual = PaginationInfo(page=0, limit=1000, total=-1, total_pages=0)
+        assert (unusual.page, unusual.limit, unusual.total) == (0, 1000, -1)
 
     def test_model_with_response_attached(self):
         """Test that model can store and access raw response."""

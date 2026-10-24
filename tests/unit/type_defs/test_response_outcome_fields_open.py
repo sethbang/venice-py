@@ -143,10 +143,6 @@ CLOSED_ENUM_EXEMPTIONS: dict[str, str] = {
     "venice_ai.types.api.audio.VoiceList.gender_filter": (
         "echoes the caller's own gender filter argument"
     ),
-    "venice_ai.types.api.embeddings.EmbeddingObject.encoding_format": (
-        "absent from the spec's response schema; can only echo the request value, "
-        "which EmbeddingRequest constrains to the same Literal"
-    ),
 }
 
 

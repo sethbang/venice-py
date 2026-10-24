@@ -30,9 +30,7 @@ class NoulAnswer(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     type: Literal["noul"] = "noul"
-    noul: float = Field(
-        ..., ge=0.0, le=1.0, description="The yes/no answer on a scale from 0 (no) to 1 (yes)."
-    )
+    noul: float = Field(..., description="The yes/no answer on a scale from 0 (no) to 1 (yes).")
 
 
 class ChoiceAnswer(BaseModel):
@@ -47,8 +45,6 @@ class ChoiceAnswer(BaseModel):
     )
     confidence: float = Field(
         ...,
-        ge=0.0,
-        le=1.0,
         description="How certain the model is, derived from the probability distribution.",
     )
 
@@ -65,7 +61,6 @@ class ScoreAnswer(BaseModel):
     type: Literal["score"] = "score"
     score: float = Field(
         ...,
-        ge=0.0,
         description=("The probability-weighted answer across the levels; can land between levels."),
     )
     legend: dict[str, str] = Field(
@@ -77,8 +72,6 @@ class ScoreAnswer(BaseModel):
     )
     confidence: float = Field(
         ...,
-        ge=0.0,
-        le=1.0,
         description="How certain the model is, derived from the probability distribution.",
     )
 
@@ -143,8 +136,8 @@ class DecisionUsage(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    input_tokens: int = Field(..., ge=0, description="Tokens consumed by the state and questions.")
-    output_tokens: int = Field(..., ge=0, description="Tokens produced evaluating the questions.")
+    input_tokens: int = Field(..., description="Tokens consumed by the state and questions.")
+    output_tokens: int = Field(..., description="Tokens produced evaluating the questions.")
 
 
 class DecisionResponse(VeniceBaseModel):

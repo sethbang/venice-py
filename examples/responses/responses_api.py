@@ -42,6 +42,7 @@ from venice_ai.exceptions import PermissionDeniedError, VeniceError
 from venice_ai.types.api.requests import VeniceParameters
 from venice_ai.types.api.responses import (
     ResponsesMessageOutput,
+    ResponsesOutputText,
     ResponsesReasoningOutput,
     ResponsesResponse,
 )
@@ -67,8 +68,10 @@ def extract_text(response: ResponsesResponse) -> str:
     for block in response.output:
         if isinstance(block, ResponsesMessageOutput):
             for item in block.content:
-                # Each content item is an ``output_text`` block with a ``.text``.
-                parts.append(item.text)
+                # ``output_text`` items carry the text; a content type the SDK
+                # does not know (e.g. a refusal) arrives as a plain dict.
+                if isinstance(item, ResponsesOutputText):
+                    parts.append(item.text)
     return "\n".join(parts).strip()
 
 

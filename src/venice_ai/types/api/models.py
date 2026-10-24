@@ -5,7 +5,7 @@ This module contains Pydantic models for the models API endpoints,
 including model listings, traits, compatibility, and specifications.
 """
 
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 
@@ -1076,7 +1076,7 @@ class ModelResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: ModelId = Field(..., description="Model ID")
-    object: Literal["model"] = Field(..., description="Object type")
+    object: str = Field(..., description='Object type, normally ``"model"``')
     created: float | None = Field(default=None, description="Release date on Venice API")
     owned_by: str = Field(
         ...,
@@ -1137,7 +1137,9 @@ class ModelResponse(BaseModel):
 class ModelsListResponse(VeniceBaseModel):
     """Models list endpoint response"""
 
-    object: Literal["list"] = Field(..., description="Object type")
+    model_config = ConfigDict(extra="allow")
+
+    object: str = Field(..., description='Object type, normally ``"list"``')
     type: str = Field(..., description="Type of models returned")
     data: list[ModelResponse] = Field(..., description="List of available models")
 
@@ -1145,7 +1147,9 @@ class ModelsListResponse(VeniceBaseModel):
 class ModelTraitsResponse(VeniceBaseModel):
     """Model traits endpoint response"""
 
-    object: Literal["list"] = Field(..., description="Object type")
+    model_config = ConfigDict(extra="allow")
+
+    object: str = Field(..., description='Object type, normally ``"list"``')
     type: str = Field(..., description="Type of models the traits apply to")
     data: dict[str, str] = Field(..., description="Key-value pairs of trait names to model IDs")
 
@@ -1153,7 +1157,9 @@ class ModelTraitsResponse(VeniceBaseModel):
 class ModelCompatibilityResponse(VeniceBaseModel):
     """Model compatibility mapping endpoint response"""
 
-    object: Literal["list"] = Field(..., description="Object type")
+    model_config = ConfigDict(extra="allow")
+
+    object: str = Field(..., description='Object type, normally ``"list"``')
     type: str = Field(..., description="Type of models the mappings apply to")
     data: dict[str, str] = Field(
         ..., description="Key-value pairs of external model names to Venice model IDs"
