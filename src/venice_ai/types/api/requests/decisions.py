@@ -18,11 +18,18 @@ Three question types exist, each with its own ``criteria`` shape:
     A position on an ordered rubric. ``criteria`` is the ordered list of level
     descriptions, lowest first, and needs at least two entries.
 
+A request can also carry up to four ``images`` for the model to look at,
+each a ``data:`` URI or a :class:`DecisionImage`. Not every decision model
+accepts images; one that does not rejects the request with a 400.
+
 Every question type rejects unknown keys (``additionalProperties: false`` in
 the API spec), so a misspelled field fails locally rather than being silently
 ignored by the server.
 """
 
+import base64
+import re
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -42,6 +49,72 @@ chat logs, records, or application state.
 
 DecisionInstructions = str | dict[str, Any] | list[Any]
 """A question's instructions — free text, or structured data."""
+
+DecisionImageContentType = Literal["image/png", "image/jpeg", "image/jpg"]
+"""MIME types a decision request accepts for an image."""
+
+_IMAGE_SUFFIX_CONTENT_TYPES: dict[str, DecisionImageContentType] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
+
+# The API's own limits for one image (``maxLength`` and ``pattern`` in the spec).
+_MAX_IMAGE_CHARS = 13_631_488
+_BASE64_PATTERN = r"^[A-Za-z0-9+/]+=*$"
+_DATA_URI = re.compile(r"data:image/(?:png|jpeg|jpg);base64,[A-Za-z0-9+/]+=*")
+
+
+# ============================================================================
+# Images
+# ============================================================================
+
+
+class DecisionImage(BaseModel):
+    """An image sent as raw base64 bytes with its MIME type.
+
+    The API takes the same image either as this object or as a ``data:`` URI
+    string. Remote URLs are not fetched. Build one from a local file with
+    :meth:`from_file` or from bytes with :meth:`from_bytes`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    content_type: DecisionImageContentType = Field(
+        ..., description="MIME type of the embedded image: PNG or JPEG."
+    )
+    base64: str = Field(
+        ...,
+        min_length=1,
+        max_length=_MAX_IMAGE_CHARS,
+        pattern=_BASE64_PATTERN,
+        description="Raw base64 image bytes, without a ``data:`` prefix.",
+    )
+
+    @classmethod
+    def from_bytes(cls, data: bytes, *, content_type: DecisionImageContentType) -> "DecisionImage":
+        """Encode ``data`` as a PNG or JPEG image of the given MIME type."""
+        return cls(content_type=content_type, base64=base64.b64encode(data).decode("ascii"))
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> "DecisionImage":
+        """Read a ``.png``, ``.jpg`` or ``.jpeg`` file into a :class:`DecisionImage`.
+
+        :raises ValueError: If the file extension is not a PNG or JPEG one.
+        :raises OSError: If the file cannot be read.
+        """
+        file_path = Path(path)
+        content_type = _IMAGE_SUFFIX_CONTENT_TYPES.get(file_path.suffix.lower())
+        if content_type is None:
+            raise ValueError(
+                f"{file_path.name!r} is not a PNG or JPEG file; decision images "
+                "must be .png, .jpg or .jpeg."
+            )
+        return cls.from_bytes(file_path.read_bytes(), content_type=content_type)
+
+
+DecisionImageInput = str | DecisionImage
+"""One image in a decision request: a PNG or JPEG ``data:`` URI, or a :class:`DecisionImage`."""
 
 
 # ============================================================================
@@ -169,6 +242,35 @@ class CreateDecisionRequest(BaseModel):
         ),
     )
 
+    images: list[DecisionImageInput] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4,
+        description=(
+            "Up to 4 images the model should look at, each a PNG or JPEG "
+            "``data:`` URI or a :class:`DecisionImage`. Remote URLs are not "
+            "fetched. Not every decision model accepts images."
+        ),
+    )
+
+    @field_validator("images")
+    @classmethod
+    def _require_data_uris(
+        cls, v: list[DecisionImageInput] | None
+    ) -> list[DecisionImageInput] | None:
+        """String images must be PNG or JPEG ``data:`` URIs; the API fetches no URLs."""
+        for image in v or ():
+            if not isinstance(image, str):
+                continue
+            if len(image) > _MAX_IMAGE_CHARS:
+                raise ValueError(f"each image must be at most {_MAX_IMAGE_CHARS} characters.")
+            if not _DATA_URI.fullmatch(image):
+                raise ValueError(
+                    "each string image must be a PNG or JPEG data: URI with a base64 "
+                    "payload (data:image/png;base64,...); remote URLs are not fetched."
+                )
+        return v
+
     @field_validator("state")
     @classmethod
     def _reject_empty_state(cls, v: DecisionState) -> DecisionState:
@@ -191,6 +293,9 @@ class CreateDecisionRequest(BaseModel):
 __all__ = [
     "ChoiceQuestion",
     "CreateDecisionRequest",
+    "DecisionImage",
+    "DecisionImageContentType",
+    "DecisionImageInput",
     "DecisionInstructions",
     "DecisionQuestion",
     "DecisionState",

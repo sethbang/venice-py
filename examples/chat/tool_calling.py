@@ -151,6 +151,9 @@ async def basic_function_calling(client: VeniceClient, model_id: str) -> bool:
         messages.append(AssistantMessage.from_response(first))
         tool_outputs: list[str] = []
         for call in tool_calls:
+            if call.function is None:
+                print(f"❌ Unexpected {call.type!r} tool call: {call.model_extra}")
+                return False
             args = call.function.arguments_dict
             print(f"   🔧 {call.function.name}({args})  id={call.id}")
             if call.function.name != "get_weather":

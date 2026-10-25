@@ -412,6 +412,47 @@ class Stream(Generic[ChunkType]):
                 await self._iterator.aclose()  # pyright: ignore[reportAttributeAccessIssue]
 
 
+def _merge_tool_call_delta(calls: dict[int, dict[str, Any]], tc: Any) -> None:
+    """Fold one streamed tool-call delta into the call it continues.
+
+    Function calls accumulate ``name`` and ``arguments``. A call of another
+    type (e.g. ``"custom"``) keeps its own payload, read from the delta's extra
+    fields, with string values concatenated across deltas.
+    """
+    entry = calls.setdefault(
+        tc.index or 0,
+        {"id": "", "type": tc.type or "function", "name": "", "arguments": "", "extra": {}},
+    )
+    if tc.id:
+        entry["id"] = tc.id
+    if tc.type:
+        entry["type"] = tc.type
+    if tc.function:
+        if tc.function.name:
+            entry["name"] += tc.function.name
+        if tc.function.arguments:
+            entry["arguments"] += tc.function.arguments
+    for key, value in (tc.model_extra or {}).items():
+        current = entry["extra"].get(key)
+        if isinstance(value, dict) and isinstance(current, dict):
+            for sub_key, sub_value in value.items():
+                previous = current.get(sub_key)
+                if isinstance(previous, str) and isinstance(sub_value, str):
+                    current[sub_key] = previous + sub_value
+                else:
+                    current[sub_key] = sub_value
+        else:
+            entry["extra"][key] = dict(value) if isinstance(value, dict) else value
+
+
+def _assembled_tool_call(entry: dict[str, Any]) -> dict[str, Any]:
+    """The tool call a stream's deltas add up to, shaped like a non-streaming one."""
+    call: dict[str, Any] = {"id": entry["id"], "type": entry["type"], **entry["extra"]}
+    if entry["type"] == "function" or entry["name"] or entry["arguments"]:
+        call["function"] = {"name": entry["name"], "arguments": entry["arguments"]}
+    return call
+
+
 def _assemble_reasoning(summary_parts: list[str], encrypted_parts: list[str]) -> str | None:
     """Join reasoning deltas so the assembled field survives a round trip.
 
@@ -523,7 +564,7 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         text_parts: list[str] = []
         reasoning_summary_parts: list[str] = []
         reasoning_encrypted_parts: list[str] = []
-        tool_calls_by_index: dict[int, dict[str, str]] = {}
+        tool_calls_by_index: dict[int, dict[str, Any]] = {}
         model = ""
         stream_id = ""
         created = 0
@@ -557,22 +598,7 @@ class ChatStream(Stream["ChatCompletionChunk"]):
                             reasoning_summary_parts.append(choice.delta.reasoning_content)
                     if choice.delta.tool_calls:
                         for tc in choice.delta.tool_calls:
-                            idx = tc.index or 0
-                            if idx not in tool_calls_by_index:
-                                tool_calls_by_index[idx] = {
-                                    "id": tc.id or "",
-                                    "type": tc.type or "function",
-                                    "name": "",
-                                    "arguments": "",
-                                }
-                            entry = tool_calls_by_index[idx]
-                            if tc.id:
-                                entry["id"] = tc.id
-                            if tc.function:
-                                if tc.function.name:
-                                    entry["name"] += tc.function.name
-                                if tc.function.arguments:
-                                    entry["arguments"] += tc.function.arguments
+                            _merge_tool_call_delta(tool_calls_by_index, tc)
                 if choice.finish_reason:
                     finish_reason = choice.finish_reason
             if chunk.usage:
@@ -591,12 +617,7 @@ class ChatStream(Stream["ChatCompletionChunk"]):
                 reasoning_summary_parts, reasoning_encrypted_parts
             ),
             "tool_calls": [
-                {
-                    "id": entry["id"],
-                    "type": "function",
-                    "function": {"name": entry["name"], "arguments": entry["arguments"]},
-                }
-                for _, entry in sorted(tool_calls_by_index.items())
+                _assembled_tool_call(entry) for _, entry in sorted(tool_calls_by_index.items())
             ]
             if tool_calls_by_index
             else None,
@@ -672,7 +693,7 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         text_parts: list[str] = []
         reasoning_summary_parts: list[str] = []
         reasoning_encrypted_parts: list[str] = []
-        tool_calls_by_index: dict[int, dict[str, str]] = {}
+        tool_calls_by_index: dict[int, dict[str, Any]] = {}
         model = ""
         stream_id = ""
         created = 0
@@ -707,22 +728,7 @@ class ChatStream(Stream["ChatCompletionChunk"]):
                             reasoning_summary_parts.append(choice.delta.reasoning_content)
                     if choice.delta.tool_calls:
                         for tc in choice.delta.tool_calls:
-                            idx = tc.index or 0
-                            if idx not in tool_calls_by_index:
-                                tool_calls_by_index[idx] = {
-                                    "id": tc.id or "",
-                                    "type": tc.type or "function",
-                                    "name": "",
-                                    "arguments": "",
-                                }
-                            entry = tool_calls_by_index[idx]
-                            if tc.id:
-                                entry["id"] = tc.id
-                            if tc.function:
-                                if tc.function.name:
-                                    entry["name"] += tc.function.name
-                                if tc.function.arguments:
-                                    entry["arguments"] += tc.function.arguments
+                            _merge_tool_call_delta(tool_calls_by_index, tc)
                 if choice.finish_reason:
                     finish_reason = choice.finish_reason
             if chunk.usage:
@@ -741,12 +747,7 @@ class ChatStream(Stream["ChatCompletionChunk"]):
                 reasoning_summary_parts, reasoning_encrypted_parts
             ),
             "tool_calls": [
-                {
-                    "id": entry["id"],
-                    "type": "function",
-                    "function": {"name": entry["name"], "arguments": entry["arguments"]},
-                }
-                for _, entry in sorted(tool_calls_by_index.items())
+                _assembled_tool_call(entry) for _, entry in sorted(tool_calls_by_index.items())
             ]
             if tool_calls_by_index
             else None,

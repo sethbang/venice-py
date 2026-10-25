@@ -5,7 +5,7 @@ Chat completion request models for Venice.ai API.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -148,11 +148,31 @@ class AssistantMessage(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
     role: Literal["assistant"] = "assistant"
-    content: str | list[TextContent] | None = None
+    content: (
+        str
+        | list[Annotated[TextContent | dict[str, Any], Field(union_mode="left_to_right")]]
+        | None
+    ) = Field(
+        default=None,
+        description=(
+            "Text, or content parts. Text parts are TextContent; any other part "
+            "is passed back as the dict the API returned."
+        ),
+    )
     name: str | None = None
     reasoning_content: str | None = None
     reasoning_details: list[Any] | None = None
     tool_calls: list[Any] | None = None
+
+    @field_validator("content")
+    @classmethod
+    def _reject_malformed_text_parts(cls, v: Any) -> Any:
+        """A text part that failed TextContent validation must not pass as a dict."""
+        if isinstance(v, list):
+            for part in v:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    TextContent.model_validate(part)
+        return v
 
     @classmethod
     def from_response(
@@ -161,8 +181,18 @@ class AssistantMessage(BaseModel):
         """Create an AssistantMessage from a ChatCompletionResponse for multi-turn history."""
         choice = response.choices[choice_index]
         msg = choice.message
+        content: str | list[TextContent | dict[str, Any]] | None
+        if isinstance(msg.content, list):
+            content = [
+                part
+                if isinstance(part, (TextContent, dict))
+                else part.model_dump(mode="json", exclude_none=True)
+                for part in msg.content
+            ]
+        else:
+            content = msg.content
         return cls(
-            content=msg.content,  # type: ignore[arg-type]  # response is str|list[TextContent|ImageContent] but assistant only emits str|list[TextContent]
+            content=content,
             name=msg.name,
             reasoning_content=msg.reasoning_content,
             reasoning_details=msg.reasoning_details,

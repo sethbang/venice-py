@@ -5,9 +5,6 @@ The /image/generate 200 schema has no ``additionalProperties: false`` (unlike
 forward-compatible extra fields. SimpleImageGenerationResponse stays strict.
 """
 
-import pytest
-from pydantic import ValidationError
-
 from venice_ai.types.api.images import (
     ImageGenerationResponse,
     SimpleImageGenerationResponse,
@@ -34,12 +31,13 @@ def test_image_generation_response_preserves_unknown_fields():
     assert (resp.model_extra or {}).get("a_future_server_field") == "keep-me"
 
 
-def test_simple_image_generation_response_stays_strict():
-    # /images/generations declares additionalProperties:false — must keep rejecting.
-    with pytest.raises(ValidationError):
-        SimpleImageGenerationResponse.model_validate(
-            {"created": 1, "data": [], "an_unexpected_field": True}
-        )
+def test_simple_image_generation_response_keeps_unknown_fields():
+    # The spec declares additionalProperties:false, but a field the server adds
+    # later must not fail the whole response before the SDK models it.
+    resp = SimpleImageGenerationResponse.model_validate(
+        {"created": 1, "data": [], "an_unexpected_field": True}
+    )
+    assert (resp.model_extra or {}).get("an_unexpected_field") is True
 
 
 def test_content_policy_violation_count_is_typed():

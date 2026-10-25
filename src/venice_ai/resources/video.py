@@ -1023,12 +1023,17 @@ class Video(APIResource["VeniceClient"]):
         # Parse the response into the appropriate status type
         if isinstance(response_data, dict):
             status = response_data.get("status")
-            if status == "PROCESSING":
-                return VideoProcessingStatus.model_validate(response_data)
-            elif status == "FAILED":
+            if status == "FAILED":
                 return VideoFailedStatus.model_validate(response_data)
-            elif status == "COMPLETED":
+            if status == "COMPLETED":
                 return VideoCompletedStatus.model_validate(response_data)
+            if isinstance(status, str):
+                if status != "PROCESSING":
+                    logger.warning(
+                        "video.retrieve returned unknown status %r; treating it as in progress",
+                        status,
+                    )
+                return VideoProcessingStatus.model_validate(response_data)
 
         # Fallback: try each status type
         for status_type in (

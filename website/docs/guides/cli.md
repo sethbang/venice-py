@@ -949,6 +949,7 @@ venice-py decisions [STATE] [OPTIONS]
 | `--score ID QUESTION LEVELS` | | | Add a rubric question; `LEVELS` is comma-separated, lowest first (repeatable) |
 | `--questions` | `-q` | | JSON file mapping question ids to questions in the API shape (`-` reads stdin) |
 | `--state-json` | | `false` | Parse `STATE` as JSON and send it as structured state (object or array) |
+| `--image PATH` | | | PNG or JPEG file for the model to look at (repeatable, up to 4) |
 | `--model` | `-m` | runtime * | Decision model to use |
 | `--json` | | `false` | Output the full response as JSON |
 
@@ -966,6 +967,10 @@ venice-py decisions "My payouts have failed for three days and nobody replies" \
 # Evaluate structured state
 venice-py decisions --state-json '{"plan": "free", "failed_payments": 3}' \
   --noul at_risk "Is this account at risk of churning?"
+
+# Ask about an image
+venice-py decisions "A photo submitted with a damage claim" \
+  --image claim.jpg --noul damaged "Does the item look damaged?"
 
 # Pipe the state in, and print the raw answers for scripting
 cat ticket.txt | venice-py decisions --noul urgent "Is this urgent?" --json | jq '.answers.urgent.noul'
@@ -995,6 +1000,8 @@ The inline flags cover the common cases. To describe each choice option, label w
 ```bash
 venice-py decisions "Please refund my last invoice" --questions questions.json
 ```
+
+Not every decision model accepts images. One that doesn't answers with an API error; pick another with `--model` from `venice-py models list --type decision`.
 
 Inline flags and `--questions` can be combined. A malformed file or flag exits with code 2 before any request is sent; an API error exits with code 1.
 

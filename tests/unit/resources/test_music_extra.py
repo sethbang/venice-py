@@ -373,16 +373,19 @@ async def test_retrieve_unknown_status_falls_through_validators(music_resource) 
 
 
 @pytest.mark.asyncio
-async def test_retrieve_unknown_status_in_dict_uses_fallback(music_resource) -> None:
-    """Lines 327-336: dict with unrecognized status falls through the if/elif
-    tree into the validator loop; when none of the typed models accept the
-    payload, the SDK raises ValueError."""
+async def test_retrieve_unknown_status_is_treated_as_in_progress(music_resource, caplog) -> None:
+    """A status the SDK does not know is kept and treated as still in
+    progress, so polling continues instead of failing on the first poll."""
     resource, client = music_resource
-    bogus_payload = {"status": "UNKNOWN_STATUS", "weird_field": "z"}
-    client.post.return_value = _make_raw_response(bogus_payload)
+    payload = {"status": "UNKNOWN_STATUS", "weird_field": "z"}
+    client.post.return_value = _make_raw_response(payload)
 
-    with pytest.raises(ValueError, match="Unable to parse music retrieve response"):
-        await resource.retrieve(model="elevenlabs-music", queue_id="q1")
+    result = await resource.retrieve(model="elevenlabs-music", queue_id="q1")
+
+    assert isinstance(result, MusicProcessingStatus)
+    assert result.status == "UNKNOWN_STATUS"
+    assert result.model_extra == {"weird_field": "z"}
+    assert "unknown status 'UNKNOWN_STATUS'" in caplog.text
 
 
 @pytest.mark.asyncio

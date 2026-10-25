@@ -734,12 +734,17 @@ class Music(APIResource["VeniceClient"]):
 
         if isinstance(response_data, dict):
             status = response_data.get("status")
-            if status == "PROCESSING":
-                return MusicProcessingStatus.model_validate(response_data)
             if status == "FAILED":
                 return MusicFailedStatus.model_validate(response_data)
             if status == "COMPLETED":
                 return MusicCompletedStatus.model_validate(response_data)
+            if isinstance(status, str):
+                if status != "PROCESSING":
+                    logger.warning(
+                        "music.retrieve returned unknown status %r; treating it as in progress",
+                        status,
+                    )
+                return MusicProcessingStatus.model_validate(response_data)
 
         for status_type in (
             MusicProcessingStatus,

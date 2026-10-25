@@ -408,7 +408,11 @@ Venice stores nothing, so send the full conversation in `input` every time.
 
 ```python
 from venice_ai import VeniceClient
-from venice_ai.types.api import ResponsesCustomToolCallOutput, ResponsesMessageOutput
+from venice_ai.types.api import (
+    ResponsesCustomToolCallOutput,
+    ResponsesMessageOutput,
+    ResponsesOutputText,
+)
 
 async with VeniceClient() as client:
     model = await client.models.resolve_chat()
@@ -424,7 +428,7 @@ async with VeniceClient() as client:
         if isinstance(block, ResponsesCustomToolCallOutput):
             print(block.name, block.input)
         elif isinstance(block, ResponsesMessageOutput):
-            print("".join(part.text for part in block.content))
+            print("".join(p.text for p in block.content if isinstance(p, ResponsesOutputText)))
 ```
 
 | Parameter | Notes |

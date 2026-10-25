@@ -341,8 +341,10 @@ if team.confidence > 0.8:                # gate on calibration, not the top answ
 
 Every question is evaluated in parallel and in isolation against the same
 state, so one question cannot see another's answer. `noul` is a probability in
-`[0, 1]`, not a bool. Venice documents `POST /decisions` as unstable: request
-and response schemas may change without notice.
+`[0, 1]`, not a bool. Pass `images=` (up to four PNG or JPEG images, e.g.
+`DecisionImage.from_file("photo.jpg")`) to ask about pictures; not every
+decision model accepts them. Venice documents `POST /decisions` as unstable:
+request and response schemas may change without notice.
 
 [-> `examples/decisions/ticket_routing.py`](https://github.com/sethbang/venice-py/blob/main/examples/decisions/ticket_routing.py)
 

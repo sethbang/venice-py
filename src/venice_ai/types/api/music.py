@@ -9,9 +9,9 @@ shares the queue family with video-style async generation):
 - ``POST /api/v1/audio/complete``  -> :class:`MusicCompleteResponse`
 """
 
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Discriminator, Field, PrivateAttr, Tag
 
 from ...core.models.common import VeniceBaseModel
 from .audio_format import audio_format_for
@@ -24,9 +24,11 @@ class MusicQueueResponse(VeniceBaseModel):
     needed to poll for results.
     """
 
+    model_config = ConfigDict(extra="allow")
+
     model: str = Field(..., description="Model ID used for generation")
     queue_id: str = Field(..., description="Unique queue ID for tracking")
-    status: Literal["QUEUED"] = Field(default="QUEUED", description="Initial status")
+    status: str = Field(default="QUEUED", description='Initial status, normally ``"QUEUED"``')
 
 
 class MusicQuoteResponse(VeniceBaseModel):
@@ -45,13 +47,21 @@ class MusicProcessingStatus(VeniceBaseModel):
     """Status response when music is still being generated.
 
     ``POST /api/v1/audio/retrieve`` -> ``200 OK`` (while processing).
+
+    Also returned for a status this SDK release does not know yet (the raw
+    value is kept on ``status``): the job is treated as still in progress, so
+    polling continues until it finishes or the poll limit is reached.
     """
 
     model_config = ConfigDict(extra="allow")
 
-    status: Literal["PROCESSING"] = Field(..., description="Current status")
-    average_execution_time: float = Field(..., description="Average execution time in ms")
-    execution_duration: float = Field(..., description="Current execution duration in ms")
+    status: str = Field(..., description='Current status, normally ``"PROCESSING"``')
+    average_execution_time: float = Field(
+        default=0.0, description="Average execution time in ms (0 when not reported)"
+    )
+    execution_duration: float = Field(
+        default=0.0, description="Current execution duration in ms (0 when not reported)"
+    )
 
     @property
     def progress_percent(self) -> float:
@@ -137,7 +147,22 @@ class MusicCompleteResponse(VeniceBaseModel):
     success: bool = Field(..., description="Whether cleanup succeeded")
 
 
-MusicRetrieveResponse = MusicProcessingStatus | MusicFailedStatus | MusicCompletedStatus
+def _retrieve_status_tag(value: Any) -> str:
+    """Pick the retrieve arm by ``status``; a status this SDK does not know is in progress."""
+    status = value.get("status") if isinstance(value, dict) else getattr(value, "status", None)
+    return (
+        {"FAILED": "failed", "COMPLETED": "completed"}.get(status, "processing")
+        if isinstance(status, str)
+        else "processing"
+    )
+
+
+MusicRetrieveResponse = Annotated[
+    Annotated[MusicProcessingStatus, Tag("processing")]
+    | Annotated[MusicFailedStatus, Tag("failed")]
+    | Annotated[MusicCompletedStatus, Tag("completed")],
+    Discriminator(_retrieve_status_tag),
+]
 """Retrieve can return processing / failed / completed JSON, or inline bytes
 (bytes are handled at the HTTP layer before this union applies)."""
 

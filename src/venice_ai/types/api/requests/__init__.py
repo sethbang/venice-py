@@ -62,6 +62,9 @@ from .common import (
 from .decisions import (
     ChoiceQuestion,
     CreateDecisionRequest,
+    DecisionImage,
+    DecisionImageContentType,
+    DecisionImageInput,
     DecisionInstructions,
     DecisionQuestion,
     DecisionState,
@@ -232,6 +235,9 @@ __all__ = [
     # Decision requests
     "CreateDecisionRequest",
     "DecisionState",
+    "DecisionImage",
+    "DecisionImageContentType",
+    "DecisionImageInput",
     "DecisionInstructions",
     "DecisionQuestion",
     "NoulQuestion",

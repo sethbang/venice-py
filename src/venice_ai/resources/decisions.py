@@ -74,12 +74,17 @@ Note:
     same endpoint, so this resource targets ``/decisions`` only.
 """
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from .._resource import APIResource
 from ..exceptions import InvalidRequestError
 from ..types.api.decisions import DecisionResponse
-from ..types.api.requests.decisions import CreateDecisionRequest, DecisionState
+from ..types.api.requests.decisions import (
+    CreateDecisionRequest,
+    DecisionImage,
+    DecisionState,
+)
 
 if TYPE_CHECKING:
     from .._client import VeniceClient  # noqa: F401
@@ -101,6 +106,7 @@ class Decisions(APIResource["VeniceClient"]):
         model: str,
         state: DecisionState,
         questions: dict[str, Any],
+        images: Sequence[str | DecisionImage | dict[str, Any]] | None = None,
     ) -> DecisionResponse:
         """
         Evaluate ``state`` against a map of typed questions.
@@ -125,6 +131,15 @@ class Decisions(APIResource["VeniceClient"]):
             instances, or equivalent dicts carrying a ``type`` key. At least
             one question is required.
         :type questions: Dict[str, Any]
+        :param images: Up to four images for the model to look at, each a PNG
+            or JPEG ``data:`` URI, a
+            :class:`~venice_ai.types.api.requests.decisions.DecisionImage`
+            (see :meth:`DecisionImage.from_file`), or an equivalent
+            ``{"content_type", "base64"}`` dict. Remote URLs are not fetched.
+            Not every decision model accepts images; one that does not
+            rejects the request with :class:`InvalidRequestError`. Omitted
+            from the request when ``None``.
+        :type images: Optional[Sequence[Union[str, DecisionImage, Dict[str, Any]]]]
 
         :return: The model's answers, one per question, plus token usage.
         :rtype: ~venice_ai.types.api.decisions.DecisionResponse
@@ -185,6 +200,21 @@ class Decisions(APIResource["VeniceClient"]):
             )
             if response.noul("at_risk") > 0.9:
                 print("Flagging for retention outreach")
+
+        Ask about an image (on a decision model that accepts images):
+
+        .. code-block:: python
+
+            from venice_ai.types.api import DecisionImage, NoulQuestion
+
+            response = await client.decisions.create(
+                model=model,
+                state="A photo submitted with a damage claim.",
+                questions={
+                    "damaged": NoulQuestion(instructions="Does the item look damaged?"),
+                },
+                images=[DecisionImage.from_file("claim.jpg")],
+            )
         """
         if not model:
             raise InvalidRequestError(
@@ -194,11 +224,14 @@ class Decisions(APIResource["VeniceClient"]):
                 body=None,
             )
 
+        # Dicts are validated into DecisionImage by the request model.
+        image_list: list[Any] | None = None if images is None else list(images)
         try:
             decision_request = CreateDecisionRequest(
                 model=model,
                 state=state,
                 questions=questions,
+                images=image_list,
             )
         except ValueError as exc:
             # Surface local schema violations as the SDK's own request error

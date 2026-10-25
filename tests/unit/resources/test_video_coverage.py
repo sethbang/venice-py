@@ -395,19 +395,23 @@ class TestVideoRetrieveFallback:
             )
 
     @pytest.mark.asyncio
-    async def test_retrieve_fallback_dict_unknown_status(self, video_resource):
-        """Lines 409-417: dict with unrecognised status hits fallback loop."""
+    async def test_retrieve_unknown_status_is_treated_as_in_progress(self, video_resource, caplog):
+        """A status the SDK does not know is kept and treated as still in
+        progress, so polling continues instead of failing on the first poll."""
         payload = {"status": "UNKNOWN_STATUS"}
         video_resource._client.post = AsyncMock(
             return_value=_make_raw_response(payload),
         )
 
-        # None of the status types will match, so should raise ValueError
-        with pytest.raises(ValueError, match="Unable to parse video retrieve response"):
-            await video_resource.retrieve(
-                model="wan-2.6-text-to-video",
-                queue_id="q-pqr",
-            )
+        result = await video_resource.retrieve(
+            model="wan-2.6-text-to-video",
+            queue_id="q-pqr",
+        )
+
+        assert isinstance(result, VideoProcessingStatus)
+        assert result.status == "UNKNOWN_STATUS"
+        assert result.progress_percent == 0.0
+        assert "unknown status 'UNKNOWN_STATUS'" in caplog.text
 
     @pytest.mark.asyncio
     async def test_retrieve_fallback_non_parseable(self, video_resource):

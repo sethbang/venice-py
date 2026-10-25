@@ -7,13 +7,14 @@ including streaming, tool calling, and Venice-specific features.
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Final, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ...core.models.common import (
     KNOWN_WEB_SEARCH_MODES,
     ImageContent,
+    ImageUrl,
     TextContent,
     VeniceBaseModel,
     VeniceParametersResponse,
@@ -76,16 +77,91 @@ class ToolCallFunction(BaseModel):
 
 
 class ToolCall(BaseModel):
-    """Tool call made by the model in a chat completion response."""
+    """Tool call made by the model in a chat completion response.
+
+    A ``"function"`` call carries :attr:`function`. A call of another type
+    (for example a ``"custom"`` tool call) has ``function`` set to ``None`` and
+    keeps its own payload in :attr:`model_extra`, e.g. ``call.model_extra["custom"]``.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     id: str = Field(..., description="The ID of the tool call")
-    type: Literal["function"] = Field(..., description="The type of the tool call")
-    function: ToolCallFunction = Field(..., description="The function that the model called")
+    type: str = Field(..., description='The type of the tool call, e.g. ``"function"``')
+    function: ToolCallFunction | None = Field(
+        default=None,
+        description='The function that the model called; ``None`` for a non-``"function"`` call',
+    )
 
 
 # ============================================================================
 # Chat Completions Response Models
 # ============================================================================
+
+
+class ChatMessageTextContent(TextContent):
+    """A text part of a message returned by the API.
+
+    Unlike :class:`TextContent`, which validates what you send, it keeps fields
+    the SDK does not model and accepts an empty ``text``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    text: str = Field(..., description="The text content; ``null`` from the API reads as empty")
+    cache_control: dict[str, Any] | None = Field(
+        default=None, description="Cache control echoed by the API, as sent"
+    )
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def _null_text_is_empty(cls, v: Any) -> Any:
+        return "" if v is None else v
+
+
+class ChatMessageImageUrl(ImageUrl):
+    """The ``image_url`` of an image part returned by the API.
+
+    ``detail`` is a plain ``str`` here so a detail level added by the server
+    does not fail the whole response; :data:`ImageDetail` lists the known ones.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    # Widened from ImageDetail on purpose: a response must accept values the
+    # SDK has not seen, while ImageUrl keeps the closed set for requests.
+    detail: str | None = Field(default=None, description="Image detail level")  # type: ignore[assignment]
+
+
+class ChatMessageImageContent(ImageContent):
+    """An image part of a message returned by the API.
+
+    Unlike :class:`ImageContent`, it keeps fields the SDK does not model.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    # Narrowed on purpose so API image parts carry ChatMessageImageUrl; pyright
+    # flags any narrowing of a mutable field's declared type.
+    image_url: ChatMessageImageUrl = Field(  # pyright: ignore[reportIncompatibleVariableOverride]
+        ..., description="Image URL information"
+    )
+    cache_control: dict[str, Any] | None = Field(
+        default=None, description="Cache control echoed by the API, as sent"
+    )
+
+
+ChatMessageContentPart = Annotated[
+    ChatMessageTextContent | ChatMessageImageContent | TextContent | ImageContent | dict[str, Any],
+    Field(union_mode="left_to_right"),
+]
+"""One part of a :class:`ChatMessage`'s ``content`` list.
+
+A text or image part from the API parses into :class:`ChatMessageTextContent`
+or :class:`ChatMessageImageContent`; a part of a type the SDK does not know
+stays a plain ``dict`` instead of failing the whole response. ``TextContent``
+and ``ImageContent`` instances you build yourself are kept as they are.
+"""
 
 
 class ChatMessage(BaseModel):
@@ -107,12 +183,15 @@ class ChatMessage(BaseModel):
     * ``"tool"``: Tool/function call result
     """
 
-    content: str | list[TextContent | ImageContent] | None = None
+    content: str | list[ChatMessageContentPart] | None = None
     """The content of the message.
 
     Can be:
     * A string for plain text messages
-    * A list of TextContent/ImageContent for multimodal input
+    * A list of content parts: text and image parts parse into
+      :class:`ChatMessageTextContent` / :class:`ChatMessageImageContent`
+      (subclasses of :class:`TextContent` / :class:`ImageContent`), and a part
+      of a type the SDK does not know stays a ``dict``
     * ``None`` for messages that only contain tool calls
     """
 
@@ -236,7 +315,6 @@ class ChatUsage(BaseModel):
     )
     cache_read_input_tokens: int | None = Field(
         default=None,
-        ge=0,
         description=(
             "Top-level count of prompt tokens served from the prompt cache. Mirrors "
             "``prompt_tokens_details.cached_tokens`` on models that emit it."
@@ -244,7 +322,6 @@ class ChatUsage(BaseModel):
     )
     cache_creation_input_tokens: int | None = Field(
         default=None,
-        ge=0,
         description=(
             "Top-level count of prompt tokens written to the prompt cache (cache "
             "write), charged at a premium rate by some providers. Mirrors "
@@ -342,7 +419,9 @@ class ChatCompletionResponse(VeniceBaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str = Field(..., description="The ID of the request")
-    object: Literal["chat.completion"] = Field(..., description="The type of object returned")
+    object: str = Field(
+        ..., description='The type of object returned, normally ``"chat.completion"``'
+    )
     created: int = Field(..., description="Unix timestamp of request creation")
     model: ModelId = Field(..., description="The model id used for the request")
     choices: list[ChatChoice] = Field(
@@ -617,6 +696,10 @@ __all__ = [
     "ToolCallFunction",
     "ToolCall",
     "ChatMessage",
+    "ChatMessageContentPart",
+    "ChatMessageImageContent",
+    "ChatMessageImageUrl",
+    "ChatMessageTextContent",
     "LogProbToken",
     "ChatChoice",
     "ChatUsage",

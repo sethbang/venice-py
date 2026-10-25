@@ -42,7 +42,9 @@ from venice_ai.exceptions import PermissionDeniedError, VeniceError
 from venice_ai.types.api.requests import VeniceParameters
 from venice_ai.types.api.responses import (
     ResponsesMessageOutput,
+    ResponsesOutputText,
     ResponsesReasoningOutput,
+    ResponsesReasoningSummaryText,
     ResponsesResponse,
 )
 
@@ -67,8 +69,10 @@ def extract_text(response: ResponsesResponse) -> str:
     for block in response.output:
         if isinstance(block, ResponsesMessageOutput):
             for item in block.content:
-                # Each content item is an ``output_text`` block with a ``.text``.
-                parts.append(item.text)
+                # ``output_text`` items carry the text; a content type the SDK
+                # does not know (e.g. a refusal) arrives as a plain dict.
+                if isinstance(item, ResponsesOutputText):
+                    parts.append(item.text)
     return "\n".join(parts).strip()
 
 
@@ -246,10 +250,18 @@ async def reasoning_output_blocks(client: VeniceClient) -> bool | None:
         for item in block.summary or []:
             # The block's ``summary`` field can hold the model's raw reasoning
             # text rather than a condensed summary, so it is labelled as
-            # reasoning text and only its start is shown.
-            shown = " ".join(item.split())
+            # reasoning text and only its start is shown. Items are plain
+            # strings or ``summary_text`` parts; a part of a type the SDK does
+            # not know arrives as a dict and is skipped.
+            if isinstance(item, ResponsesReasoningSummaryText):
+                raw = item.text
+            elif isinstance(item, str):
+                raw = item
+            else:
+                continue
+            shown = " ".join(raw.split())
             if len(shown) > 300:
-                shown = f"{shown[:300]}… ({len(item)} chars in total)"
+                shown = f"{shown[:300]}… ({len(raw)} chars in total)"
             print(f"\n💭 Reasoning text (from the block's summary field): {shown}")
 
     text = extract_text(response)

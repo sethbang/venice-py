@@ -5,8 +5,6 @@ This module contains foundational Pydantic models that are used across
 multiple API endpoints, including error responses and common data structures.
 """
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field
 
 from .common import ErrorDetails, PromptTokensDetails
@@ -71,7 +69,7 @@ class UsageData(BaseModel):
 class BaseListResponse(BaseModel):
     """Base model for list responses"""
 
-    object: Literal["list"] = Field(..., description="Response type identifier")
+    object: str = Field(..., description='Response type identifier, normally ``"list"``')
 
 
 class BaseSuccessResponse(BaseModel):

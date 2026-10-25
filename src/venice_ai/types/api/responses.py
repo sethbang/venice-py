@@ -8,7 +8,7 @@ read the OpenAPI spec.
 
 from __future__ import annotations
 
-from typing import Any, Final, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -140,11 +140,20 @@ class ResponsesReasoningOutput(BaseModel):
 
     type: Literal["reasoning"]
     id: str
-    summary: list[str | ResponsesReasoningSummaryText] | None = Field(
+    summary: (
+        list[
+            Annotated[
+                str | ResponsesReasoningSummaryText | dict[str, Any],
+                Field(union_mode="left_to_right"),
+            ]
+        ]
+        | None
+    ) = Field(
         default=None,
         description=(
             "Reasoning summary as plain strings or OpenAI-style "
-            "``{'type': 'summary_text', 'text': ...}`` parts."
+            "``{'type': 'summary_text', 'text': ...}`` parts; a part of a type "
+            "the SDK does not know stays a ``dict``."
         ),
     )
     encrypted_content: str | None = None
@@ -174,8 +183,16 @@ class ResponsesMessageOutput(BaseModel):
             "content is kept. Known values are in KNOWN_RESPONSE_MESSAGE_STATUSES."
         ),
     )
-    role: Literal["assistant"]
-    content: list[ResponsesOutputText]
+    role: str = Field(..., description='Message role, normally ``"assistant"``.')
+    content: list[
+        Annotated[ResponsesOutputText | dict[str, Any], Field(union_mode="left_to_right")]
+    ] = Field(
+        ...,
+        description=(
+            "Content blocks; a block of a type the SDK does not know (e.g. a "
+            "refusal) stays a ``dict`` so the rest of the message still parses."
+        ),
+    )
 
 
 class ResponsesFunctionCallOutput(BaseModel):
@@ -293,7 +310,7 @@ class ResponsesResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str
-    object: Literal["response"]
+    object: str  # normally "response"
     created_at: int
     model: str
     status: str = Field(

@@ -117,6 +117,8 @@ import logging
 log = logging.getLogger("agent")
 
 def log_tool_call(call: ToolCall, result):
+    if call.function is None:              # only function calls are dispatched
+        return
     log.info(
         "tool.call",
         name=call.function.name,
@@ -177,6 +179,8 @@ for _ in range(5):
 
     messages.append(msg)
     for call in msg.tool_calls:
+        if call.function is None:          # not a function call (e.g. "custom")
+            continue
         result = dispatch[call.function.name](**call.function.arguments_dict)
         messages.append(ToolMessage(
             tool_call_id=call.id,

@@ -117,6 +117,9 @@ async def agent_loop_demo(client: VeniceClient, model_id: str) -> bool:
     tool_calls_seen: list[tuple[str, dict[str, Any], Any]] = []
 
     def on_tool_call(call: ToolCall, result: Any) -> None:
+        # run_with_tools only dispatches function calls, so ``function`` is set.
+        if call.function is None:
+            return
         args = call.function.arguments_dict
         tool_calls_seen.append((call.function.name, args, result))
         print(f"   🔧 {call.function.name}({args}) -> {result!r}")

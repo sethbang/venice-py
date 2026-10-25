@@ -160,8 +160,8 @@ async def route_ticket(client: VeniceClient, model: str, ticket: Ticket) -> Judg
         )
 
     usage = response.usage
-    # Decision models price input only: the response still reports output
-    # tokens, but the catalog bills them at zero.
+    # Some decision models bill input tokens only; the response reports both
+    # counts either way, so check the model's catalog pricing for cost.
     print(f"   Tokens: {usage.input_tokens} in / {usage.output_tokens} out")
     return Judgment(urgency=urgency, team=team, mood=mood)
 

@@ -489,3 +489,14 @@ class TestResolveVoiceChanger:
         assert spec.supports_seed is False
         assert spec.supports_background_noise_removal is False
         assert spec.supports_custom_voice_id is False
+
+
+class TestUnknownStatus:
+    @pytest.mark.asyncio
+    async def test_unknown_status_is_treated_as_in_progress(self, client, caplog):
+        client.post.return_value = _make_raw_response({"status": "FAILED", "error": "boom"})
+        result = await VoiceChanger(client).retrieve(model=MODEL, queue_id="q-vc-1")
+        assert isinstance(result, VoiceChangerProcessingStatus)
+        assert result.status == "FAILED"
+        assert result.model_extra == {"error": "boom"}
+        assert "unknown status 'FAILED'" in caplog.text

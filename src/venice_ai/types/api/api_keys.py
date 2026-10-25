@@ -6,7 +6,7 @@ and Web3 authentication functionality.
 """
 
 from enum import StrEnum
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -160,7 +160,7 @@ class ApiKey(BaseModel):
 class ApiKeysListResponse(BaseModel):
     """API keys list response"""
 
-    object: Literal["list"] = Field(..., description="Object type")
+    object: str = Field(..., description='Object type, normally ``"list"``')
     data: list[ApiKey] = Field(..., description="List of active API keys")
 
 
@@ -311,7 +311,7 @@ class RateLimitLogEntry(BaseModel):
 class RateLimitLogsResponse(BaseModel):
     """Rate limit logs response"""
 
-    object: Literal["list"] = Field(..., description="Object type")
+    object: str = Field(..., description='Object type, normally ``"list"``')
     data: list[RateLimitLogEntry] = Field(..., description="The last 50 rate limit logs")
 
 

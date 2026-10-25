@@ -7,7 +7,7 @@ including native Venice image generation and OpenAI-compatible endpoints.
 
 import base64
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -173,6 +173,8 @@ class SimpleImageData(BaseModel):
 class SimpleImageGenerationResponse(VeniceBaseModel):
     """OpenAI-compatible image generation response"""
 
+    model_config = ConfigDict(extra="allow")
+
     created: int = Field(..., description="Unix timestamp for when the request was created")
     data: list[SimpleImageData] = Field(..., description="Array of generated image objects")
 
@@ -182,7 +184,7 @@ class ImageStylesResponse(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    object: Literal["list"] = Field(..., description="Object type")
+    object: str = Field(..., description='Object type, normally ``"list"``')
     data: list[str] = Field(..., description="List of available image styles")
 
 
