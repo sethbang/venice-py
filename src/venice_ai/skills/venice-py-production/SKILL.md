@@ -173,7 +173,7 @@ The client already retries below this layer, and only where a resend cannot bill
 
 ## Prompt caching
 
-For long, mostly-static prompts (system prompt + retrieved docs + per-turn user query), Venice caches the prompt prefix automatically on supporting models, adding Claude's cache markers itself. `prompt_cache_key` raises the odds that a request reaches a server holding the prefix, `prompt_cache_retention` asks for a longer lifetime, and a `cache_control={"type": "ephemeral"}` marker is only needed for something Venice would not cache on its own (a long document in a single-turn Claude request). Read hits and writes from `response.usage.cached_tokens` / `cache_write_tokens`. `resolve_chat(require_prompt_caching=True)` only checks for a listed cache price, so measure hits on the model you pick.
+For long, mostly-static prompts (system prompt + retrieved docs + per-turn user query), Venice caches the prompt prefix automatically on supporting models, adding Claude's cache markers itself. `prompt_cache_key` raises the odds that a request reaches a server holding the prefix, `prompt_cache_retention` asks for a longer lifetime, and a `cache_control={"type": "ephemeral"}` marker is only needed for something Venice would not cache on its own (a long document in a single-turn Claude request). It goes on a content part or an assistant/tool message; add `"ttl": "1h"` for a longer-lived, pricier write. Read hits and writes from `response.usage.cached_tokens` / `cache_write_tokens`. `resolve_chat(require_prompt_caching=True)` only checks for a listed cache price, so measure hits on the model you pick.
 
 See `references/prompt-caching.md`. Pattern from `examples/advanced/prompt_caching.py`.
 

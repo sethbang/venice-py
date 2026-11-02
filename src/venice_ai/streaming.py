@@ -415,13 +415,20 @@ class Stream(Generic[ChunkType]):
 def _merge_tool_call_delta(calls: dict[int, dict[str, Any]], tc: Any) -> None:
     """Fold one streamed tool-call delta into the call it continues.
 
-    Function calls accumulate ``name`` and ``arguments``. A call of another
-    type (e.g. ``"custom"``) keeps its own payload, read from the delta's extra
-    fields, with string values concatenated across deltas.
+    Function calls accumulate ``name`` and ``arguments``; other fields on the
+    function are kept. A call of another type (e.g. ``"custom"``) keeps its own
+    payload, read from the delta's extra fields.
     """
     entry = calls.setdefault(
         tc.index or 0,
-        {"id": "", "type": tc.type or "function", "name": "", "arguments": "", "extra": {}},
+        {
+            "id": "",
+            "type": tc.type or "function",
+            "name": "",
+            "arguments": "",
+            "extra": {},
+            "function_extra": {},
+        },
     )
     if tc.id:
         entry["id"] = tc.id
@@ -432,8 +439,19 @@ def _merge_tool_call_delta(calls: dict[int, dict[str, Any]], tc: Any) -> None:
             entry["name"] += tc.function.name
         if tc.function.arguments:
             entry["arguments"] += tc.function.arguments
-    for key, value in (tc.model_extra or {}).items():
-        current = entry["extra"].get(key)
+        _merge_extra(entry["function_extra"], tc.function.model_extra)
+    _merge_extra(entry["extra"], tc.model_extra)
+
+
+def _merge_extra(target: dict[str, Any], extra: dict[str, Any] | None) -> None:
+    """Fold a delta's unmodelled fields into ``target``.
+
+    A top-level value replaces the previous one, so a value repeated on every
+    delta is kept once. Inside a dict payload, strings are concatenated across
+    deltas, the way a custom tool call streams its input.
+    """
+    for key, value in (extra or {}).items():
+        current = target.get(key)
         if isinstance(value, dict) and isinstance(current, dict):
             for sub_key, sub_value in value.items():
                 previous = current.get(sub_key)
@@ -442,14 +460,18 @@ def _merge_tool_call_delta(calls: dict[int, dict[str, Any]], tc: Any) -> None:
                 else:
                     current[sub_key] = sub_value
         else:
-            entry["extra"][key] = dict(value) if isinstance(value, dict) else value
+            target[key] = dict(value) if isinstance(value, dict) else value
 
 
 def _assembled_tool_call(entry: dict[str, Any]) -> dict[str, Any]:
     """The tool call a stream's deltas add up to, shaped like a non-streaming one."""
     call: dict[str, Any] = {"id": entry["id"], "type": entry["type"], **entry["extra"]}
     if entry["type"] == "function" or entry["name"] or entry["arguments"]:
-        call["function"] = {"name": entry["name"], "arguments": entry["arguments"]}
+        call["function"] = {
+            **entry["function_extra"],
+            "name": entry["name"],
+            "arguments": entry["arguments"],
+        }
     return call
 
 
@@ -546,8 +568,9 @@ class ChatStream(Stream["ChatCompletionChunk"]):
     async def collect(self) -> ChatCompletionResponse:
         """Consume the entire stream and return a ``ChatCompletionResponse``.
 
-        Accumulates text, reasoning content, and tool calls from all chunks
-        into a single non-streaming response object.
+        Accumulates text, reasoning content, tool calls, ``thought_signature``
+        and any delta field the SDK does not model from all chunks into a
+        single non-streaming response object.
 
         .. note::
             Only the first choice (index 0) is tracked. For ``n > 1`` requests,
@@ -565,6 +588,8 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         reasoning_summary_parts: list[str] = []
         reasoning_encrypted_parts: list[str] = []
         tool_calls_by_index: dict[int, dict[str, Any]] = {}
+        thought_signature: str | None = None
+        message_extra: dict[str, Any] = {}
         model = ""
         stream_id = ""
         created = 0
@@ -599,6 +624,9 @@ class ChatStream(Stream["ChatCompletionChunk"]):
                     if choice.delta.tool_calls:
                         for tc in choice.delta.tool_calls:
                             _merge_tool_call_delta(tool_calls_by_index, tc)
+                    if choice.delta.thought_signature:
+                        thought_signature = choice.delta.thought_signature
+                    _merge_extra(message_extra, choice.delta.model_extra)
                 if choice.finish_reason:
                     finish_reason = choice.finish_reason
             if chunk.usage:
@@ -611,6 +639,7 @@ class ChatStream(Stream["ChatCompletionChunk"]):
             )
 
         message: dict[str, object] = {
+            **message_extra,
             "role": "assistant",
             "content": "".join(text_parts) if text_parts else None,
             "reasoning_content": _assemble_reasoning(
@@ -626,6 +655,8 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         # there is a block, so responses without reasoning gain no stray key.
         if reasoning_encrypted_parts:
             message["reasoning_encrypted"] = True
+        if thought_signature:
+            message["thought_signature"] = thought_signature
 
         payload: dict[str, object] = {
             "id": stream_id,
@@ -694,6 +725,8 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         reasoning_summary_parts: list[str] = []
         reasoning_encrypted_parts: list[str] = []
         tool_calls_by_index: dict[int, dict[str, Any]] = {}
+        thought_signature: str | None = None
+        message_extra: dict[str, Any] = {}
         model = ""
         stream_id = ""
         created = 0
@@ -729,6 +762,9 @@ class ChatStream(Stream["ChatCompletionChunk"]):
                     if choice.delta.tool_calls:
                         for tc in choice.delta.tool_calls:
                             _merge_tool_call_delta(tool_calls_by_index, tc)
+                    if choice.delta.thought_signature:
+                        thought_signature = choice.delta.thought_signature
+                    _merge_extra(message_extra, choice.delta.model_extra)
                 if choice.finish_reason:
                     finish_reason = choice.finish_reason
             if chunk.usage:
@@ -741,6 +777,7 @@ class ChatStream(Stream["ChatCompletionChunk"]):
             )
 
         message: dict[str, object] = {
+            **message_extra,
             "role": "assistant",
             "content": "".join(text_parts) if text_parts else None,
             "reasoning_content": _assemble_reasoning(
@@ -756,6 +793,8 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         # there is a block, so responses without reasoning gain no stray key.
         if reasoning_encrypted_parts:
             message["reasoning_encrypted"] = True
+        if thought_signature:
+            message["thought_signature"] = thought_signature
 
         payload: dict[str, object] = {
             "id": stream_id,

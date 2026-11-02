@@ -137,6 +137,10 @@ CLOSED_ENUM_EXEMPTIONS: dict[str, str] = {
         "chat response schema carries no image parts, and ChatMessage reuses "
         "ImageContent only so message history can be passed back in"
     ),
+    "venice_ai.core.models.common.CacheControl.ttl": (
+        "request cache breakpoint; a ttl the server rejects must fail before the "
+        "request is sent. Response parts type cache_control as an open dict"
+    ),
     "venice_ai.types.api.audio.VoiceDetail.gender": (
         "derived client-side from the voice ID prefix, never read from the server"
     ),

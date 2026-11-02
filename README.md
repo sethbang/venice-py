@@ -198,8 +198,8 @@ response.save("generated.png")          # single image
 # response.save_all("output_dir")        # all images
 ```
 
-Pass-through fields on `image.multi_edit()` now include `model=...`, which the
-SDK forwards to the API as `modelId` (previously dropped silently).
+`image.multi_edit()` also takes `model=...`, which the SDK sends to the API as
+`modelId`.
 
 [-> `examples/image/text_to_image.py`](https://github.com/sethbang/venice-py/blob/main/examples/image/text_to_image.py) | [-> `examples/image/web_search.py`](https://github.com/sethbang/venice-py/blob/main/examples/image/web_search.py)
 
@@ -355,7 +355,7 @@ request and response schemas may change without notice.
 page = await client.augment.scrape(url="https://example.com")
 print(page.content)
 
-# Structured web search (Brave default; Google also supported)
+# Structured web search (Brave default; Exa and Google also supported)
 hits = await client.augment.search(query="latest AI news", limit=5)
 for r in hits.results:
     print(r.title, r.url)

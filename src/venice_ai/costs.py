@@ -56,7 +56,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .types.api.chat import ChatCompletionResponse as ChatCompletion
 from .types.api.embeddings import EmbeddingsResponse
@@ -93,6 +93,8 @@ class ChatCostEstimate(BaseModel):
     model, send a one-word request once with ``max_completion_tokens=1`` and
     add the difference between its billed prompt tokens and its estimate.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     model: str = Field(..., description="Model id used for the estimate")
     prompt_tokens: int = Field(

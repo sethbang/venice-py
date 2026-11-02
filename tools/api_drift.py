@@ -543,6 +543,8 @@ class Item:
     ``status_codes``, ``response_content_types``, ``response_fields_added``,
     ``response_fields_removed``, ``enum_members_added``,
     ``enum_members_removed``, ``enum_added`` or ``enum_removed``.
+    ``nested_paths`` are the param paths folded under ``detail``, and
+    ``nested`` is their count.
     """
 
     kind: str
@@ -550,12 +552,13 @@ class Item:
     detail: str = ""
     values: tuple[str, ...] = ()
     nested: int = 0
+    nested_paths: tuple[str, ...] = ()
     group: str = REVIEW
     reason: str = ""
 
 
-def _fold_nested(paths: list[str]) -> list[tuple[str, int]]:
-    """Keep each path whose parent is not also listed, with its nested count."""
+def _fold_nested(paths: list[str]) -> list[tuple[str, tuple[str, ...]]]:
+    """Keep each path with no listed ancestor, with the paths folded under it."""
     listed = set(paths)
 
     def parents(path: str) -> list[str]:
@@ -565,7 +568,7 @@ def _fold_nested(paths: list[str]) -> list[tuple[str, int]]:
         return out
 
     kept = [p for p in sorted(paths) if not any(q in listed for q in parents(p))]
-    return [(p, sum(1 for q in paths if q != p and p in parents(q))) for p in kept]
+    return [(p, tuple(sorted(q for q in paths if q != p and p in parents(q)))) for p in kept]
 
 
 def drift_items(result: dict[str, Any]) -> list[Item]:
@@ -576,8 +579,14 @@ def drift_items(result: dict[str, Any]) -> list[Item]:
     for ep, entry in result["changed_endpoints"].items():
         for label, (added, removed) in entry.items():
             if label == "params":
-                items += [Item("param_added", ep, p, nested=n) for p, n in _fold_nested(added)]
-                items += [Item("param_removed", ep, p, nested=n) for p, n in _fold_nested(removed)]
+                items += [
+                    Item("param_added", ep, p, nested=len(n), nested_paths=n)
+                    for p, n in _fold_nested(added)
+                ]
+                items += [
+                    Item("param_removed", ep, p, nested=len(n), nested_paths=n)
+                    for p, n in _fold_nested(removed)
+                ]
                 continue
             if label == "request content types":
                 kind = "request_content_types"

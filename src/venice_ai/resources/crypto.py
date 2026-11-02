@@ -170,7 +170,8 @@ class Crypto(APIResource["VeniceClient"]):
         :type network: str
         :param requests: Up to 100 JSON-RPC requests. Each may be a
             :class:`JsonRpcRequest` instance or a plain dict — dicts are
-            validated through :class:`JsonRpcRequest` before being sent.
+            validated through :class:`JsonRpcRequest` before being sent, and
+            keys it does not declare are sent as given.
         :type requests: Sequence[JsonRpcRequest | dict[str, Any]]
         :param idempotency_key: Optional idempotency key, same semantics as
             :meth:`rpc`.

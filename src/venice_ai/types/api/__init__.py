@@ -57,6 +57,7 @@ from .augment import (
     AugmentSearchResponse,
     AugmentSearchResult,
     AugmentTextParserResponse,
+    SearchProvider,
 )
 from .base import (
     BaseListResponse,
@@ -528,6 +529,7 @@ __all__ = [
     "AugmentSearchResult",
     "AugmentSearchResponse",
     "AugmentTextParserResponse",
+    "SearchProvider",
     # From crypto module
     "BatchJsonRpcResponse",
     "CryptoNetworksResponse",

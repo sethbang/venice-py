@@ -80,6 +80,8 @@ class ChatCompletionTopLogprob(BaseModel):
     confidence and exploring alternative token choices.
     """
 
+    model_config = ConfigDict(extra="allow")
+
     token: str
     """The token string that was considered at this position.
 
@@ -110,6 +112,8 @@ class ChatCompletionTokenLogprob(BaseModel):
     the token itself, its probability, and alternative tokens that were
     considered at the same position.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     token: str
     """The actual token that was selected and generated.
@@ -146,6 +150,8 @@ class ChatCompletionChoiceLogprobs(BaseModel):
     Aggregates log probability information for all tokens in a completion choice.
     """
 
+    model_config = ConfigDict(extra="allow")
+
     content: list[ChatCompletionTokenLogprob] | None = Field(
         default=None,
         description="List of token-level log probability information for each token in the completion",
@@ -160,6 +166,8 @@ class ChatCompletionChunkToolCallFunction(BaseModel):
     Represents function call details within a streaming chat completion chunk.
     Fields are optional as they arrive incrementally.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     name: str | None = Field(
         default=None,
@@ -205,6 +213,8 @@ class ChatCompletionChunkChoiceDelta(BaseModel):
     Contains the incremental changes for a choice in a streaming chat completion.
     """
 
+    model_config = ConfigDict(extra="allow")
+
     role: str | None = Field(default=None)
     """The role for this delta, usually ``"assistant"``.
 
@@ -247,6 +257,13 @@ class ChatCompletionChunkChoiceDelta(BaseModel):
     :meth:`~venice_ai.streaming.ChatStream.collect`.
     """
 
+    thought_signature: str | None = Field(default=None)
+    """Opaque signature some models (Gemini) send for a text reply.
+
+    It arrives on a delta of its own; :meth:`~venice_ai.streaming.ChatStream.collect`
+    puts it on the assembled message so it can be passed back on the next turn.
+    """
+
     tool_calls: list[ChatCompletionChunkToolCall] | None = Field(default=None)
     """Incremental tool call information.
 
@@ -259,6 +276,8 @@ class ChatCompletionChunkChoice(BaseModel):
     """
     Represents a single choice within a streaming chat completion chunk.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     index: int
     """Index of this choice.
@@ -299,6 +318,8 @@ class ChatCompletionChunk(BaseModel):
     """
     Represents a single chunk in a streaming chat completion response.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     id: str
     """Unique identifier for this chat completion stream.

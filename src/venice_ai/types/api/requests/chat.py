@@ -17,6 +17,7 @@ from .common import (
     ANON_USER_ID_DESCRIPTION,
     AnonUserId,
     AudioContent,
+    CacheControlInput,
     FileContent,
     FileObject,
     ImageContent,
@@ -30,6 +31,7 @@ from .common import (
     SpecificToolChoice,
     StreamOptions,
     TextContent,
+    TextContentParam,
     TextResponseFormat,
     Tool,
     VeniceParameters,
@@ -40,11 +42,16 @@ from .common import (
 # Message Models
 # ============================================================================
 
+TextPartParam = Annotated[TextContent | TextContentParam, Field(union_mode="left_to_right")]
+"""A text part of a system or developer message: a :class:`TextContent`, or its
+dict form. A dict carrying keys TextContent does not declare is sent as given.
+"""
+
 
 class UserMessage(BaseModel):
     """User message for chat completions"""
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(validate_assignment=True, extra="allow")
 
     role: Literal["user"] = "user"
     content: str | list[MessageContentPartParam] = Field(
@@ -145,7 +152,7 @@ class UserMessageBuilder:
 class AssistantMessage(BaseModel):
     """Assistant message for chat completions"""
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(validate_assignment=True, extra="allow")
 
     role: Literal["assistant"] = "assistant"
     content: (
@@ -155,55 +162,85 @@ class AssistantMessage(BaseModel):
     ) = Field(
         default=None,
         description=(
-            "Text, or content parts. Text parts are TextContent; any other part "
-            "is passed back as the dict the API returned."
+            "Text, or content parts. A text part with only the fields TextContent "
+            "declares becomes TextContent; any other part, including a text part "
+            "with extra keys, is sent as the dict given."
         ),
     )
     name: str | None = None
     reasoning_content: str | None = None
     reasoning_details: list[Any] | None = None
     tool_calls: list[Any] | None = None
+    thought_signature: str | None = Field(
+        default=None, description="Signature a model returned with this message, passed back"
+    )
+    cache_control: CacheControlInput | None = Field(
+        default=None, description="Prompt-caching breakpoint at the end of this message"
+    )
 
     @field_validator("content")
     @classmethod
     def _reject_malformed_text_parts(cls, v: Any) -> Any:
-        """A text part that failed TextContent validation must not pass as a dict."""
+        """A text part that failed TextContent validation must not pass as a dict.
+
+        Only the fields TextContent declares are checked, so a part that also
+        carries keys the SDK does not model is sent as the dict it is.
+        """
         if isinstance(v, list):
             for part in v:
                 if isinstance(part, dict) and part.get("type") == "text":
-                    TextContent.model_validate(part)
+                    TextContent.model_validate(
+                        {k: val for k, val in part.items() if k in TextContent.model_fields}
+                    )
         return v
 
     @classmethod
     def from_response(
         cls, response: ChatCompletionResponse, choice_index: int = 0
     ) -> AssistantMessage:
-        """Create an AssistantMessage from a ChatCompletionResponse for multi-turn history."""
+        """Create an AssistantMessage from a ChatCompletionResponse for multi-turn history.
+
+        Fields the SDK does not model are carried over as well, so a value a
+        model expects back on the next turn is not lost. The ``cache_control``
+        the API echoes, on the message or on a content part, is not: where to
+        place a cache breakpoint is the caller's choice.
+        """
         choice = response.choices[choice_index]
         msg = choice.message
         content: str | list[TextContent | dict[str, Any]] | None
         if isinstance(msg.content, list):
-            content = [
-                part
-                if isinstance(part, (TextContent, dict))
-                else part.model_dump(mode="json", exclude_none=True)
-                for part in msg.content
-            ]
+            content = [_without_cache_control(part) for part in msg.content]
         else:
             content = msg.content
+        extra = {k: v for k, v in (msg.model_extra or {}).items() if k != "cache_control"}
         return cls(
             content=content,
             name=msg.name,
             reasoning_content=msg.reasoning_content,
             reasoning_details=msg.reasoning_details,
             tool_calls=msg.tool_calls,
+            thought_signature=msg.thought_signature,
+            **extra,
         )
+
+
+def _without_cache_control(part: Any) -> TextContent | dict[str, Any]:
+    """A response content part ready for history, minus its echoed ``cache_control``.
+
+    A text part stays a :class:`TextContent` unless it carries keys the SDK does
+    not model; then it goes back as a dict, so those keys are sent too.
+    """
+    if isinstance(part, TextContent) and not part.model_extra:
+        return part.model_copy(update={"cache_control": None}) if part.cache_control else part
+    if not isinstance(part, dict):
+        part = part.model_dump(mode="json", exclude_none=True)
+    return {k: v for k, v in part.items() if k != "cache_control"}
 
 
 class ToolMessage(BaseModel):
     """Tool message for chat completions"""
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(validate_assignment=True, extra="allow")
 
     role: Literal["tool"] = "tool"
     content: str = Field(..., description="Tool response content")
@@ -211,15 +248,18 @@ class ToolMessage(BaseModel):
     name: str | None = None
     reasoning_content: str | None = None
     tool_calls: list[Any] | None = None
+    cache_control: CacheControlInput | None = Field(
+        default=None, description="Prompt-caching breakpoint at the end of this message"
+    )
 
 
 class SystemMessage(BaseModel):
     """System message for chat completions"""
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(validate_assignment=True, extra="allow")
 
     role: Literal["system"] = "system"
-    content: str | list[TextContent] = Field(..., description="System message content")
+    content: str | list[TextPartParam] = Field(..., description="System message content")
     name: str | None = None
 
 
@@ -231,10 +271,10 @@ class DeveloperMessage(BaseModel):
     by Venice for models advertising developer-role support.
     """
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(validate_assignment=True, extra="allow")
 
     role: Literal["developer"] = "developer"
-    content: str | list[TextContent] = Field(..., description="Developer message content")
+    content: str | list[TextPartParam] = Field(..., description="Developer message content")
     name: str | None = None
 
 
@@ -253,7 +293,9 @@ validation at construction, and self-documenting call sites. Mappings in
 the OpenAI wire shape (``{"role": "user", "content": "hi"}``) are accepted
 too, and are validated into the corresponding model before the request is
 built, so a mistyped role or a missing field still raises rather than
-reaching the API.
+reaching the API. A message-level key the models do not declare is sent as
+given, so a response message passed back through
+:meth:`AssistantMessage.from_response` or ``model_dump()`` keeps it.
 
 Note that this is deliberately wider than ``ChatCompletionRequest.messages``,
 which stays model-only: that field is the validation boundary where mappings
@@ -438,6 +480,7 @@ __all__ = [
     "DeveloperMessage",
     # Message unions
     "ChatMessageParam",
+    "TextPartParam",
     # Request model
     "ChatCompletionRequest",
 ]

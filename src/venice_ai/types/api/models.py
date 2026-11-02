@@ -136,17 +136,23 @@ class ModelCapabilities(BaseModel):
 class TemperatureConstraint(BaseModel):
     """Temperature constraint specification"""
 
+    model_config = ConfigDict(extra="allow")
+
     default: float = Field(..., description="Default temperature value for the model")
 
 
 class TopPConstraint(BaseModel):
     """Top-p constraint specification"""
 
+    model_config = ConfigDict(extra="allow")
+
     default: float = Field(..., description="Default top_p value for the model")
 
 
 class StepsConstraint(BaseModel):
     """Steps constraint for image models"""
+
+    model_config = ConfigDict(extra="allow")
 
     default: float = Field(..., description="Default steps value for the model")
     max: float = Field(..., description="Maximum supported steps value for the model")

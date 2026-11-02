@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field
 class WebSearchCitation(BaseModel):
     """Web search citation object"""
 
+    model_config = ConfigDict(extra="allow")
+
     title: str = Field(..., description="Title of the cited source")
     url: str = Field(..., description="URL of the cited source")
     content: str = Field(..., description="Excerpt from the cited source")

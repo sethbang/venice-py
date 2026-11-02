@@ -347,9 +347,13 @@ def _concat_message_text(
         if isinstance(content, str):
             parts.append(content)
             continue
-        # Multimodal list — pull out only the text-shaped entries.
+        # Multimodal list — pull out only the text-shaped entries, whether a
+        # part is a model or its dict form.
         for chunk in content:
-            text = getattr(chunk, "text", None)
+            if isinstance(chunk, Mapping):
+                text = chunk.get("text") if chunk.get("type") == "text" else None
+            else:
+                text = getattr(chunk, "text", None)
             if isinstance(text, str):
                 parts.append(text)
     return " ".join(parts)
@@ -791,9 +795,10 @@ class ChatCompletions(APIResource["VeniceClient"]):
                 One of ``"none"``, ``"minimal"``, ``"low"``, ``"medium"``,
                 ``"high"``, ``"xhigh"``, or ``"max"``. Takes precedence
                 over ``reasoning.effort`` when both are set.
-            reasoning: Nested reasoning configuration. Accepts ``effort``
-                (same enum as ``reasoning_effort``) and ``summary``
-                (``"auto"`` / ``"concise"`` / ``"detailed"``).
+            reasoning: Nested reasoning configuration. Accepts ``enabled``
+                (bool), ``effort`` (same enum as ``reasoning_effort``) and
+                ``summary`` (``"auto"`` / ``"concise"`` / ``"detailed"``). A key
+                :class:`ReasoningConfig` does not declare is sent as given.
             prompt_cache_key: Routing hint to improve cache hit rates
                 across multi-turn conversations. Requests sharing the same
                 key are more likely to hit cached prompt prefixes.

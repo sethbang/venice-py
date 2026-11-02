@@ -297,3 +297,23 @@ def test_client_exposes_augment_namespace() -> None:
         import asyncio
 
         asyncio.run(client.close())
+
+
+@pytest.mark.asyncio
+async def test_search_accepts_exa(augment: Augment) -> None:
+    augment._client.post = AsyncMock(  # type: ignore[attr-defined]
+        return_value=AugmentSearchResponse(query="x", results=[])
+    )
+    await augment.search(query="x", search_provider="exa")
+
+    body = augment._client.post.call_args.kwargs["json_data"]  # type: ignore[attr-defined]
+    assert body == {"query": "x", "search_provider": "exa"}
+
+
+def test_search_rejects_an_unknown_provider() -> None:
+    from pydantic import ValidationError
+
+    from venice_ai.types.api.augment import AugmentSearchRequest
+
+    with pytest.raises(ValidationError):
+        AugmentSearchRequest(query="x", search_provider="zzz")  # type: ignore[arg-type]

@@ -452,8 +452,10 @@ def _load_impact():
 impact = _load_impact()
 
 
-def _report(tmp_path: Path, spec: dict[str, Any]) -> tuple[int, str, str]:
-    snapshot = _snapshot_of(tmp_path, BASE_SPEC)
+def _report(
+    tmp_path: Path, spec: dict[str, Any], base: dict[str, Any] = BASE_SPEC
+) -> tuple[int, str, str]:
+    snapshot = _snapshot_of(tmp_path, base)
     spec_path = _write_spec(tmp_path, spec, "new.yaml")
     report, title = tmp_path / "report.md", tmp_path / "title.txt"
     code = drift.main(
@@ -482,15 +484,30 @@ def _chat_props(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_field_no_request_model_has_needs_sdk_work(tmp_path):
+    base = copy.deepcopy(BASE_SPEC)
+    _chat_props(base)["stream_options"] = {
+        "type": "object",
+        "properties": {"include_usage": {"type": "boolean"}},
+    }
+    spec = copy.deepcopy(base)
+    _chat_props(spec)["stream_options"]["properties"]["brand_new_knob"] = {"type": "string"}
+    code, report, title = _report(tmp_path, spec, base)
+    assert code == 1
+    needs = _section(report, "Needs SDK work")
+    assert "`body.stream_options.brand_new_knob`" in needs, report
+    assert "ChatCompletionRequest" in needs
+    assert title == "Venice API drift: 1 needs SDK work"
+
+
+def test_new_message_field_is_passed_through_and_needs_review(tmp_path):
     spec = copy.deepcopy(BASE_SPEC)
     props = _chat_props(spec)["messages"]["items"]["anyOf"][1]["properties"]
     props["brand_new_knob"] = {"type": "string"}
-    code, report, title = _report(tmp_path, spec)
-    assert code == 1
-    needs = _section(report, "Needs SDK work")
-    assert "`body.messages[].brand_new_knob` added" in needs
-    assert "ChatCompletionRequest" in needs
-    assert title == "Venice API drift: 1 needs SDK work"
+    _, report, title = _report(tmp_path, spec)
+    review = _section(report, "Review")
+    assert "`body.messages[].brand_new_knob` added" in review, report
+    assert "passes unknown fields through" in review
+    assert title == "Venice API drift: 1 to review"
 
 
 def test_untyped_field_on_a_passthrough_request_model_needs_review(tmp_path):
@@ -584,7 +601,25 @@ def test_every_change_lands_in_exactly_one_group(tmp_path):
 
 def test_nested_new_fields_fold_under_their_parent():
     folded = drift._fold_nested(["images", "images[].base64", "images[].content_type", "other.x"])
-    assert folded == [("images", 2), ("other.x", 0)]
+    assert folded == [
+        ("images", ("images[].base64", "images[].content_type")),
+        ("other.x", ()),
+    ]
+
+
+def test_a_folded_nested_field_is_classified_too(tmp_path):
+    """A new parent the SDK models does not hide a new child it does not."""
+    spec = copy.deepcopy(BASE_SPEC)
+    _chat_props(spec)["stream_options"] = {
+        "type": "object",
+        "properties": {"brand_new_knob": {"type": "string"}},
+    }
+    code, report, title = _report(tmp_path, spec)
+    assert code == 1
+    needs = _section(report, "Needs SDK work")
+    assert "`body.stream_options` added (and 1 nested field)" in needs, report
+    assert "stream_options.brand_new_knob" in needs
+    assert title == "Venice API drift: 1 needs SDK work"
 
 
 @pytest.mark.parametrize("failure", ["import", "drops-items"])
@@ -642,7 +677,6 @@ def test_mapped_request_models_cover_the_committed_snapshot():
         ("PATCH /api_keys", "consumptionLimit.vcu"),
         ("POST /api_keys", "consumptionLimit.vcu"),
         ("POST /api_keys/generate_web3_key", "consumptionLimit.vcu"),
-        ("POST /chat/completions", "messages[].thought_signature"),
     }
     data = json.loads(drift.DEFAULT_SNAPSHOT.read_text(encoding="utf-8"))
     unresolved = set()

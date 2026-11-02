@@ -109,16 +109,15 @@ class TestCoerceMessages:
             _coerce_messages([{"role": "tool", "content": "result"}])
 
     def test_unmodeled_field_handling_matches_the_request_model(self):
-        # Per-message fields the models don't declare are dropped, because the
-        # message models use pydantic's default extra="ignore". Only
-        # ChatCompletionRequest itself is extra="allow", and that governs
-        # top-level request fields. Coercing here must not diverge from
-        # handing the mapping straight to ChatCompletionRequest.
+        # A per-message field the models don't declare is kept and sent, the
+        # same whether the mapping is coerced here or handed straight to
+        # ChatCompletionRequest.
         mapping = {"role": "user", "content": "hi", "some_future_field": 1}
 
         (coerced,) = _coerce_messages([dict(mapping)])
         via_request = ChatCompletionRequest(model=_FAKE_CHAT_MODEL, messages=[dict(mapping)])
 
+        assert coerced.model_dump()["some_future_field"] == 1
         assert coerced.model_dump() == via_request.messages[0].model_dump()
 
 
@@ -337,3 +336,13 @@ class TestRunWithToolsAcceptsMappings:
         await chat.run_with_tools(model=_FAKE_CHAT_MODEL, messages=messages, tools=[a_tool])
 
         assert messages == [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.parametrize("role", ["user", "assistant", "system", "developer"])
+def test_cost_text_counts_dict_text_parts(role):
+    from venice_ai.resources.chat.completions import _concat_message_text
+
+    messages = _coerce_messages(
+        [{"role": role, "content": [{"type": "text", "text": "alpha", "future": 1}]}]
+    )
+    assert _concat_message_text(messages) == "alpha"

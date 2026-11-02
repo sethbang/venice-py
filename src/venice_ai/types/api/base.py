@@ -37,6 +37,8 @@ class DetailedError(BaseModel):
 class TimingInfo(BaseModel):
     """Timing information for API operations"""
 
+    model_config = ConfigDict(extra="allow")
+
     inferenceDuration: float = Field(..., description="Duration of inference in milliseconds")
     inferencePreprocessingTime: float = Field(..., description="Preprocessing time in milliseconds")
     inferenceQueueTime: float = Field(..., description="Queue waiting time in milliseconds")

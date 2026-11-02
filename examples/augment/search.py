@@ -5,9 +5,10 @@ Venice AI SDK - Augment: Web Search
 
 Demonstrates ``client.augment.search(...)`` — Venice's structured web-search
 endpoint. Returns a list of results (title, URL, content snippet, date)
-from either Brave (default, Zero Data Retention) or Google (anonymised
-proxy). The ``date`` field is often empty, and snippets can contain HTML
-highlighting such as ``<strong>``, so strip tags before showing or reusing them.
+from Brave (default, Zero Data Retention), Exa (also Zero Data Retention)
+or Google (anonymised proxy). The ``date`` field is often empty, and
+snippets can contain HTML highlighting such as ``<strong>``, so strip tags
+before showing or reusing them.
 
 **Pricing:** $0.01 per request.
 
@@ -297,7 +298,7 @@ async def main() -> int:
     print("✨ Search examples completed!")
     print("\n💡 Key concepts demonstrated:")
     print("   - Structured search results (title, url, content, date)")
-    print("   - Provider selection (brave default, google proxied)")
+    print("   - Provider selection (brave default vs google proxied; exa also available)")
     print("   - Grounding a chat answer in numbered sources, with each quote checked")
     print("     against the source it cites (anchoring, not fact-checking)")
     return 0

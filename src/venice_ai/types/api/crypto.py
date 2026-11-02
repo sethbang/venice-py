@@ -24,9 +24,11 @@ class JsonRpcRequest(BaseModel):
     Mirrors the body shape accepted by ``POST /crypto/rpc/{network}``. ``params``
     accepts the upstream chain's parameter list (or object); the proxy does not
     reshape it.
+
+    A key this model does not declare is sent as given.
     """
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     method: str = Field(
         ...,

@@ -484,3 +484,83 @@ async def test_unflagged_reasoning_keeps_arrival_order():
     assert response.choices[0].message.reasoning_content == "ab"
     assert "reasoning_encrypted" not in response.choices[0].message.model_extra
     assert stream.reasoning_summary == "ab"
+
+
+# ---------------------------------------------------------------------------
+# collect — message-level fields outside text, reasoning and tool calls
+# ---------------------------------------------------------------------------
+
+
+def _raw_chunk(delta: dict, finish_reason: str | None = None):
+    from venice_ai.types.api.streaming import ChatCompletionChunk
+
+    return ChatCompletionChunk.model_validate(
+        {
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "m",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+    )
+
+
+async def _collected(chunks, via: str):
+    stream = _stream(chunks)
+    if via == "collect":
+        return await stream.collect()
+    async for _ in stream.collect_with_deltas():
+        pass
+    return stream.final_response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via", ["collect", "collect_with_deltas"])
+async def test_collect_keeps_a_thought_signature_sent_on_its_own_delta(via):
+    """Gemini streams a text reply's signature as a separate delta."""
+    from venice_ai.types.api.requests.chat import AssistantMessage
+
+    chunks = [
+        _raw_chunk({"role": "assistant", "content": "2"}),
+        _raw_chunk({"thought_signature": "SIG"}),
+        _raw_chunk({}, finish_reason="stop"),
+    ]
+    response = await _collected(chunks, via)
+    assert response.choices[0].message.thought_signature == "SIG"
+    assert AssistantMessage.from_response(response).thought_signature == "SIG"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via", ["collect", "collect_with_deltas"])
+async def test_collect_keeps_unmodelled_delta_fields(via):
+    """A top-level value is the latest one sent, so a value a provider repeats on
+    every delta is not doubled; strings inside a dict payload are streamed text
+    and are concatenated."""
+    chunks = [
+        _raw_chunk({"content": "a", "future_field": "same", "items": [1]}),
+        _raw_chunk({"content": "b", "future_field": "same", "other": {"k": "1"}, "items": [2]}),
+        _raw_chunk({"other": {"k": "2"}}, finish_reason="stop"),
+    ]
+    response = await _collected(chunks, via)
+    extra = response.choices[0].message.model_extra
+    assert extra["future_field"] == "same"
+    assert extra["items"] == [2]
+    assert extra["other"] == {"k": "12"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via", ["collect", "collect_with_deltas"])
+async def test_collect_keeps_tool_call_and_function_extras_without_doubling(via):
+    def tc(**fields):
+        return _raw_chunk({"tool_calls": [{"index": 0, **fields}]})
+
+    chunks = [
+        tc(id="c1", type="function", thought_signature="SIG", function={"name": "f"}),
+        tc(thought_signature="SIG", function={"arguments": "{}", "strict": True}),
+        _raw_chunk({}, finish_reason="tool_calls"),
+    ]
+    response = await _collected(chunks, via)
+    (call,) = response.choices[0].message.tool_calls
+    dumped = call.model_dump(mode="json", exclude_none=True)
+    assert dumped["thought_signature"] == "SIG"
+    assert dumped["function"] == {"name": "f", "arguments": "{}", "strict": True}

@@ -5,7 +5,7 @@ Wraps the three ``/augment/*`` endpoints described at
 ``api-reference/endpoint/augment/``:
 
 - ``POST /augment/scrape`` — fetch a URL as markdown
-- ``POST /augment/search`` — web search (Brave or Google)
+- ``POST /augment/search`` — web search (Brave, Exa or Google)
 - ``POST /augment/text-parser`` — extract text from uploaded PDF/DOCX/XLSX/TXT
 
 The Venice docs mark this API as experimental — request and response shapes
@@ -27,6 +27,7 @@ from ..types.api.augment import (
     AugmentSearchRequest,
     AugmentSearchResponse,
     AugmentTextParserResponse,
+    SearchProvider,
 )
 
 if TYPE_CHECKING:
@@ -112,7 +113,7 @@ class Augment(APIResource["VeniceClient"]):
         *,
         query: str,
         limit: int | None = None,
-        search_provider: Literal["brave", "google"] | None = None,
+        search_provider: SearchProvider | None = None,
     ) -> AugmentSearchResponse:
         """Run a web search and return structured results.
 
@@ -120,9 +121,9 @@ class Augment(APIResource["VeniceClient"]):
         :type query: str
         :param limit: Maximum number of results (1–20, default 10).
         :type limit: Optional[int]
-        :param search_provider: ``"brave"`` (default; ZDR privacy) or ``"google"``
-            (proxied / anonymised).
-        :type search_provider: Optional[Literal["brave", "google"]]
+        :param search_provider: ``"brave"`` (default; ZDR privacy), ``"exa"``
+            (ZDR privacy) or ``"google"`` (proxied / anonymised).
+        :type search_provider: Optional[SearchProvider]
 
         :return: :class:`AugmentSearchResponse` with ``query`` and ``results``.
         :rtype: AugmentSearchResponse

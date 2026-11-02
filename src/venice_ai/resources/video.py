@@ -705,6 +705,11 @@ class Video(APIResource["VeniceClient"]):
             never both. Reference in the prompt as ``@Element1``,
             ``@Element2``, etc.
         :type elements: Optional[list[VideoElement | dict]]
+        :param consents: Provider consent attestations, e.g.
+            ``VideoConsents(seedance=SeedanceConsents(...))``. Seedance needs
+            them only when the submitted media contains faces; without them it
+            returns a 409 ``needs_consent`` with the policy text.
+        :type consents: Optional[VideoConsents | dict]
         :param scene_image_urls: Up to 4 scene reference images for
             element-aware models. Reference as ``@Image1``, ``@Image2``, etc.
         :type scene_image_urls: Optional[list[str]]

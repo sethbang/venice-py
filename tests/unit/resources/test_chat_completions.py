@@ -1185,3 +1185,41 @@ class TestChatCompletionsIntegration:
             # All provided parameters should be in request
             for key, value in params.items():
                 assert request_body[key] == value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_create_sends_message_cache_control_in_full(
+    chat_completions_resource, mock_client, sample_chat_response, stream
+):
+    """A message-level marker reaches the wire with its default ``type`` filled in."""
+    from venice_ai.types.api.requests.chat import AssistantMessage, ToolMessage, UserMessage
+    from venice_ai.types.api.requests.common import CacheControl
+
+    captured = {}
+
+    def mock_stream_request(*args, **kwargs):
+        captured["kwargs"] = kwargs
+
+        async def async_gen():
+            yield {"choices": [{"delta": {"content": "ok"}}]}
+
+        return async_gen()
+
+    mock_client._stream_request = mock_stream_request
+    mock_client.post.return_value = sample_chat_response
+
+    await chat_completions_resource.create(
+        model="m",
+        messages=[
+            UserMessage(content="look it up"),
+            AssistantMessage(tool_calls=[{"id": "c1", "type": "function"}]),
+            ToolMessage(content="r", tool_call_id="c1", cache_control=CacheControl(ttl="5m")),
+            {"role": "assistant", "content": "a", "cache_control": {"type": "ephemeral"}},
+        ],
+        stream=stream,
+    )
+
+    body = captured["kwargs"]["json_data"] if stream else mock_client.post.call_args[1]["json_data"]
+    assert body["messages"][2]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+    assert body["messages"][3]["cache_control"] == {"type": "ephemeral"}

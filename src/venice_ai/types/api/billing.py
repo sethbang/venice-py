@@ -119,7 +119,7 @@ class BillingUsageHistoryCsvPage(BaseModel):
     advances exactly like a JSON one.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(extra="allow", frozen=True)
 
     content: bytes = Field(..., description="The CSV document, as sent by the server")
     nextCursor: str | None = Field(
@@ -189,7 +189,7 @@ class BillingBalanceResponse(BaseModel):
         ),
     )
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
 
 # ============================================================================
