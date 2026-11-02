@@ -13,6 +13,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...core.models.common import VeniceBaseModel
 
+SearchProvider = Literal["brave", "exa", "google"]
+"""Search backend for ``/augment/search``.
+
+``brave`` (the default) and ``exa`` run with Zero Data Retention. ``google`` is
+proxied through Venice so the query is not tied to you.
+"""
+
 
 class AugmentScrapeRequest(BaseModel):
     """Request body for POST /augment/scrape."""
@@ -51,11 +58,12 @@ class AugmentSearchRequest(BaseModel):
         le=20,
         description="Maximum number of results to return (default 10, max 20).",
     )
-    search_provider: Literal["brave", "google"] | None = Field(
+    search_provider: SearchProvider | None = Field(
         default=None,
         description=(
             "Search provider. ``brave`` uses Brave Search with Zero Data Retention "
-            "(default). ``google`` proxies through Venice for anonymised queries."
+            "(default). ``exa`` uses Exa with Zero Data Retention. ``google`` "
+            "proxies through Venice for anonymised queries."
         ),
     )
 
@@ -105,4 +113,5 @@ __all__ = [
     "AugmentSearchResult",
     "AugmentSearchResponse",
     "AugmentTextParserResponse",
+    "SearchProvider",
 ]

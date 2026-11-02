@@ -371,7 +371,20 @@ def _with(item: drift.Item, group: str, reason: str) -> drift.Item:
 
 
 def _classify_param_added(item: drift.Item) -> drift.Item:
-    path = _body_path(item.detail)
+    """Classify an added field and every field folded under it.
+
+    The most severe verdict wins; on a tie the outermost field's verdict stands.
+    """
+    worst = _classify_added_path(item, item.detail)
+    for nested in item.nested_paths:
+        verdict = _classify_added_path(item, nested)
+        if _RANK[verdict.group] < _RANK[worst.group]:
+            worst = dataclasses.replace(verdict, reason=f"{verdict.reason} (`{nested}`)")
+    return worst
+
+
+def _classify_added_path(item: drift.Item, param: str) -> drift.Item:
+    path = _body_path(param)
     if path is None:
         return _with(item, drift.REVIEW, "Query, path and header parameters are not checked")
     if item.subject in UNMODELLED:

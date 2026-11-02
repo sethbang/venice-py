@@ -8,7 +8,7 @@ and Web3 authentication functionality.
 from enum import StrEnum
 from typing import Any, Final
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 KNOWN_API_KEY_TYPES: Final[tuple[str, ...]] = ("INFERENCE", "ADMIN")
 """:attr:`ApiKey.apiKeyType` and :attr:`CreatedApiKey.apiKeyType` values this
@@ -50,6 +50,8 @@ _IP_ALLOWLIST_RESPONSE_DESCRIPTION = (
 class ConsumptionLimits(BaseModel):
     """API key consumption limits"""
 
+    model_config = ConfigDict(extra="allow")
+
     usd: float | None = Field(default=None, description="USD limit")
     diem: float | None = Field(default=None, description="Diem limit")
     vcu: float | None = Field(
@@ -63,6 +65,8 @@ class ConsumptionLimits(BaseModel):
 
 class TrailingSevenDaysUsage(BaseModel):
     """Usage statistics for trailing 7 days"""
+
+    model_config = ConfigDict(extra="allow")
 
     usd: str = Field(..., description="USD usage in the trailing 7 days")
     diem: str = Field(..., description="Diem usage in the trailing 7 days")
@@ -86,6 +90,8 @@ class TrailingSevenDaysUsage(BaseModel):
 class CurrentPeriodUsage(BaseModel):
     """Usage accrued in the current limit period (per ``limitPeriod``)."""
 
+    model_config = ConfigDict(extra="allow")
+
     usd: str | None = Field(default=None, description="USD usage in the current period")
     diem: str | None = Field(default=None, description="Diem usage in the current period")
     vcu: str | None = Field(
@@ -104,6 +110,8 @@ class CurrentPeriodUsage(BaseModel):
 class ApiKeyUsage(BaseModel):
     """API key usage statistics"""
 
+    model_config = ConfigDict(extra="allow")
+
     trailingSevenDays: TrailingSevenDaysUsage = Field(
         ..., description="Usage statistics aggregated over the trailing 7-day period"
     )
@@ -111,6 +119,8 @@ class ApiKeyUsage(BaseModel):
 
 class ApiKey(BaseModel):
     """API key information"""
+
+    model_config = ConfigDict(extra="allow")
 
     id: str = Field(..., description="API Key ID")
     apiKeyType: str = Field(
@@ -167,6 +177,8 @@ class ApiKeysListResponse(BaseModel):
 class CreatedApiKey(BaseModel):
     """Created API key response data"""
 
+    model_config = ConfigDict(extra="allow")
+
     id: str = Field(..., description="The API Key ID")
     apiKey: str = Field(..., description="The full API key - save immediately!")
     apiKeyType: str = Field(
@@ -198,6 +210,8 @@ class CreateApiKeyResponse(BaseModel):
 class DeleteApiKeyResponse(BaseModel):
     """Delete API key response"""
 
+    model_config = ConfigDict(extra="allow")
+
     success: bool = Field(..., description="Success status")
 
 
@@ -210,6 +224,8 @@ class ApiKeyDetailsResponse(BaseModel):
     the field defaults to ``None`` there.
     """
 
+    model_config = ConfigDict(extra="allow")
+
     data: ApiKey = Field(..., description="API key details")
     success: bool | None = Field(
         default=None, description="Whether the update was successful (present on PATCH responses)"
@@ -219,6 +235,8 @@ class ApiKeyDetailsResponse(BaseModel):
 class RateLimit(BaseModel):
     """Individual rate limit rule"""
 
+    model_config = ConfigDict(extra="allow")
+
     type: str = Field(..., description="Rate limit type (RPM, RPD, TPM)")
     amount: float = Field(..., description="Rate limit amount")
 
@@ -226,12 +244,16 @@ class RateLimit(BaseModel):
 class ModelRateLimit(BaseModel):
     """Rate limits for a specific model"""
 
+    model_config = ConfigDict(extra="allow")
+
     apiModelId: str | None = Field(default=None, description="The ID of the API model")
     rateLimits: list[RateLimit] = Field(..., description="Rate limit rules for this model")
 
 
 class ApiTier(BaseModel):
     """API tier information"""
+
+    model_config = ConfigDict(extra="allow")
 
     id: str = Field(..., description="The ID of the API tier")
     isCharged: bool = Field(..., description="Whether the API key is pay per use")
@@ -243,6 +265,8 @@ from venice_ai.core.models.common import Balances  # noqa: E402
 
 class RateLimitsData(BaseModel):
     """Rate limits response data"""
+
+    model_config = ConfigDict(extra="allow")
 
     accessPermitted: bool = Field(..., description="Whether API key has access to inference APIs")
     apiTier: ApiTier = Field(..., description="API tier information")
@@ -261,6 +285,8 @@ class RateLimitsData(BaseModel):
 
 class RateLimitsResponse(BaseModel):
     """Rate limits endpoint response"""
+
+    model_config = ConfigDict(extra="allow")
 
     data: RateLimitsData = Field(..., description="Rate limits and balance information")
 
@@ -295,6 +321,8 @@ class RateLimitType(StrEnum):
 class RateLimitLogEntry(BaseModel):
     """Rate limit violation log entry"""
 
+    model_config = ConfigDict(extra="allow")
+
     apiKeyId: str = Field(..., description="API key that exceeded the limit")
     modelId: str = Field(..., description="Model being used when limit was exceeded")
     rateLimitTier: str = Field(..., description="API tier of the rate limit")
@@ -310,6 +338,8 @@ class RateLimitLogEntry(BaseModel):
 
 class RateLimitLogsResponse(BaseModel):
     """Rate limit logs response"""
+
+    model_config = ConfigDict(extra="allow")
 
     object: str = Field(..., description='Object type, normally ``"list"``')
     data: list[RateLimitLogEntry] = Field(..., description="The last 50 rate limit logs")

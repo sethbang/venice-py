@@ -34,7 +34,11 @@ class VideoElement(BaseModel):
     images (``frontal_image_url`` and/or ``reference_image_urls``) or a single
     reference ``video_url``. The API rejects an element that carries both, and
     an element with neither describes nothing.
+
+    A key this model does not declare is sent as given.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     frontal_image_url: str | None = Field(
         default=None,
@@ -182,7 +186,11 @@ class SeedanceConsents(BaseModel):
     Required by ``POST /video/queue`` only when the submitted media contains
     faces; the API returns a 409 ``needs_consent`` (with the policy text)
     otherwise. Each flag must be ``True`` (swagger declares ``enum: [true]``).
+
+    A key this model does not declare is sent as given.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     confirmed_terms_and_privacy: Literal[True] = Field(
         ...,
@@ -199,7 +207,12 @@ class SeedanceConsents(BaseModel):
 
 
 class VideoConsents(BaseModel):
-    """Provider-specific consent attestations for video generation."""
+    """Provider-specific consent attestations for video generation.
+
+    A key this model does not declare is sent as given.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     seedance: SeedanceConsents | None = Field(
         default=None, description="Seedance face-media consent attestations."

@@ -36,6 +36,8 @@ _ParsedT = TypeVar("_ParsedT", bound=BaseModel, covariant=True)
 class ToolCallFunction(BaseModel):
     """Function call details in a tool call response."""
 
+    model_config = ConfigDict(extra="allow")
+
     name: str = Field(..., description="The name of the function to call")
     arguments: str = Field(
         ..., description="The arguments to call the function with, as JSON string"
@@ -109,7 +111,9 @@ class ChatMessageTextContent(TextContent):
     model_config = ConfigDict(extra="allow")
 
     text: str = Field(..., description="The text content; ``null`` from the API reads as empty")
-    cache_control: dict[str, Any] | None = Field(
+    # Widened from CacheControlInput on purpose: an echo must not fail the
+    # response, while requests keep the typed type/ttl values.
+    cache_control: dict[str, Any] | None = Field(  # type: ignore[assignment]  # pyright: ignore[reportIncompatibleVariableOverride]
         default=None, description="Cache control echoed by the API, as sent"
     )
 
@@ -146,7 +150,9 @@ class ChatMessageImageContent(ImageContent):
     image_url: ChatMessageImageUrl = Field(  # pyright: ignore[reportIncompatibleVariableOverride]
         ..., description="Image URL information"
     )
-    cache_control: dict[str, Any] | None = Field(
+    # Widened from CacheControlInput on purpose: an echo must not fail the
+    # response, while requests keep the typed type/ttl values.
+    cache_control: dict[str, Any] | None = Field(  # type: ignore[assignment]  # pyright: ignore[reportIncompatibleVariableOverride]
         default=None, description="Cache control echoed by the API, as sent"
     )
 
@@ -225,6 +231,14 @@ class ChatMessage(BaseModel):
     The API instructs clients to pass these back verbatim on subsequent
     turns to preserve thought signatures, so they must survive the round
     trip rather than being dropped on parse.
+    """
+
+    thought_signature: str | None = None
+    """Opaque signature some models (Gemini) put on a text reply.
+
+    Pass it back on the next turn, as :meth:`AssistantMessage.from_response`
+    does. On a tool-calling reply it arrives inside each ``tool_calls`` entry
+    instead.
     """
 
 

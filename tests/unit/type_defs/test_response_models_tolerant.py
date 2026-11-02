@@ -11,6 +11,11 @@ else the call returned:
 - a numeric or length constraint (``ge``, ``le``, ``min_length``, ...);
 - a union of tagged models with no catch-all arm.
 
+A model must also keep what it does not declare: pydantic's default
+``extra="ignore"`` parses the response but discards a new field without a
+trace, so every response model sets ``extra="allow"`` and exposes such a field
+in ``model_extra``.
+
 The models checked here are every model reachable from what a resource method
 returns, plus the model-spec subclasses ``ModelResponse`` picks at validation
 time. ``test_every_server_model_is_checked`` makes sure a new response model
@@ -88,6 +93,9 @@ NOT_FROM_SERVER.update(
         "venice_ai.core.models.base.VeniceBaseModel": "base class; subclasses are checked",
         "venice_ai.core.models.base.TimestampMixin": "mixin; models using it are checked",
         "venice_ai.core.models.common.AudioContent": "request content part",
+        "venice_ai.core.models.common.CacheControl": (
+            "request cache breakpoint; response parts type cache_control as an open dict"
+        ),
         "venice_ai.core.models.common.ConsumptionLimit": "request-side API key limit",
         "venice_ai.core.models.common.FileContent": "request content part",
         "venice_ai.core.models.common.FileObject": "request content part payload",
@@ -462,9 +470,11 @@ def test_discovery_reaches_the_response_surface() -> None:
 
 @pytest.mark.parametrize("model", RESPONSE_MODELS, ids=[_key(c) for c in RESPONSE_MODELS])
 def test_response_model_keeps_unknown_fields(model: type[BaseModel]) -> None:
-    assert model.model_config.get("extra") != "forbid", (
-        f"{_key(model)} forbids extra fields; a field the server adds would fail "
-        'the whole response. Set model_config = ConfigDict(extra="allow").'
+    extra = model.model_config.get("extra", "ignore")
+    assert extra == "allow", (
+        f'{_key(model)} has extra="{extra}"; a field the server adds would '
+        + ("fail the whole response" if extra == "forbid" else "be dropped without a trace")
+        + '. Set model_config = ConfigDict(extra="allow").'
     )
 
 

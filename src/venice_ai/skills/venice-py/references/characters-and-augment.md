@@ -76,7 +76,7 @@ Useful for evaluating character quality before using one in a production app.
 response = await client.augment.search(
     query="EU AI Act 2026 enforcement timeline",
     limit=10,                                   # int, 1-20, default 10
-    search_provider="brave",                    # "brave" (default, ZDR) or "google" (proxied)
+    search_provider="brave",                    # "brave" (default, ZDR), "exa" (ZDR) or "google" (proxied)
 )
 for r in response.results:
     print(r.title, r.url, r.content[:100])         # result text is `.content`, not `.snippet`
@@ -84,6 +84,7 @@ for r in response.results:
 
 `search_provider` choices:
 - **`"brave"`** (default) — Zero-Data-Retention privacy. Recommended.
+- **`"exa"`** — Exa search, also Zero-Data-Retention.
 - **`"google"`** — proxied / anonymized through Venice. Useful when Brave's results are sparse for your query.
 
 Combine with chat for RAG:

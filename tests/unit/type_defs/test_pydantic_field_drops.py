@@ -259,3 +259,174 @@ def test_rate_limit_log_entry_tolerates_an_unknown_type():
 
     entry = RateLimitLogEntry.model_validate(_rate_limit_log_wire("CONCURRENCY"))
     assert entry.rateLimitType == "CONCURRENCY"
+
+
+# ---------------------------------------------------------------------------
+# cache_control on assistant and tool messages reaches the wire, and is
+# validated the way the server validates it (type "ephemeral", ttl 5m or 1h).
+# ---------------------------------------------------------------------------
+def _sent_messages(*messages):
+    req = ChatCompletionRequest(model="x", messages=[UserMessage(content="hi"), *messages])
+    return req.model_dump(mode="json", exclude_none=True)["messages"][1:]
+
+
+def test_assistant_and_tool_messages_send_cache_control_from_dicts():
+    sent = _sent_messages(
+        {"role": "assistant", "content": "a", "cache_control": {"type": "ephemeral"}},
+        {
+            "role": "tool",
+            "content": "r",
+            "tool_call_id": "t1",
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        },
+    )
+    assert sent[0]["cache_control"] == {"type": "ephemeral"}
+    assert sent[1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+def test_message_cache_control_accepts_the_model_form():
+    from venice_ai.types.api.requests.chat import ToolMessage
+    from venice_ai.types.api.requests.common import CacheControl
+
+    sent = _sent_messages(
+        ToolMessage(content="r", tool_call_id="t1", cache_control=CacheControl(ttl="5m"))
+    )
+    assert sent[0]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+
+
+def test_cache_control_rejects_values_the_server_rejects():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AssistantMessage(content="a", cache_control={"type": "zzz"})  # type: ignore[typeddict-item]
+    with pytest.raises(ValidationError):
+        AssistantMessage(content="a", cache_control={"type": "ephemeral", "ttl": "2h"})  # type: ignore[typeddict-item]
+
+
+def test_cache_control_keeps_keys_the_sdk_does_not_model():
+    sent = _sent_messages(
+        {"role": "assistant", "content": "a", "cache_control": {"type": "ephemeral", "scope": "x"}}
+    )
+    assert sent[0]["cache_control"] == {"type": "ephemeral", "scope": "x"}
+
+
+def test_content_part_cache_control_is_validated_and_sent():
+    import pytest
+    from pydantic import ValidationError
+
+    from venice_ai.types.api.requests.common import TextContent
+
+    part = TextContent(type="text", text="doc", cache_control={"type": "ephemeral", "ttl": "1h"})
+    sent = _sent_messages({"role": "assistant", "content": [part]})
+    assert sent[0]["content"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    with pytest.raises(ValidationError):
+        TextContent(type="text", text="doc", cache_control={"type": "zzz"})  # type: ignore[typeddict-item]
+
+
+# ---------------------------------------------------------------------------
+# Keys the SDK does not model survive a round trip from response to request.
+# ---------------------------------------------------------------------------
+def test_from_response_keeps_a_tool_call_thought_signature():
+    """Gemini puts thought_signature on each tool call, not on the message."""
+    from venice_ai.types.api.chat import ChatCompletionResponse
+
+    response = ChatCompletionResponse.model_validate(
+        {
+            "id": "x",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "m",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_0",
+                                "type": "function",
+                                "thought_signature": "SIG",
+                                "function": {"name": "f", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+    sent = _sent_messages(AssistantMessage.from_response(response))
+    assert sent[0]["tool_calls"][0]["thought_signature"] == "SIG"
+
+
+def test_a_dumped_response_message_goes_back_with_its_extra_fields():
+    """A response message dumped to a dict keeps what the SDK does not model."""
+    msg = ChatMessage.model_validate(
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "a", "future_part_field": 1}],
+            "future_message_field": {"k": "v"},
+        }
+    )
+    sent = _sent_messages(msg.model_dump(mode="json", exclude_none=True))
+    assert sent[0]["future_message_field"] == {"k": "v"}
+    assert sent[0]["content"][0]["future_part_field"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Message-level keys the SDK does not model survive a round trip through
+# AssistantMessage.from_response (Gemini puts thought_signature on a plain
+# text reply's message); the echoed cache_control does not.
+# ---------------------------------------------------------------------------
+def _response_with(message: dict) -> object:
+    from venice_ai.types.api.chat import ChatCompletionResponse
+
+    return ChatCompletionResponse.model_validate(
+        {
+            "id": "x",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+
+
+def test_from_response_carries_a_message_level_thought_signature():
+    response = _response_with({"role": "assistant", "content": "hi", "thought_signature": "SIG"})
+    assert response.choices[0].message.thought_signature == "SIG"
+    message = AssistantMessage.from_response(response)
+    assert message.thought_signature == "SIG"
+    assert _sent_messages(message)[0]["thought_signature"] == "SIG"
+
+
+def test_from_response_carries_unmodelled_fields_but_not_the_cache_control_echo():
+    response = _response_with(
+        {
+            "role": "assistant",
+            "content": "hi",
+            "future_field": {"k": 1},
+            "cache_control": {"type": "ephemeral", "ttl": "zz"},
+        }
+    )
+    sent = _sent_messages(AssistantMessage.from_response(response))[0]
+    assert sent["future_field"] == {"k": 1}
+    assert "cache_control" not in sent
+
+
+def test_from_response_drops_the_cache_control_echo_on_parts_too():
+    response = _response_with(
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "a", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "b", "cache_control": {"type": "ephemeral"}, "x": 1},
+            ],
+        }
+    )
+    sent = _sent_messages(AssistantMessage.from_response(response))[0]
+    assert sent["content"] == [{"type": "text", "text": "a"}, {"type": "text", "text": "b", "x": 1}]

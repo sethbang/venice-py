@@ -136,12 +136,42 @@ class Balances(VeniceBaseModel):
 # ============================================================================
 
 
+class CacheControl(VeniceBaseModel):
+    """Prompt-caching breakpoint for a content part or an assistant/tool message.
+
+    Keys the SDK does not model are sent as given, so a field the API adds
+    later is not lost.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["ephemeral"] = Field(default="ephemeral", description="Cache type")
+    ttl: Literal["5m", "1h"] | None = Field(
+        default=None,
+        description=(
+            "Cache lifetime. ``1h`` is billed at a higher cache-write price than "
+            "the default ``5m``. Omitted when unset."
+        ),
+    )
+
+
+class CacheControlParam(TypedDict):
+    """TypedDict shape of :class:`CacheControl` for dict-form input."""
+
+    type: Literal["ephemeral"]
+    ttl: NotRequired[Literal["5m", "1h"]]
+
+
+CacheControlInput = Annotated[CacheControl | CacheControlParam, Field(union_mode="left_to_right")]
+"""What a ``cache_control`` field accepts: the model or its dict form."""
+
+
 class TextContent(VeniceBaseModel):
     """Text content object for messages."""
 
     type: Literal["text"] = Field(..., description="Content type")
     text: str = Field(..., min_length=1, description="The text content")
-    cache_control: dict[str, str] | None = Field(
+    cache_control: CacheControlInput | None = Field(
         default=None,
         description="Cache control for prompt caching (e.g., {'type': 'ephemeral'})",
     )
@@ -174,7 +204,7 @@ class ImageContent(VeniceBaseModel):
 
     type: Literal["image_url"] = Field(..., description="Content type")
     image_url: ImageUrl = Field(..., description="Image URL information")
-    cache_control: dict[str, str] | None = Field(
+    cache_control: CacheControlInput | None = Field(
         default=None,
         description="Cache control for prompt caching (e.g., {'type': 'ephemeral'})",
     )
@@ -201,7 +231,7 @@ class FileContent(VeniceBaseModel):
 
     type: Literal["file"] = Field(..., description="Content type")
     file: FileObject = Field(..., description="File data and optional filename")
-    cache_control: dict[str, str] | None = Field(
+    cache_control: CacheControlInput | None = Field(
         default=None,
         description="Cache control for prompt caching (e.g., {'type': 'ephemeral'})",
     )
@@ -249,7 +279,7 @@ class TextContentParam(TypedDict):
 
     type: Literal["text"]
     text: str
-    cache_control: NotRequired[dict[str, str]]
+    cache_control: NotRequired[CacheControlParam | CacheControl]
 
 
 class ImageUrlParam(TypedDict):
@@ -264,7 +294,7 @@ class ImageContentParam(TypedDict):
 
     type: Literal["image_url"]
     image_url: ImageUrlParam
-    cache_control: NotRequired[dict[str, str]]
+    cache_control: NotRequired[CacheControlParam | CacheControl]
 
 
 class AudioContentParam(TypedDict):
@@ -293,7 +323,7 @@ class FileContentParam(TypedDict):
 
     type: Literal["file"]
     file: FileObjectParam
-    cache_control: NotRequired[dict[str, str]]
+    cache_control: NotRequired[CacheControlParam | CacheControl]
 
 
 MessageContentPartParam = Annotated[
@@ -679,6 +709,9 @@ __all__ = [
     "RequestEcho",
     "ValidationResult",
     # Content components
+    "CacheControl",
+    "CacheControlInput",
+    "CacheControlParam",
     "TextContent",
     "ImageUrl",
     "ImageContent",

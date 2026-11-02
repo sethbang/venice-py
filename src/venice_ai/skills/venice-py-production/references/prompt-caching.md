@@ -16,7 +16,21 @@ Venice supports prompt caching for chat completions — when a prefix of your pr
 
 ## How Venice exposes caching
 
-Caching is automatic: there is no parameter to turn it on. Send prompts whose stable prefix is long enough (about 1,024 tokens on most models, about 4,000 on Claude) and read the cache counts from `usage`. For Claude, which needs explicit cache breakpoints at the protocol level, Venice adds them for the system prompt and the conversation history. Add your own `cache_control: {"type": "ephemeral"}` marker only when you need something else cached from the first turn, such as a long document in a single-turn request.
+Caching is automatic: there is no parameter to turn it on. Send prompts whose stable prefix is long enough (about 1,024 tokens on most models, about 4,000 on Claude) and read the cache counts from `usage`. For Claude, which needs explicit cache breakpoints at the protocol level, Venice adds them for the system prompt and the conversation history. Add your own `cache_control: {"type": "ephemeral"}` marker only when you need something else cached from the first turn, such as a long document in a single-turn request, or when a breakpoint should outlive the default five minutes.
+
+A marker goes on a content part, or directly on an assistant or tool message. For example, to keep a large tool result cached for an hour:
+
+```python
+from venice_ai.types.api.requests.chat import ToolMessage
+
+ToolMessage(
+    content=long_tool_output,
+    tool_call_id=call.id,
+    cache_control={"type": "ephemeral", "ttl": "1h"},
+)
+```
+
+`ttl` is `"5m"` (the default) or `"1h"`; any other value is rejected. A one-hour cache write costs more than a five-minute one, so use it only when the prefix will be reused after more than five minutes. `ttl` sets the lifetime of one marked breakpoint; `prompt_cache_retention` (below) is a request-wide hint for models that support it.
 
 The catalog has no prompt-caching capability flag. The only signal is a cached-input price, which `require_prompt_caching=True` filters on:
 
@@ -71,7 +85,7 @@ Some models omit `prompt_tokens_details` entirely when nothing was cached; the a
 
 ## Cache windows
 
-Cache lifetimes depend on the provider: about 5 minutes for Claude, Grok and DeepSeek, 5-10 minutes for OpenAI models and about an hour for Gemini, per Venice's prompt-caching guide. `prompt_cache_retention` can request longer on models that support it. Plan your call cadence around this:
+Cache lifetimes depend on the provider: about 5 minutes for Claude, Grok and DeepSeek, 5-10 minutes for OpenAI models and about an hour for Gemini, per Venice's prompt-caching guide. A Claude breakpoint marked with `ttl: "1h"` lasts up to an hour. `prompt_cache_retention` can request longer on models that support it. Plan your call cadence around this:
 
 - **High-traffic apps** (request every few seconds): cache stays warm, hit rate near 100%.
 - **Bursty apps** (requests every few minutes): hits and misses interleave.

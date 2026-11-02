@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 from pydantic import (
     AfterValidator,
     BaseModel,
+    ConfigDict,
     Field,
     StringConstraints,
     TypeAdapter,
@@ -27,6 +28,9 @@ from pydantic import (
 from venice_ai.core.models.common import (
     AudioContent,
     AudioContentParam,
+    CacheControl,
+    CacheControlInput,
+    CacheControlParam,
     ConsumptionLimit,
     FileContent,
     FileContentParam,
@@ -84,7 +88,11 @@ class ReasoningConfig(BaseModel):
     Corresponds to the ``reasoning`` object on ``/chat/completions``. The
     top-level ``reasoning_effort`` field takes precedence over
     ``reasoning.effort`` when both are provided.
+
+    A key this model does not declare is sent as given.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     enabled: bool | None = Field(
         default=None,
@@ -182,6 +190,9 @@ __all__ = [
     "MessageContentPart",
     "MessageContentPartParam",
     "TextContentParam",
+    "CacheControl",
+    "CacheControlInput",
+    "CacheControlParam",
     "ImageUrlParam",
     "ImageContentParam",
     "FileObjectParam",

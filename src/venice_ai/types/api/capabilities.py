@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Discriminator, Field, Tag
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
 
 
 class ChatCapabilities(BaseModel):
@@ -147,6 +147,8 @@ class GenericCapabilities(BaseModel):
     ``type`` is an open ``str``. Future versions may promote any of them to a
     dedicated ``*Capabilities`` shape.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     type: str
     # Open for the same reason ``type`` is — see ChatCapabilities.privacy.

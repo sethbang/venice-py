@@ -1200,6 +1200,9 @@
         "body.max_temp",
         "body.max_tokens",
         "body.messages",
+        "body.messages[].cache_control",
+        "body.messages[].cache_control.ttl",
+        "body.messages[].cache_control.type",
         "body.messages[].content",
         "body.messages[].content[].cache_control",
         "body.messages[].content[].cache_control.ttl",
@@ -1310,6 +1313,9 @@
             "choices[].logprobs.top_logprobs[].logprob",
             "choices[].logprobs.top_logprobs[].token",
             "choices[].message",
+            "choices[].message.cache_control",
+            "choices[].message.cache_control.ttl",
+            "choices[].message.cache_control.type",
             "choices[].message.content",
             "choices[].message.content[].cache_control",
             "choices[].message.content[].cache_control.ttl",
@@ -2362,6 +2368,9 @@
       "\"stop\"",
       "\"tool_calls\""
     ],
+    "POST /chat/completions response.200.choices[].message.cache_control.type": [
+      "\"ephemeral\""
+    ],
     "POST /chat/completions response.200.choices[].message.content[].cache_control.type": [
       "\"ephemeral\""
     ],
@@ -2557,6 +2566,9 @@
     ],
     "schemas/ChatCompletionContentPartVideoUrl.type": [
       "\"video_url\""
+    ],
+    "schemas/ChatCompletionRequest.messages[].cache_control.type": [
+      "\"ephemeral\""
     ],
     "schemas/ChatCompletionRequest.messages[].content[].cache_control.type": [
       "\"ephemeral\""
@@ -3265,6 +3277,7 @@
     ],
     "schemas/WebSearchRequest.search_provider": [
       "\"brave\"",
+      "\"exa\"",
       "\"google\""
     ],
     "schemas/X402InferencePaymentRequired.accepts[].scheme": [

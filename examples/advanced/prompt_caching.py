@@ -9,7 +9,8 @@ cached-input price, the input bill.
 
 Key features covered:
 - prompt_cache_key: routing hint that makes a cache hit more likely
-- cache_control: markers on content blocks, needed by some providers
+- cache_control: markers on content blocks or assistant/tool messages,
+  needed by some providers
 - Reading cache reads and writes from ``response.usage.cached_tokens`` and
   ``response.usage.cache_write_tokens``
 
@@ -523,6 +524,11 @@ def best_practices() -> bool:
             "📊 Measure with usage",
             "usage.cached_tokens counts cache reads and usage.cache_write_tokens\n"
             "      cache writes; a missing breakdown reads as 0.",
+        ),
+        (
+            "⏱️  Pick a cache_control ttl",
+            'A marker\'s ttl is "5m" (the default) or "1h". One-hour writes are\n'
+            "      billed higher, so use them only when reuse is more than 5 minutes apart.",
         ),
     ]
 
