@@ -360,7 +360,7 @@ Paths below are relative to the SDK repo's `examples/` directory. Available at [
 - `chat/agent_loop.py` — `run_with_tools` agent loop end-to-end with bare callables
 - `chat/structured_output.py` — `response_format=BaseModel`
 - `chat/multi_turn_conversation.py` — context preservation across turns
-- `chat/reasoning_and_thinking.py` — `reasoning_effort` tiers
+- `chat/reasoning_and_thinking.py` — read or hide the reasoning trace, or switch reasoning off; for `reasoning_effort` tiers see `advanced/reasoning_effort.py`
 - `chat/vision.py` — vision input to chat
 - `chat/file_inputs.py` — attach documents via `type:file` (data: URL or public URL)
 - `chat/venice_parameters.py` — character_slug, web search, citations

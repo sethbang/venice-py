@@ -19,7 +19,7 @@ async def traced_create(client, **kwargs):
         completion_tokens=response.usage.completion_tokens if response.usage else None,
         total_tokens=response.usage.total_tokens if response.usage else None,
         balance_usd=response.balance_info.usd if response.balance_info else None,
-        request_id=response.headers.get("x-request-id") if response.headers else None,
+        request_id=response.request_id,
         deprecated=(response.deprecation_info.is_deprecated if response.deprecation_info else False),
     )
     return response
@@ -34,7 +34,7 @@ Six fields: model, three token counts, balance, request_id. With those, you can 
 | `model` | `kwargs["model"]` (or `response.model`) | Per-model spend / latency aggregation |
 | `prompt_tokens` / `completion_tokens` / `total_tokens` | `response.usage.*` | Token-budget tracking, cost attribution |
 | `balance_usd` | `response.balance_info.usd` | What the key can still spend (before this call): the lesser of the account balance and the key's remaining consumption limit |
-| `request_id` | `response.headers["x-request-id"]` | Correlate with Venice's server logs |
+| `request_id` | `response.request_id` (the `CF-RAY` header) | Correlate with Venice's server logs |
 | `deprecated` | `response.deprecation_info.is_deprecated` | Alert on model retirement |
 | `latency_ms` | wrap with timing | SLO / dashboard input |
 | `retry_attempts` | from your retry wrapper | Detect chronic transient failures |
@@ -115,8 +115,8 @@ async def traced_create(client, **kwargs):
         response = await client.chat.completions.create(**kwargs)
         if response.usage:
             span.set_attribute("venice.tokens.total", response.usage.total_tokens)
-        if response.headers:
-            span.set_attribute("venice.request_id", response.headers.get("x-request-id"))
+        if response.request_id:
+            span.set_attribute("venice.request_id", response.request_id)
         return response
 ```
 
@@ -157,31 +157,21 @@ A low value can mean the key's limit is nearly used up while the account still h
 
 ## Request-ID correlation
 
-Every Venice response with `response.headers` exposes `x-request-id`. Save this on EVERY successful AND failed call so you can give Venice support a single ID to look up:
+Every Venice response carries `CF-RAY`, exposed as `response.request_id`. On an error, read it with `e.response.headers.get("cf-ray")`. Save this on EVERY successful AND failed call so you can give Venice support a single ID to look up:
 
 ```python
 async def traced_create(client, **kwargs):
     try:
         response = await client.chat.completions.create(**kwargs)
-        log.info("venice.chat", request_id=_extract_request_id(response.headers), ...)
+        log.info("venice.chat", request_id=response.request_id, ...)
         return response
     except APIError as e:
         log.error("venice.chat.failed",
                   exc=type(e).__name__,
                   status=e.status_code,
-                  request_id=(e.response.headers.get("x-request-id") if getattr(e, "response", None) is not None else None),
+                  request_id=(e.response.headers.get("cf-ray") if getattr(e, "response", None) is not None else None),
                   body=e.body)
         raise
-
-
-def _extract_request_id(headers) -> str | None:
-    if not headers:
-        return None
-    # Case-insensitive lookup; Venice uses 'x-request-id' but be defensive
-    for k in ("x-request-id", "X-Request-Id", "x-venice-request-id"):
-        if k in headers:
-            return headers[k]
-    return None
 ```
 
 `APIError` (and all subclasses) expose the raw response via `e.response`; read headers as `e.response.headers` — the request_id is available on errors too. Don't forget the error path.

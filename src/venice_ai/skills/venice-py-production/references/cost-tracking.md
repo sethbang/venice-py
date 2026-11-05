@@ -18,7 +18,7 @@ Sourced from `src/venice_ai/costs.py`. Both are async-safe (use `asyncio.Lock` i
 | `tracker.total_tokens` | `int` | Accumulated token count. (NOT `tracker.calls`.) |
 | `tracker.pricing_map` | `dict[str, ModelPricing]` | The pricing map; mutate to add models. |
 | | | |
-| **`BudgetManager`** | class | Daily / monthly USD-cap enforcement layered on a `CostTracker`. |
+| **`BudgetManager`** | class | USD caps checked against one `CostTracker`'s running total. It has no clock: `daily_usd` and `monthly_usd` both compare with the same in-memory total, and neither resets by itself. |
 | `BudgetManager(*, tracker, daily_usd=None, monthly_usd=None)` | sync ctor | At least one of `daily_usd`/`monthly_usd` must be set. |
 | `budget.can_afford(estimated_cost_usd)` | async | `True` if adding the estimate keeps both caps satisfied. |
 | `budget.remaining()` | async | Returns `BudgetRemaining` (headroom + percentages). |

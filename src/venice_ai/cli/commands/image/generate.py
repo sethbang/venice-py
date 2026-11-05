@@ -166,6 +166,9 @@ def generate_image(
                     embed_exif = preset_config["embed_exif"]
 
                 print_info(f"Applied preset: {preset}")
+            else:
+                print_error(f"Preset not found: {preset}")
+                raise SystemExit(1)
 
         # Use provided parameters
         asyncio.run(
@@ -408,6 +411,7 @@ async def _generate_image_async(
                         )
             else:
                 print_error("No images were generated")
+                raise SystemExit(1)
 
     except VeniceError as e:
         print_error(f"Venice API error: {e}")
@@ -656,6 +660,9 @@ async def _batch_generate_async(
                 if failed > 0:
                     console.print(f"❌ Failed: {failed}")
                 console.print(f"📁 Images saved to: {save_path}")
+
+            if failed > 0:
+                raise SystemExit(1)
 
     except VeniceError as e:
         print_error(f"Venice API error: {e}")

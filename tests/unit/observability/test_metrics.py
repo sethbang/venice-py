@@ -87,7 +87,7 @@ class TestEnhancedMetricsInitialization:
     def test_init_with_base_collector(self):
         """Test initialization with base metrics collector."""
         mock_collector = Mock()
-        mock_collector._registry = Mock()
+        mock_collector.registry = Mock()
 
         metrics = EnhancedMetrics(base_collector=mock_collector)
 

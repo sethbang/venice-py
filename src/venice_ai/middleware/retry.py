@@ -83,6 +83,10 @@ from aiohttp import (
     ConnectionTimeoutError,
     ServerTimeoutError,
 )
+from yarl import URL
+
+from ..utils.errors import forget_request_headers, url_free_transport_error
+from .third_party import same_origin
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +134,61 @@ def _request_path(url: Any) -> str:
         text = text.split("://", 1)[1]
         text = "/" + text.split("/", 1)[1] if "/" in text else "/"
     return text
+
+
+def _url_for_log(url: Any, api_origin: URL | None) -> str:
+    """The form of a request URL that may be written to a log.
+
+    A query or fragment is never shown, since either can hold a credential. A
+    URL on any host other than the API, such as a pre-signed storage link, can
+    grant access through its path as well, so it is reduced to scheme and host.
+    """
+    try:
+        parsed = url if isinstance(url, URL) else URL(str(url))
+        if api_origin is not None and same_origin(parsed, api_origin):
+            return str(parsed.with_user(None).with_query(None).with_fragment(None))
+        return str(URL.build(scheme=parsed.scheme, host=parsed.host or ""))
+    except (TypeError, ValueError):
+        return "<url not shown>"
+
+
+def _quotes_any(error: BaseException, fragments: AbstractSet[str]) -> bool:
+    """Whether the text of *error* or of an exception it chains holds any of *fragments*."""
+    seen: set[int] = set()
+    stack: list[BaseException | None] = [error]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        text = f"{current!s} {current!r}"
+        if any(fragment in text for fragment in fragments):
+            return True
+        stack += [current.__cause__, current.__context__]
+    return False
+
+
+def _error_for_hook(error: Exception, url: Any, api_origin: URL | None) -> Exception:
+    """The form of a retryable failure that ``RetryOptions.on_retry`` receives.
+
+    The error itself for a request to the API, unless its text quotes the query or
+    fragment. On any other host, where the URL can grant access on its own, a
+    :func:`~venice_ai.utils.errors.url_free_transport_error`.
+    """
+    try:
+        parsed = url if isinstance(url, URL) else URL(str(url))
+        on_api_host = api_origin is not None and same_origin(parsed, api_origin)
+    except (TypeError, ValueError):
+        return url_free_transport_error(error)
+    if not on_api_host:
+        return url_free_transport_error(error)
+    hidden = {
+        parsed.raw_query_string,
+        parsed.query_string,
+        parsed.raw_fragment,
+        parsed.fragment,
+    } - {""}
+    return url_free_transport_error(error) if _quotes_any(error, hidden) else error
 
 
 def classify_request(
@@ -222,7 +281,14 @@ class RetryOptions:
             callers who know an endpoint is safer (or riskier) to resend than
             the default classification assumes.
         on_retry: Called with ``(retry_index, delay_seconds, exception_or_none)``
-            before each retry sleep.
+            before each retry sleep. ``exception_or_none`` is ``None`` for a
+            retried status. For a request to a host other than the API it is
+            an :class:`~venice_ai.exceptions.APIConnectionError` or
+            :class:`~venice_ai.exceptions.APITimeoutError` that names the failure
+            by type and holds no URL path, query or request headers; its
+            ``original_error_type`` is the type of the failure. For a request
+            to the API it is the failure itself, in that same form when the
+            failure's text quotes the query string or fragment.
         idempotent_methods: HTTP methods treated as ``IDEMPOTENT``, as a set
             (stored as a ``frozenset``).
     """
@@ -457,7 +523,9 @@ def _exception_is_retryable(
     return _is_connect_failure(error) or request_class is RetryClass.IDEMPOTENT
 
 
-def create_retry_middleware(options: RetryOptions | None = None) -> ClientMiddlewareType:
+def create_retry_middleware(
+    options: RetryOptions | None = None, *, api_origin: URL | None = None
+) -> ClientMiddlewareType:
     """
     Create the aiohttp middleware that applies the client's retry policy.
 
@@ -470,10 +538,23 @@ def create_retry_middleware(options: RetryOptions | None = None) -> ClientMiddle
     pool, ``options.on_retry`` is called, and the next attempt carries the
     ``x-venice-sdk-retry-count`` header.
 
+    Log lines name the failure by type only, because an aiohttp error's text can
+    quote the URL. ``options.on_retry`` receives the failure itself for a request
+    to ``api_origin``. For any other host, whose URL can grant access on its own,
+    and for a failure whose text quotes the request's query string or fragment,
+    it receives an :class:`~venice_ai.exceptions.APIConnectionError` or
+    :class:`~venice_ai.exceptions.APITimeoutError` that names the failure by type
+    in its message and ``original_error_type``, and holds no URL path, query or
+    request headers.
+
     Args:
         options: The construction-time policy. ``None`` uses
             :class:`RetryOptions` defaults. A ``client.with_retries(...)`` block
             overrides it for the requests made inside the block.
+        api_origin: Origin of the API. Log lines show the path of a request to
+            this origin, and only the scheme and host of any other request, and
+            ``options.on_retry`` is treated as above. ``None`` treats every
+            request as going to another host.
 
     Returns:
         An aiohttp client middleware.
@@ -492,6 +573,7 @@ def create_retry_middleware(options: RetryOptions | None = None) -> ClientMiddle
         raw_headers = getattr(request, "headers", None)
         headers: Mapping[str, str] = raw_headers if isinstance(raw_headers, Mapping) else {}
         path = _request_path(request.url)
+        url_for_log = _url_for_log(request.url, api_origin)
         if options.classifier is not None:
             request_class = options.classifier(method, path, headers)
         else:
@@ -510,11 +592,18 @@ def create_retry_middleware(options: RetryOptions | None = None) -> ClientMiddle
                 if isinstance(raw_headers, Mapping):
                     request.headers[RETRY_COUNT_HEADER] = str(attempt)
 
+            # The hook and the sleep run after the except block, which keeps the
+            # failure, and the URL it can quote, out of the __context__ of anything
+            # they raise.
+            hook_error: Exception | None = None
+            delay = 0.0
+            response: Any = None
             try:
                 response = await handler(request)
             except asyncio.CancelledError:
                 raise
             except (ClientError, ServerTimeoutError, ValueError, OSError, TypeError) as e:
+                forget_request_headers(e)
                 if attempt >= options.max_attempts or not _exception_is_retryable(
                     options, request_class, e
                 ):
@@ -527,12 +616,14 @@ def create_retry_middleware(options: RetryOptions | None = None) -> ClientMiddle
                     options.jitter_factor,
                 )
                 logger.info(
-                    f"Retrying {request_class.value} request {method} {request.url} "
+                    f"Retrying {request_class.value} request {method} {url_for_log} "
                     f"(attempt {attempt + 2}/{options.max_attempts + 1}) "
-                    f"after {delay:.2f}s due to {type(e).__name__}: {e}"
+                    f"after {delay:.2f}s due to {type(e).__name__}"
                 )
+                hook_error = _error_for_hook(e, request.url, api_origin)
+            if hook_error is not None:
                 if options.on_retry:
-                    options.on_retry(attempt, delay, e)
+                    options.on_retry(attempt, delay, hook_error)
                 await asyncio.sleep(delay)
                 attempt += 1
                 continue
@@ -564,7 +655,7 @@ def create_retry_middleware(options: RetryOptions | None = None) -> ClientMiddle
             if retry_after is not None:
                 if retry_after > options.max_retry_after:
                     logger.info(
-                        f"Not retrying {method} {request.url}: status {response.status} "
+                        f"Not retrying {method} {url_for_log}: status {response.status} "
                         f"asked for a {retry_after:.0f}s wait, above max_retry_after="
                         f"{options.max_retry_after:.0f}s"
                     )
@@ -575,7 +666,7 @@ def create_retry_middleware(options: RetryOptions | None = None) -> ClientMiddle
             if response.status == 500:
                 inference_500_retries += 1
             logger.info(
-                f"Retrying {request_class.value} request {method} {request.url} "
+                f"Retrying {request_class.value} request {method} {url_for_log} "
                 f"(attempt {attempt + 2}/{options.max_attempts + 1}) "
                 f"after {delay:.2f}s due to status {response.status}"
             )

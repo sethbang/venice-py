@@ -226,7 +226,8 @@ class RequestLogger:
         """Generate a unique ID on the client side to tie this request's log records together.
 
         It is not known to Venice. To quote a request to support, use its CF-RAY
-        header, which the failure record logs as ``cf_ray``.
+        header: ``response.request_id``, logged as ``request_id`` on success, and
+        ``cf_ray`` on the failure record.
         """
         self._request_counter += 1
         timestamp = int(time.time() * 1000)
@@ -287,6 +288,7 @@ class RequestLogger:
                 "Chat request completed",
                 extra={
                     "client_request_id": client_request_id,
+                    "request_id": response.request_id,
                     "model": model,
                     "duration_ms": duration_ms,
                     "finish_reason": response.choices[0].finish_reason,
@@ -716,6 +718,7 @@ async def example_structured_logging(production_log: Path) -> bool:
             key: last[key]
             for key in (
                 "client_request_id",
+                "request_id",
                 "model",
                 "duration_ms",
                 "tokens_used",

@@ -140,7 +140,7 @@ async def basic_reasoning_with_venice_parameters(client: VeniceClient, model: st
         + ANSWER_INSTRUCTION.format(format="<n1>, <n2>, <n3>")
     )
 
-    # Only the fields you set are meaningful; the rest keep their defaults.
+    # Only the fields set here are sent.
     # Our own system message is all the instruction this needs, so Venice's
     # system prompt is left out.
     venice_params = VeniceParameters(

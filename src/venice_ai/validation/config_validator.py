@@ -9,6 +9,7 @@ This module analyzes VeniceAIConfig objects and provides:
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel
 
@@ -18,6 +19,27 @@ from ..core.config import (
     VeniceAIConfig,
 )
 from ..rate_limiting.config import RateLimiterMode
+
+
+def _redis_url_for_display(url: str) -> str:
+    """Render a Redis URL for an error message: scheme, host and port only.
+
+    Credentials, path and query are dropped. A string that does not parse cleanly
+    as ``scheme://host[:port]``, or that has an ``@`` beyond the authority (a
+    password with an unescaped ``/`` splits there), may be a secret or part of one,
+    so nothing of it is shown.
+    """
+    not_shown = "<not shown: not in scheme://host[:port] form>"
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return not_shown
+    if not parts.scheme or not host or "@" in f"{parts.path}{parts.query}{parts.fragment}":
+        return not_shown
+    rendered_host = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme}://{rendered_host}" + (f":{port}" if port is not None else "")
 
 
 class Severity(StrEnum):
@@ -379,7 +401,7 @@ def _validate_redis_config(config: VeniceAIConfig, result: ConfigValidation) -> 
     # Validate URL format
     if not redis_conf.redis_url.startswith(("redis://", "rediss://")):
         result.add_error(
-            f"Invalid Redis URL format: {redis_conf.redis_url}",
+            f"Invalid Redis URL format: {_redis_url_for_display(redis_conf.redis_url)}",
             category="redis",
             fix="Use redis://host:port or rediss://host:port format",
         )

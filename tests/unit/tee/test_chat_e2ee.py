@@ -36,6 +36,7 @@ from venice_ai.streaming import ChatStream  # noqa: E402
 from venice_ai.tee import _crypto  # noqa: E402
 from venice_ai.tee._session import TeeSession  # noqa: E402
 from venice_ai.types.api import ChatCompletionResponse  # noqa: E402
+from venice_ai.types.api.requests.common import VeniceParameters  # noqa: E402
 from venice_ai.types.api.streaming import ChatCompletionChunk  # noqa: E402
 
 _CURVE = ec.SECP256K1()
@@ -238,6 +239,34 @@ async def test_e2ee_forces_venice_system_prompt_off() -> None:
         await comp.create(model=_E2EE_MODEL, messages=_messages(), e2ee=True)
     vp = captured["body"].get("venice_parameters", {})
     assert vp.get("include_venice_system_prompt") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params, expected",
+    [
+        (VeniceParameters(), {"include_venice_system_prompt": False}),
+        (
+            VeniceParameters(enable_e2ee=True, character_slug="c"),
+            {"include_venice_system_prompt": False, "enable_e2ee": True, "character_slug": "c"},
+        ),
+        (
+            VeniceParameters(include_venice_system_prompt=True),
+            {"include_venice_system_prompt": False},
+        ),
+    ],
+)
+async def test_e2ee_wire_parameters_are_only_what_was_set_plus_the_forced_flag(
+    params: VeniceParameters, expected: dict[str, Any]
+) -> None:
+    session, _ = _build_session()
+    captured: dict[str, Any] = {}
+    comp = _make_completions(session, captured)
+    with pytest.warns(UserWarning):
+        await comp.create(
+            model=_E2EE_MODEL, messages=_messages(), e2ee=True, venice_parameters=params
+        )
+    assert captured["body"]["venice_parameters"] == expected
 
 
 # --- Response handling -------------------------------------------------------

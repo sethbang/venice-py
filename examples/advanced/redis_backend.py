@@ -167,9 +167,7 @@ async def run_redis_backed_request(redis_url: str, verifier: redis.Redis) -> boo
         print(f"   WARNING: {warning}")
     if validation.errors:
         for err in validation.errors:
-            # A validator message can quote the URL, password included.
-            message = str(err).replace(redis_url, redis_endpoint(redis_url))
-            print(f"   ERROR: {message}", file=sys.stderr)
+            print(f"   ERROR: {err}", file=sys.stderr)
         return False
 
     client = VeniceClientFactory.create_client(

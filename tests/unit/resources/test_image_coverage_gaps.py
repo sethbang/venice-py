@@ -12,6 +12,7 @@ Coverage gaps addressed:
 - Gap 9: _detect_image_format() non-PNG formats — lines 795, 799, 801
 """
 
+import base64
 import os
 import tempfile
 from pathlib import Path
@@ -273,7 +274,7 @@ class TestMultiEdit:
 
     @pytest.mark.asyncio
     async def test_multi_edit_no_images_raises(self, image_resource):
-        """Per docs the ``images`` array is required (1-3 items); the SDK
+        """Per docs the ``images`` array is required (at least one item); the SDK
         surfaces this as a ValueError before making the request rather than
         letting the API reject an empty array."""
         mock_client = AsyncMock()
@@ -282,6 +283,70 @@ class TestMultiEdit:
 
         with pytest.raises(ValueError, match="at least one image"):
             await image_resource.multi_edit(prompt="Generate from scratch")
+
+        mock_client._request.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("count", [1, 4, 6, 14])
+    async def test_multi_edit_images_sends_every_input_in_order(self, image_resource, count):
+        """The maximum is per model, so the SDK sends the list as given."""
+        mock_client = AsyncMock()
+        mock_client._request = AsyncMock(return_value=b"edited")
+        image_resource._client = mock_client
+        urls = [f"https://example.com/{i}.png" for i in range(count)]
+
+        result = await image_resource.multi_edit(prompt="Blend", images=urls)
+
+        assert result == b"edited"
+        assert mock_client._request.call_args[1]["json_data"]["images"] == urls
+        mock_client._request.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_multi_edit_images_encodes_bytes(self, image_resource):
+        mock_client = AsyncMock()
+        mock_client._request = AsyncMock(return_value=b"edited")
+        image_resource._client = mock_client
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+
+        await image_resource.multi_edit(prompt="Blend", images=[png, "https://example.com/1.png"])
+
+        sent = mock_client._request.call_args[1]["json_data"]["images"]
+        assert sent == [base64.b64encode(png).decode(), "https://example.com/1.png"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("named", ["image", "image_2", "image_3"])
+    async def test_multi_edit_images_conflicts_with_named_inputs(self, image_resource, named):
+        mock_client = AsyncMock()
+        image_resource._client = mock_client
+
+        with pytest.raises(ValueError, match="images"):
+            await image_resource.multi_edit(
+                prompt="Blend",
+                images=["https://example.com/0.png"],
+                **{named: "https://e.com/1.png"},
+            )
+
+        mock_client._request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_multi_edit_empty_images_raises(self, image_resource):
+        mock_client = AsyncMock()
+        image_resource._client = mock_client
+
+        with pytest.raises(ValueError, match="at least one image"):
+            await image_resource.multi_edit(prompt="Blend", images=[])
+
+        mock_client._request.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("single", ["https://example.com/0.png", b"\x89PNG"])
+    async def test_multi_edit_images_rejects_a_single_input(self, image_resource, single):
+        """A bare string would otherwise be sent one character at a time."""
+        mock_client = AsyncMock()
+        image_resource._client = mock_client
+
+        with pytest.raises(ValueError, match="images"):
+            await image_resource.multi_edit(prompt="Blend", images=single)
 
         mock_client._request.assert_not_called()
 

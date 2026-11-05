@@ -90,9 +90,10 @@ async def main():
 asyncio.run(main())
 ```
 
-**If you must stay synchronous**, swap in `SyncVeniceClient` — same surface, no `await`:
+**If you must stay synchronous**, swap in `SyncVeniceClient` — the same resource methods, no `await`:
 ```python
 from venice_ai import SyncVeniceClient
+from venice_ai.types.api import UserMessage
 
 with SyncVeniceClient() as client:
     response = client.chat.completions.create(

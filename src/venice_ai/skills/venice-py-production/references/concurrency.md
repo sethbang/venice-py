@@ -155,7 +155,7 @@ The internal semaphore releases slots as cancelled coroutines exit, so cancellat
 
 ## Sync clients
 
-`SyncVeniceClient` does NOT have `gather` — there's no concept of "bounded concurrency" in synchronous code. If you're sync and need parallel calls, switch to `VeniceClient` (async). Mixing sync and async in the same process via `asyncio.run` per call defeats the point.
+`SyncVeniceClient.gather` is not useful: it takes awaitables, and blocking calls never produce them. If you're sync and need parallel calls, switch to `VeniceClient` (async). Mixing sync and async in the same process via `asyncio.run` per call defeats the point.
 
 ## Related references
 

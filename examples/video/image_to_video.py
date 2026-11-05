@@ -163,7 +163,7 @@ async def _wait_and_save(job: VideoJob, output_path: Path, request: dict[str, An
         print_recovery(job)
         return False
     except aiohttp.ClientResponseError as e:
-        # Only the status: the error's text contains the link, which grants access.
+        # The error shows the storage host at most, never the link.
         print(f"❌ The download answered HTTP {e.status} (queue_id={job.queue_id})")
         print_recovery(job)
         return False
@@ -291,16 +291,11 @@ async def basic_image_to_video(client: VeniceClient) -> Outcome:
     print(f"📝 Prompt (motion): {prompt}")
     print(f"💵 Quoted cost: ${pick.quote_usd:.4f}")
     print("ℹ️  image_url must be publicly accessible (http://, https://, or data: URI)")
-    # ``skipped`` also lists models that cannot serve the request at all; those
-    # do not make the pick any less the cheapest.
-    quote_failures = {
-        m: reason for m, reason in pick.skipped.items() if reason.startswith("quote failed")
-    }
-    for model_id, reason in quote_failures.items():
-        print(f"⚠️  Not compared: {model_id} ({reason})")
-    if quote_failures and RUN_PAID:
+    for model_id, error in pick.quote_failures.items():
+        print(f"⚠️  Not compared: {model_id} (quote failed: {error})")
+    if pick.quote_failures and RUN_PAID:
         print(
-            f"❌ Not queued: {len(quote_failures)} models could not be priced, and any of them "
+            f"❌ Not queued: {len(pick.quote_failures)} models could not be priced, and any of them "
             "may be cheaper than this pick."
         )
         return False

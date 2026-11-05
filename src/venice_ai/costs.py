@@ -741,11 +741,17 @@ class CostTracker:
 
 
 class BudgetManager:
-    """Daily / monthly USD-cap enforcement layered on a :class:`CostTracker`.
+    """USD caps checked against one :class:`CostTracker`'s running total.
 
-    Either ``daily_usd`` or ``monthly_usd`` may be ``None`` to disable that
-    cap. The tracker is shared, not owned — ``BudgetManager`` does not call
-    :meth:`CostTracker.reset`; callers manage rollover themselves.
+    ``BudgetManager`` has no clock. ``daily_usd`` and ``monthly_usd`` are only
+    names: both caps are compared with the same in-memory total, whatever period
+    it was spent over, so the lower cap decides and neither resets by itself. The
+    total also ends with the process and counts only what that tracker recorded.
+
+    Nothing blocks a request unless the caller checks :meth:`can_afford` first.
+    Either cap may be ``None`` to disable it. The tracker is shared, not owned:
+    ``BudgetManager`` does not call :meth:`CostTracker.reset`, so for a daily
+    budget the caller resets the tracker at the start of each day.
     """
 
     def __init__(

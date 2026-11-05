@@ -65,7 +65,7 @@ async with VeniceClient() as client:
         print(f"{t.createdAt} {t.type} ${t.amount}")
 ```
 
-`X402Auth(private_key=..., chain_id=8453, ttl_seconds=600)` is kw-only. There is **no `wallet_address=` kwarg** — the address is derived (`auth.wallet_address` property). `auth.build_header()` produces the base64 `X-Sign-In-With-X` value the SDK sends, but the SDK calls it for you — only reach for it if crafting raw HTTP. Full ctor / lifecycle details: `references/siwe-auth.md`.
+This client has an API key, so `balance` and `transactions` send Bearer and the `X-Sign-In-With-X` envelope together. `X402Auth(private_key=..., chain_id=8453, ttl_seconds=600)` is kw-only. There is **no `wallet_address=` kwarg** — the address is derived (`auth.wallet_address` property). `auth.build_header()` produces the base64 `X-Sign-In-With-X` value the SDK sends, but the SDK calls it for you — only reach for it if crafting raw HTTP. Full ctor / lifecycle details: `references/siwe-auth.md`.
 
 ### Mode 2 — No Venice API key: top up once, then SIWE-auth each request
 
@@ -82,7 +82,8 @@ from venice_ai.types.api import UserMessage
 
 async def chat_via_siwe(question: str) -> str:
     auth = X402Auth(private_key=os.environ["WALLET_PRIVATE_KEY"])
-    async with VeniceClient(auth=auth) as client:        # NO api_key — SIWE only
+    # api_key="" means no key, even when VENICE_API_KEY is set — SIWE only
+    async with VeniceClient(api_key="", auth=auth) as client:
         response = await client.chat.completions.create(
             model=await client.models.resolve_chat(),
             messages=[UserMessage(content=question)],
@@ -94,8 +95,8 @@ That's the entire mode-2 chat flow on SDK ≥ 2.0.0. The SDK signs a fresh SIWE 
 
 Things to know:
 - The wallet must have non-zero prepaid balance — see Mode 3 for `client.x402.top_up_with(...)`.
-- Each chat / image / etc. call debits the ledger at Venice's posted rates. Monitor with `client.x402.balance(auth=auth)` or `response.x402_balance_remaining` (the `X-Balance-Remaining` header Venice sends on wallet-authenticated requests).
-- When both `api_key=` and `auth=` are passed to `VeniceClient`, the API key wins for default Bearer auth; the auth instance is retained for explicit per-call `auth=` kwargs (e.g., `client.x402.balance(auth=auth)`).
+- Each chat / image / etc. call debits the ledger at Venice's posted rates. Monitor with `client.x402.balance(auth=auth)`. `response.x402_balance_remaining` reads `X-Balance-Remaining`, which Venice's spec declares but Venice may not send, so expect `None`.
+- A client needs a key or an `auth`; with neither it raises `ValueError`. When it has both, the API key wins for default Bearer auth and no envelope is sent, and that includes `VeniceClient(auth=auth)` with `VENICE_API_KEY` set. So pass `api_key=""` for wallet-only requests. The auth instance is retained for explicit per-call `auth=` kwargs (e.g., `client.x402.balance(auth=auth)`, which then sends Bearer and the envelope together).
 - Per-call `headers={"X-Sign-In-With-X": ...}` overrides the default envelope if you need to sign one yourself (rare).
 
 #### "True" pay-per-request x402 (no prepaid balance)
@@ -118,13 +119,13 @@ async with VeniceClient() as client:                # uses VENICE_API_KEY for th
     auth = X402Auth(private_key=os.environ["WALLET_PRIVATE_KEY"])
     result = await client.x402.top_up_with(
         auth=auth,
-        amount_usdc=5.0,
+        amount_usdc=5.0,                            # must equal the server's required amount
         max_amount_usdc=5.0,                        # safety cap; defaults to amount_usdc
     )
     print(f"Credited ${result.data.amountCredited}; new balance ${result.data.newBalance}")
 ```
 
-`top_up_with` internally: probes `/x402/top-up` (no header) → catches `PaymentRequiredError` → validates the first Base-mainnet `"exact"` requirement against `amount_usdc` / `max_amount_usdc` → signs EIP-3009 `TransferWithAuthorization` with the wallet's private key → re-POSTs with the `X-402-Payment` header → returns `X402TopUpResponse{success, data: {walletAddress, amountCredited, newBalance, paymentId}}`. `max_amount_usdc` defaults to `amount_usdc` (refuses to sign if the server asks for more).
+`top_up_with` internally: probes `/x402/top-up` (no header) → catches `PaymentRequiredError` → checks the first Base-mainnet `"exact"` requirement against `amount_usdc` / `max_amount_usdc` → signs EIP-3009 `TransferWithAuthorization` with the wallet's private key → re-POSTs with the `X-402-Payment` header → returns `X402TopUpResponse{success, data: {walletAddress, amountCredited, newBalance, paymentId}}`. The SDK signs only the server's required amount, so `amount_usdc` does not choose how much you pay: it raises `ValueError` before signing when it differs from that amount, in either direction, naming both figures. `max_amount_usdc` defaults to `amount_usdc` (refuses to sign if the server asks for more); a higher cap does not let a larger payment through, because the amount must still match. The recipient is not verified: `payTo` is only checked for presence.
 
 For the lower-level path (`auth.build_payment_header(requirement)`), the 402-body schema, and `PaymentRequiredError` semantics (`e.body`, NOT `e.payment_instructions`), see `references/balance-and-topup.md`. A standalone script `scripts/topup_eip3009.py` demos the manual flow — **don't run without explicit per-transaction authorization**, it moves real funds.
 
@@ -138,12 +139,12 @@ import os
 from venice_ai import VeniceClient
 from venice_ai.auth.x402_solana import SolanaX402Auth
 
-async with VeniceClient() as client:                # Bearer auth (VENICE_API_KEY) routes the request
+async with VeniceClient() as client:                # sends Bearer (VENICE_API_KEY)
     auth = SolanaX402Auth(private_key=os.environ["SOLANA_SECRET"])  # base58 secret
     print(auth.wallet_address)                      # base58 pubkey, derived
     result = await client.x402.top_up_with_solana(
         auth=auth,
-        amount_usdc=5.0,                            # Venice's documented minimum
+        amount_usdc=5.0,                            # must equal the server's required amount (its documented minimum)
         max_amount_usdc=5.0,                        # refuse to sign for more; defaults to amount_usdc
         rpc_url=None,                               # VENICE_X402_SOLANA_RPC_URL env, else mainnet-beta
     )
@@ -160,6 +161,13 @@ network fee via `feePayer`), and sends the **V2** `X-402-Payment` envelope.
 Settlement is on **Solana mainnet** in real USDC — **irreversible**; gate it
 behind explicit authorization and read the wallet's balance first. `SolanaX402Auth`
 is kw-only with **no `wallet_address=`** (derived; read `auth.wallet_address`).
+
+`amount_usdc` works as on Base: a mismatch raises `ValueError` before the RPC call and
+signing. Signing refuses an asset other than USDC (`USDC_SOLANA_MAINNET`); the
+lower-level `auth.build_payment_header(..., validate_asset=<mint>)` expects another
+mint instead. `payTo` and `extra.feePayer` are only checked for presence. Any RPC
+failure raises `RuntimeError` naming the method and HTTP status, never the RPC URL,
+since hosted endpoints keep an API key in it.
 
 ## Wiring Venice into agent frameworks
 

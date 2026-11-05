@@ -214,11 +214,6 @@ async def _embeddings_section(client: VeniceClient) -> bool | None:
     return ok
 
 
-def _raw(headers: dict[str, str], name: str) -> str | None:
-    """Case-insensitive lookup of one raw header value."""
-    return next((v for k, v in headers.items() if k.lower() == name), None)
-
-
 def _check_accessors(response, headers: dict[str, str], expect_tokens: bool) -> list[str]:
     """Compare each typed accessor with the raw header it is parsed from.
 
@@ -229,7 +224,7 @@ def _check_accessors(response, headers: dict[str, str], expect_tokens: bool) -> 
     rate_limits = response.response_rate_limits
 
     def compare_int(header: str, parsed: int | None) -> None:
-        raw = _raw(headers, header)
+        raw = headers.get(header)
         if raw is None:
             return
         if parsed is None or parsed != int(raw):
@@ -237,7 +232,7 @@ def _check_accessors(response, headers: dict[str, str], expect_tokens: bool) -> 
 
     # Request limits are sent on every authenticated response.
     for header in ("x-ratelimit-limit-requests", "x-ratelimit-remaining-requests"):
-        if _raw(headers, header) is None:
+        if headers.get(header) is None:
             problems.append(f"{header} header missing")
     compare_int("x-ratelimit-limit-requests", rate_limits.limit_requests if rate_limits else None)
     compare_int(
@@ -245,21 +240,21 @@ def _check_accessors(response, headers: dict[str, str], expect_tokens: bool) -> 
     )
     if expect_tokens:
         for header in ("x-ratelimit-limit-tokens", "x-ratelimit-remaining-tokens"):
-            if _raw(headers, header) is None:
+            if headers.get(header) is None:
                 problems.append(f"{header} header missing")
     compare_int("x-ratelimit-limit-tokens", rate_limits.limit_tokens if rate_limits else None)
     compare_int(
         "x-ratelimit-remaining-tokens", rate_limits.remaining_tokens if rate_limits else None
     )
 
-    raw_usd = _raw(headers, "x-venice-balance-usd")
+    raw_usd = headers.get("x-venice-balance-usd")
     if raw_usd is not None:
         balance = response.balance_info
         parsed_usd = balance.usd if balance else None
         if parsed_usd is None or abs(parsed_usd - float(raw_usd)) > 1e-9:
             problems.append(f"x-venice-balance-usd={raw_usd!r} but balance_info.usd={parsed_usd!r}")
 
-    raw_warning = _raw(headers, "x-venice-model-deprecation-warning")
+    raw_warning = headers.get("x-venice-model-deprecation-warning")
     if raw_warning is not None:
         deprecation = response.deprecation_info
         if deprecation is None or deprecation.warning != raw_warning:
@@ -267,7 +262,7 @@ def _check_accessors(response, headers: dict[str, str], expect_tokens: bool) -> 
                 "x-venice-model-deprecation-warning is set but deprecation_info missed it"
             )
 
-    raw_version = _raw(headers, "x-venice-version")
+    raw_version = headers.get("x-venice-version")
     if raw_version is None:
         problems.append("x-venice-version header missing")
     elif response.venice_version != raw_version:
@@ -290,8 +285,9 @@ def demonstrate_response_headers(response, response_type: str, *, expect_tokens:
     headers = response.headers
     if headers:
         print(f"📋 Raw Headers ({len(headers)} total):")
-        venice_headers = {k: v for k, v in headers.items() if k.lower().startswith("x-venice")}
-        rate_headers = {k: v for k, v in headers.items() if k.lower().startswith("x-ratelimit")}
+        # Names iterate in lowercase, and any lookup ignores case.
+        venice_headers = {k: v for k, v in headers.items() if k.startswith("x-venice")}
+        rate_headers = {k: v for k, v in headers.items() if k.startswith("x-ratelimit")}
 
         if venice_headers:
             print("   Venice Headers:")
@@ -302,7 +298,7 @@ def demonstrate_response_headers(response, response_type: str, *, expect_tokens:
             print("   Rate Limit Headers:")
             for key, value in rate_headers.items():
                 print(f"     • {key}: {value}")
-            if "x-ratelimit-resets" in {k.lower() for k in rate_headers}:
+            if "x-ratelimit-resets" in rate_headers:
                 print(
                     "     (the unsuffixed x-ratelimit-remaining / -resets pair is the rolling\n"
                     "      30-second error budget, counted per model per key; a 429 from it\n"

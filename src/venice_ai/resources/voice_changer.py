@@ -49,7 +49,7 @@ from ..types.api.voice_changer import (
     VoiceChangerQuoteResponse,
     VoiceChangerRetrieveResponse,
 )
-from ..utils.errors import read_body
+from ..utils.errors import forget_parsed_text, parse_json, read_body
 from ..validation.validators import validate_model_id
 from ._inline_audio import read_inline_audio
 
@@ -75,16 +75,17 @@ class VoiceChangerJob:
                 status = await job.wait()
                 await job.download("converted.mp3", status)
 
-    Note that under :class:`~venice_ai.SyncVeniceClient` this object's methods
-    stay coroutines — the sync proxy's ``_wrap_result`` only special-cases
-    ``Stream`` — so they must be awaited. :class:`~venice_ai.MusicJob` and
-    :class:`~venice_ai.VideoJob` share that limitation.
+    Under :class:`~venice_ai.SyncVeniceClient` the job comes back wrapped: its
+    methods block, and ``with job:`` releases the media on the same terms as
+    ``async with``. The same holds for :class:`~venice_ai.MusicJob` and
+    :class:`~venice_ai.VideoJob`.
     """
 
     def __init__(self, client: VeniceClient, queue_response: VoiceChangerQueueResponse):
         self.model: str = queue_response.model
         self.queue_id: str = queue_response.queue_id
-        #: Source length measured server-side — the exact quantity billed.
+        #: Source length measured server-side; billing rounds it up to the next
+        #: whole minute.
         self.duration_seconds: float = queue_response.duration_seconds
         self._client = client
         self._status: VoiceChangerRetrieveResponse | None = None
@@ -105,8 +106,8 @@ class VoiceChangerJob:
 
         The media is released only when the block exits without an exception.
         If the block raised (a failed save, a cancelled task), nothing is
-        released and a WARNING names the ``queue_id``: the conversion was
-        already billed, and the converted audio stays retrievable. Resume with
+        released and a WARNING names the ``queue_id``: any converted audio
+        stays retrievable. Resume with
         ``client.voice_changer.retrieve(model=..., queue_id=...)``, save the
         audio, then call ``client.voice_changer.cancel(model=..., queue_id=...)``.
         Call :meth:`cancel` inside the block to discard the audio on purpose;
@@ -118,7 +119,7 @@ class VoiceChangerJob:
         if exc_type is not None:
             logger.warning(
                 "VoiceChangerJob queue_id=%s (model %s) left its context with %s, so its "
-                "media was not released. The conversion is billed; to keep the audio, call "
+                "media was not released. To keep the audio, call "
                 "client.voice_changer.retrieve(model=%r, queue_id=%r) and save it, then "
                 "client.voice_changer.cancel(model=%r, queue_id=%r).",
                 self.queue_id,
@@ -304,7 +305,8 @@ class VoiceChanger(APIResource["VeniceClient"]):
 
         Returns:
             A :class:`VoiceChangerQueueResponse` whose ``duration_seconds`` is
-            the server-measured source length — the exact quantity billed.
+            the server-measured source length; billing rounds it up to the next
+            whole minute.
 
         Raises:
             ValueError: If neither or both of ``file`` / ``audio_url`` are given.
@@ -475,15 +477,17 @@ class VoiceChanger(APIResource["VeniceClient"]):
         # is an APITimeoutError, and a body that is not JSON is a parse error.
         body_bytes = await read_body(raw_response)
         try:
-            response_data = await raw_response.json()
+            response_data = await parse_json(raw_response)
         except (aiohttp.ContentTypeError, ValueError) as e:
+            # The body can hold the download link, which grants access on its own.
             logger.error(
                 "Failed to parse JSON from voice_changer.retrieve response: %s. "
-                "Content-Type: %r, Body preview: %.500s",
+                "Content-Type: %r, body length: %d",
                 e,
                 content_type,
-                body_bytes[:500].decode("utf-8", errors="replace"),
+                len(body_bytes),
             )
+            forget_parsed_text(e)
             raise
 
         if isinstance(response_data, dict):

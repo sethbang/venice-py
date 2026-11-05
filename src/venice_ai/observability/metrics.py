@@ -47,8 +47,20 @@ class EnhancedMetricsConfig(BaseModel):
     include_detailed_metrics: bool = Field(
         default=False, description="Include detailed per-model metrics"
     )
-    prometheus_port: int = Field(default=8000, description="Prometheus metrics port")
-    prometheus_host: str = Field(default="127.0.0.1", description="Prometheus metrics host")
+    prometheus_port: int = Field(
+        default=8000,
+        description=(
+            "Not read by the SDK, which starts no metrics server; "
+            "pass your port to start_http_server."
+        ),
+    )
+    prometheus_host: str = Field(
+        default="127.0.0.1",
+        description=(
+            "Not read by the SDK, which starts no metrics server; "
+            "pass your address to start_http_server."
+        ),
+    )
 
 
 class EnhancedMetrics:
@@ -62,9 +74,13 @@ class EnhancedMetrics:
 
     **Usage:**
     ```python
-    from venice_ai.observability import EnhancedMetrics
+    from prometheus_client import start_http_server
 
-    metrics = EnhancedMetrics(config=EnhancedMetricsConfig(enabled=True))
+    from venice_ai.core.metrics import get_metrics_collector
+    from venice_ai.observability import EnhancedMetricsConfig, get_enhanced_metrics
+
+    metrics = get_enhanced_metrics(EnhancedMetricsConfig(enabled=True))
+    start_http_server(8000, addr="127.0.0.1", registry=get_metrics_collector().registry)
     ```
     """
 
@@ -78,7 +94,9 @@ class EnhancedMetrics:
 
         Args:
             config: Enhanced metrics configuration
-            base_collector: Base metrics collector to extend
+            base_collector: Collector whose registry holds these metrics. Without
+                one they are in no registry and cannot be served;
+                :func:`get_enhanced_metrics` supplies it.
         """
         self.config = config or EnhancedMetricsConfig()
         self._base_collector = base_collector
@@ -115,7 +133,7 @@ class EnhancedMetrics:
         assert Counter is not None and Histogram is not None and Gauge is not None  # nosec B101
 
         try:
-            registry = self._base_collector._registry if self._base_collector else None
+            registry = self._base_collector.registry if self._base_collector else None
 
             # Streaming fallback metrics
             self.streaming_fallback_total = Counter(

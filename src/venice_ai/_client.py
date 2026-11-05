@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import json
 import logging
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -32,6 +33,11 @@ from .exceptions import (
 )
 from .middleware import RetryOptions
 from .middleware.retry import _SIWE_HEADER, _active_siwe_resigner
+from .middleware.third_party import (
+    create_third_party_header_filter,
+    keeping_url_credentials,
+    same_origin,
+)
 from .rate_limiting import RateLimiterProtocol
 from .resources.api_keys import ApiKeys
 from .resources.audio import Audio
@@ -52,9 +58,28 @@ from .resources.voice_changer import VoiceChanger
 from .resources.x402 import X402
 from .streaming import Stream
 from .utils import NOT_GIVEN, NotGiven, serialize_form_value
-from .utils.errors import read_body, resolve_timeout, wrap_aiohttp_errors
+from .utils.errors import (
+    Phase,
+    ResponseSummary,
+    input_free_validation_error,
+    parse_json,
+    read_body,
+    resolve_timeout,
+    url_free_status_error,
+    url_free_transport_error,
+    wrap_aiohttp_errors,
+)
 
 logger = logging.getLogger(__name__)
+
+#: How long a later ``close()`` waits for the first to finish.
+_CLOSE_JOIN_TIMEOUT_SECONDS = 30.0
+
+#: The clients whose ``close()`` this code runs inside. Tasks that a close starts
+#: inherit it.
+_CLOSING_CLIENTS: contextvars.ContextVar[frozenset[VeniceClient]] = contextvars.ContextVar(
+    "venice_ai_closing_clients", default=frozenset()
+)
 
 _T = TypeVar("_T")
 _U = TypeVar("_U")
@@ -66,6 +91,35 @@ if TYPE_CHECKING:
     from .core.config import VeniceAIConfig
     from .core.http_client import VeniceHTTPClient
     from .costs import CostTracker
+
+# A header whose lowercased name contains any of these has its value left out of logs.
+_SENSITIVE_HEADER_MARKERS = (
+    "auth",
+    "bearer",
+    "cookie",
+    "cred",
+    "jwt",
+    "key",
+    "pass",
+    "payment",
+    "pwd",
+    "secret",
+    "session",
+    "sign",
+    "token",
+)
+
+
+def _redacted_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Return *headers* as they may be logged, with the value of each sensitive one hidden."""
+    return {
+        name: (
+            "[REDACTED]"
+            if any(marker in name.lower() for marker in _SENSITIVE_HEADER_MARKERS)
+            else value
+        )
+        for name, value in headers.items()
+    }
 
 
 class VeniceClient:
@@ -84,6 +138,7 @@ class VeniceClient:
     _session: aiohttp.ClientSession | None
     _session_lock: asyncio.Lock
     _is_closed: bool = False
+    _close_in_progress: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None
     _should_close_session: bool
 
     chat: ChatResource
@@ -238,13 +293,16 @@ class VeniceClient:
                 (Mode 2 — no API key, prepaid balance) —
                 :class:`~venice_ai.auth.x402.X402Auth` for EVM wallets or
                 :class:`~venice_ai.auth.x402_solana.SolanaX402Auth` for
-                Solana. When set with ``api_key=None``,
-                the SDK skips ``Authorization: Bearer`` and signs a fresh
-                ``X-Sign-In-With-X`` header per request. When
-                both ``api_key`` and ``auth`` are set, the API key wins
-                for default request auth; the auth instance is stored
-                so callers can pass it explicitly to per-call ``auth=``
-                kwargs (e.g., ``client.x402.balance(auth=auth)``).
+                Solana. When no API key resolves, the SDK skips
+                ``Authorization: Bearer`` and signs a fresh
+                ``X-Sign-In-With-X`` header per request. ``api_key=None`` is
+                not enough for that when ``config.api_key`` or
+                ``VENICE_API_KEY`` is set; pass ``api_key=""`` to use the
+                wallet regardless. When a key does resolve, the API key wins
+                for default request auth, and no ``X-Sign-In-With-X`` header
+                is sent; the auth instance is stored so callers can pass it
+                explicitly to per-call ``auth=`` kwargs (e.g.,
+                ``client.x402.balance(auth=auth)``).
             base_url: The API root, version path included
                 (``https://api.venice.ai/api/v1``). A bare host such as
                 ``https://api.venice.ai`` gets ``/api/v1`` appended; any other
@@ -260,7 +318,12 @@ class VeniceClient:
                 The session is never modified: authentication headers are
                 attached to each API request rather than to the session, and
                 request URLs are absolute, so the session needs no
-                ``base_url`` of its own.
+                ``base_url`` of its own. An exception the SDK raises holds no
+                request headers, but ``error.response`` is your session's own
+                ``ClientResponse``, whose ``request_info.headers`` holds the key.
+                Each request passes ``middlewares=``, which repeats the session's own
+                so they keep running, and its default headers and cookies do not
+                reach hosts other than the API.
             timeout: The default request timeout in seconds.
             default_timeout: A pre-configured ``aiohttp.ClientTimeout`` object
                 that overrides the ``timeout`` setting.
@@ -294,7 +357,9 @@ class VeniceClient:
                 decompress response content.
             cookie_jar: A custom ``aiohttp.CookieJar`` for managing cookies.
             headers: Default headers to include in every API request, including
-                requests sent through a caller-supplied ``http_client``.
+                requests sent through a caller-supplied ``http_client``. They are
+                not sent to any other host, including one an API response
+                redirects to.
             skip_auto_headers: A list of headers that ``aiohttp`` should not
                 automatically add.
             retry_options: Configuration for the request retry strategy. Takes
@@ -361,6 +426,7 @@ class VeniceClient:
         self._cookie_jar = cookie_jar
         self._headers = headers
         self._skip_auto_headers = skip_auto_headers
+        self._third_party_header_filter = create_third_party_header_filter(self._base_url.origin())
         self._retry_options = self._resolve_retry_options(retry_options, max_retries, config)
         self._cost_tracker = cost_tracker
 
@@ -438,6 +504,9 @@ class VeniceClient:
         # Initialize rate limiter attributes (rate_limiter injected by factory or later)
         self.rate_limiter: RateLimiterProtocol | None = rate_limiter
         self._scheduler_manager: RateLimiterProtocol | None = rate_limiter
+        # Set by _inject_rate_limiter. A limiter given to the constructor is the
+        # caller's: close() stops it but leaves its backend alone.
+        self._owns_rate_limiter_backend = False
 
         # Initialize API resources
         self.chat = ChatResource(self)
@@ -532,18 +601,15 @@ class VeniceClient:
         """
         from .core.http_client import VeniceHTTPClient
 
-        # The session carries no credentials: _request_headers() attaches
-        # them to each API request, so media URLs on other hosts fetched
-        # through the same session (CDN, pre-signed storage) never receive
-        # the API key.
+        # The session carries neither credentials nor the client's headers:
+        # _request_headers() attaches them to each API request, so URLs on other
+        # hosts reached through the same session (CDN, pre-signed storage, Solana
+        # RPC) receive neither.
         return VeniceHTTPClient(
             config=config,
             api_key=None,
             base_url=str(base_url) if base_url is not None else None,
-            headers=cast(
-                dict[str, str] | None,
-                self._headers if self._headers is not NOT_GIVEN else None,
-            ),
+            headers=None,
             trust_env=cast(
                 bool | None,
                 self._trust_env if self._trust_env is not NOT_GIVEN else None,
@@ -643,29 +709,47 @@ class VeniceClient:
 
         Honors the client's connector, proxy, SSL, timeout, and retry configuration.
         Intended for asset downloads (e.g. video / image CDN URLs returned by API
-        responses). The client's credentials are attached only when ``url`` has
-        the same origin (scheme, host and port) as the API base URL; a URL on
-        any other host -- a CDN or a pre-signed storage URL -- is fetched
-        without them, so the API key never reaches a third party.
+        responses). The client's credentials and ``headers=`` are attached only
+        when ``url`` has the same origin (scheme, host and port) as the API base
+        URL. A URL on any other host -- a CDN or a pre-signed storage URL, reached
+        directly or by a redirect -- receives ``Accept``, ``User-Agent`` and none
+        of the default headers of a caller-supplied ``http_client``.
+
+        Such a URL can grant access on its own, so a failure does not carry it:
+        errors show the scheme and host at most, and name a transport failure
+        by type with nothing chained.
 
         :param url: Absolute URL to fetch.
         :return: Response body as ``bytes``.
         :raises aiohttp.ClientResponseError: If the response status is >= 400.
+            ``request_info`` holds only the scheme and host, ``history`` is
+            empty, and ``headers`` holds only ``Retry-After``, if sent.
         :raises APITimeoutError: If the request or its body does not arrive
             within the session timeout.
         :raises APIConnectionError: If the connection fails.
         """
         session = await self._get_session()
-        headers = (
-            self._request_headers(session) if URL(url).origin() == self._base_url.origin() else None
-        )
-        async with wrap_aiohttp_errors():
-            resp = await session.get(url, headers=headers, timeout=self._timeout)
+        headers = self._request_headers(session) if same_origin(URL(url), self._base_url) else None
+        # Raised after the except block, which keeps aiohttp's error, and the URL
+        # it quotes, out of __context__.
+        failure: Exception
+        phase: Phase = "request"
         try:
-            resp.raise_for_status()
-            return await read_body(resp)
-        finally:
-            resp.release()
+            with keeping_url_credentials(url):
+                resp = await session.get(
+                    url, headers=headers, timeout=self._timeout, **self._session_request_options()
+                )
+            try:
+                if resp.status < 400:
+                    phase = "body"
+                    body: bytes = await resp.read()
+                    return body
+                failure = url_free_status_error(resp)
+            finally:
+                resp.release()
+        except (TimeoutError, aiohttp.ClientError) as e:
+            failure = url_free_transport_error(e, phase=phase)
+        raise failure
 
     async def get(
         self,
@@ -877,6 +961,8 @@ class VeniceClient:
             raise RuntimeError("Rate limiter already injected")
 
         self.rate_limiter = rate_limiter
+        self._scheduler_manager = rate_limiter
+        self._owns_rate_limiter_backend = True
 
     def _should_use_rate_limiter(self) -> bool:
         """Determine if the rate limiter should be used based on configuration."""
@@ -951,7 +1037,23 @@ class VeniceClient:
             "params": params,
             "headers": headers,
             "timeout": resolve_timeout(timeout, self._timeout),
+            **self._session_request_options(),
         }
+
+    def _session_request_options(self) -> dict[str, Any]:
+        """Return the keyword arguments every request sent through the session needs.
+
+        A session the SDK builds already holds the third-party header filter, so
+        nothing is added. A session the caller supplied is left untouched, so the
+        filter is added per request. aiohttp's per-request ``middlewares=`` replaces
+        the session's list rather than extending it, so the list repeats the
+        session's own middlewares, which keep running. The filter comes after them
+        and also removes what they add to a request for another host.
+        """
+        if self._venice_http_client is not None or self._session is None:
+            return {}
+        caller_middlewares = getattr(self._session, "_middlewares", ())
+        return {"middlewares": (*caller_middlewares, self._third_party_header_filter)}
 
     def _default_siwe_header(self) -> str | None:
         """Return a freshly signed SIWE token for SIWE-only (Mode 2) auth.
@@ -1021,7 +1123,7 @@ class VeniceClient:
             siwe = self._default_siwe_header()
             if siwe is not None:
                 merged[_SIWE_HEADER] = siwe
-        if isinstance(self._headers, dict):
+        if isinstance(self._headers, (Mapping, list, tuple)):
             merged.update(self._headers)
         if headers:
             merged.update(headers)
@@ -1224,17 +1326,7 @@ class VeniceClient:
             request_headers = self._request_headers(session, headers, siwe_auth)
 
             # Redact sensitive headers before logging
-            safe_headers = request_headers.copy()
-            for _sensitive in (
-                "Authorization",
-                "X-API-Key",
-                _SIWE_HEADER,
-                "X-402-Payment",
-            ):
-                if _sensitive in safe_headers:
-                    safe_headers[_sensitive] = "[REDACTED]"
-
-            logger.debug(f"Request headers: {safe_headers}")
+            logger.debug(f"Request headers: {_redacted_headers(request_headers)}")
 
             kwargs = self._build_request_kwargs(
                 method,
@@ -1268,7 +1360,7 @@ class VeniceClient:
                 if empty_result is not None:
                     body = empty_result
                 else:
-                    body = await response.json()
+                    body = await parse_json(response)
             except (aiohttp.ContentTypeError, ValueError) as e:
                 # JSON parsing failed, try to get text instead
                 try:
@@ -1436,10 +1528,23 @@ class VeniceClient:
         # body that arrived but is not JSON is a parsing error, never mistaken
         # for a connection failure.
         await read_body(response)
+        hidden_parse_failure: APIResponseValidationError | None = None
+        response_data: Any = None
         try:
-            response_data = await response.json()
+            response_data = await parse_json(response)
         except (aiohttp.ContentTypeError, ValueError) as e:
-            if cast_to:
+            if cast_to and cast_to.model_config.get("hide_input_in_errors", False):
+                # The original holds the body or the request's headers, so it is
+                # named by type and kept out of the new error's chain.
+                hidden_parse_failure = APIResponseValidationError(
+                    f"Expected {cast_to.__name__} but failed to parse JSON response "
+                    f"({type(e).__name__})",
+                    validation_error=ValueError(f"Response body is not JSON ({type(e).__name__})"),
+                    response_data=None,
+                    model_name=cast_to.__name__,
+                    response=ResponseSummary.without_body(response),
+                )
+            elif cast_to:
                 raise APIResponseValidationError(
                     f"Expected {cast_to.__name__} but failed to parse JSON response",
                     validation_error=e,
@@ -1447,9 +1552,12 @@ class VeniceClient:
                     model_name=cast_to.__name__,
                     response=response,
                 ) from e
-            raise APIResponseProcessingError(
-                "Failed to parse JSON response", original_error=e, response=response
-            ) from e
+            else:
+                raise APIResponseProcessingError(
+                    "Failed to parse JSON response", original_error=e, response=response
+                ) from e
+        if hidden_parse_failure is not None:
+            raise hidden_parse_failure
 
         # Handle model validation
         if cast_to:
@@ -1498,23 +1606,37 @@ class VeniceClient:
 
                 return validated_model
             except ValidationError as e:
+                # A model whose body can hold a secret opts out of quoting its input,
+                # and the error holds neither the body nor the original error.
+                hide_input = cast_to.model_config.get("hide_input_in_errors", False)
                 logger.error(
                     f"Pydantic validation failed for {cast_to.__name__}: {e}",
                     extra={
                         "model_name": cast_to.__name__,
-                        "response_data": response_data,
-                        "validation_errors": e.errors(),
+                        "response_data": "<not shown>" if hide_input else response_data,
+                        "validation_errors": e.errors(include_input=not hide_input),
                         "endpoint": path,
                         "method": method,
                     },
                 )
-                raise APIResponseValidationError(
+                if not hide_input:
+                    raise APIResponseValidationError(
+                        f"API response validation failed for {cast_to.__name__}",
+                        validation_error=e,
+                        response_data=response_data,
+                        model_name=cast_to.__name__,
+                        response=response,
+                    ) from e
+                failure = APIResponseValidationError(
                     f"API response validation failed for {cast_to.__name__}",
-                    validation_error=e,
-                    response_data=response_data,
+                    validation_error=input_free_validation_error(e),
+                    response_data=None,
                     model_name=cast_to.__name__,
-                    response=response,
-                ) from e
+                    response=ResponseSummary.without_body(response),
+                )
+            # Raised after the except block, which keeps the original error, and
+            # the input it holds, out of __context__.
+            raise failure
 
         return response_data
 
@@ -1693,25 +1815,107 @@ class VeniceClient:
     # -------------------------------------------------------------------
 
     async def close(self) -> None:
+        """Stop the rate limiter, then close the HTTP client and session.
+
+        The limiter stops first so that queued work is not driven against a closed
+        session. Every step runs even if an earlier one is cancelled, and the
+        ``CancelledError`` still reaches the caller, so a later call has nothing
+        left to do.
+
+        A later call made while the first is still running waits for it, and
+        cancelling that waiter leaves the first running. Two callers return at once,
+        because waiting could not end or could not work:
+
+        - Code running inside this close, including any task it started: the close
+          may be waiting on that code.
+        - A caller on another event loop: it cannot wait on this one.
+
+        A task from before the close that the close turns out to be waiting on cannot
+        be told apart from an ordinary caller, so every waiter gives up after 30
+        seconds, logs a WARNING and returns.
+        """
         if self._is_closed:
+            await self._join_close_in_progress()
             return
-
-        if self._venice_http_client is not None:
-            try:
-                await self._venice_http_client.close()
-            except (AttributeError, RuntimeError, OSError) as e:
-                logger.warning(f"Error closing Venice HTTP client: {e}")
-
-        if self._should_close_session and self._session:
-            await self._session.close()
-
-        if self._scheduler_manager:
-            try:
-                await self._scheduler_manager.stop()
-            except (AttributeError, RuntimeError, OSError) as e:
-                logger.warning(f"Error stopping scheduler: {e}")
-
         self._is_closed = True
+
+        done = asyncio.Event()
+        self._close_in_progress = (asyncio.get_running_loop(), done)
+        token = _CLOSING_CLIENTS.set(_CLOSING_CLIENTS.get() | {self})
+        try:
+            try:
+                await self._stop_rate_limiters()
+            finally:
+                try:
+                    if self._venice_http_client is not None:
+                        try:
+                            await self._venice_http_client.close()
+                        except (AttributeError, RuntimeError, OSError) as e:
+                            logger.warning(f"Error closing Venice HTTP client: {e}")
+                finally:
+                    if self._should_close_session and self._session:
+                        await self._session.close()
+        finally:
+            self._close_in_progress = None
+            done.set()
+            _CLOSING_CLIENTS.reset(token)
+
+    async def _join_close_in_progress(self) -> None:
+        """Wait for a close still running, unless :meth:`close` says not to."""
+        in_progress = self._close_in_progress
+        if in_progress is None or self in _CLOSING_CLIENTS.get():
+            return
+        loop, done = in_progress
+        if loop is not asyncio.get_running_loop():
+            return
+        try:
+            async with asyncio.timeout(_CLOSE_JOIN_TIMEOUT_SECONDS):
+                await done.wait()
+        except TimeoutError:
+            logger.warning(
+                "VeniceClient.close() is still running after %s seconds; returning without "
+                "waiting further.",
+                _CLOSE_JOIN_TIMEOUT_SECONDS,
+            )
+
+    async def _stop_rate_limiters(self) -> None:
+        """Stop each distinct limiter once, then release the backend the client owns.
+
+        A failure here is logged and goes no further, so the HTTP resources are
+        still closed. A cancellation does not skip a later step. Stopping does not
+        close a Redis backend's connections, so a backend built by the factory,
+        which nothing else can hold, is cleaned up as well. A limiter given to the
+        constructor may be shared: it is stopped, and its backend is left for its
+        owner.
+        """
+        try:
+            await self._stop_rate_limiter(self.rate_limiter)
+        finally:
+            try:
+                if self._scheduler_manager is not self.rate_limiter:
+                    await self._stop_rate_limiter(self._scheduler_manager)
+            finally:
+                await self._cleanup_rate_limiter_backend()
+
+    @staticmethod
+    async def _stop_rate_limiter(limiter: Any) -> None:
+        if limiter is None:
+            return
+        try:
+            await limiter.stop()
+        except Exception as e:  # noqa: BLE001 - shutdown must reach the HTTP resources
+            logger.warning(f"Error stopping rate limiter: {e}")
+
+    async def _cleanup_rate_limiter_backend(self) -> None:
+        if not self._owns_rate_limiter_backend:
+            return
+        cleanup = getattr(self._scheduler_manager, "cleanup_backend", None)
+        if cleanup is None:
+            return
+        try:
+            await cleanup()
+        except Exception as e:  # noqa: BLE001 - shutdown must reach the HTTP resources
+            logger.warning(f"Error cleaning up rate limiter backend: {e}")
 
     async def __aenter__(self) -> VeniceClient:
         return self

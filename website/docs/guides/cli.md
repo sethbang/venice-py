@@ -434,7 +434,7 @@ venice-py image edit photo.jpg -p "Add a rainbow" --no-safe-mode
 
 ### `venice-py image multi-edit`
 
-Edit an image using up to three layered inputs. The first image is the base; additional images are layered on top, guided by a single prompt.
+Edit an image using up to three layered inputs, one per flag (`--image`, `--image-2`, `--image-3`). The first image is the base; additional images are layered on top, guided by a single prompt. The API's limit is per model, and the SDK's `client.image.multi_edit(images=[...])` can send more than this command can.
 
 ```bash
 venice-py image multi-edit --prompt <INSTRUCTION> --image <BASE_FILE> [OPTIONS]
@@ -791,22 +791,25 @@ venice-py video from-image portrait.jpg --duration 10s --open
 
 ### `venice-py video status`
 
-Check the status of a video generation job (useful with `--no-poll`).
+Check the status of a video generation job, and save it once it has finished (useful with `--no-poll`).
 
 ```bash
-venice-py video status <JOB_ID> [OPTIONS]
+venice-py video status <JOB_ID> --model <MODEL> [OPTIONS]
 ```
 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
-| `--model` | `-m` | — | Model used when the job was queued |
+| `--model` | `-m` | required | Model used when the job was queued |
+| `--output` | `-o` | — | Save the video to this path if the job has finished |
 
-> No default is applied here; pass the same model the job was queued with.
+> Venice looks a job up by model and job ID, so pass the same model the job was queued with.
 
 ```bash
-venice-py video status abc123
-venice-py video status abc123 --model wan-2.6-image-to-video
+venice-py video status abc123 --model <video-model>
+venice-py video status abc123 --model <video-model> --output video.mp4
 ```
+
+A download link grants access on its own, so the CLI never prints it. A model that hands out its link only in the queue response cannot be downloaded from its job ID: `video generate` and `video from-image` warn about this when used with `--no-poll`, and `video status` says so for a finished job with nothing to download. Run the command without `--no-poll` to save such a video when it finishes.
 
 ---
 
@@ -1553,6 +1556,18 @@ cat sentences.txt | while IFS= read -r line; do
   venice --plain embeddings "$line" --json >> all_embeddings.jsonl
 done
 ```
+
+### Exit Codes
+
+A command exits `0` when it did what was asked and `1` when it did not, so a script can test it directly:
+
+- `video generate` and `video from-image` exit `1` when generation fails or times out, or a finished job has nothing to download.
+- `video status` exits `0` for any status it could read. With `--output` it exits `1` if the job failed or has nothing to save, and `0` while the job is still running.
+- `image batch` exits `1` if any prompt failed, after saving the rest and printing the summary.
+- `models` exits `1` if a listing request failed and no model can be shown, or a type named in `--type` failed. If any other type failed, it shows the models it has and warns on stderr, and filters that match nothing under a `--type` that worked exit `0`.
+- An empty listing, such as no voices or no saved conversations, exits `0`.
+
+Invalid usage exits `2`.
 
 ### Usage in CI/CD
 

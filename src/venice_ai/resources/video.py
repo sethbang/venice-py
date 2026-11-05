@@ -18,14 +18,20 @@ import asyncio
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import aiohttp
 
 from .._resource import APIResource
-from ..exceptions import InvalidRequestError, UnprocessableEntityError, VideoGenerationError
+from ..exceptions import (
+    APIResponseProcessingError,
+    InvalidRequestError,
+    UnprocessableEntityError,
+    VideoGenerationError,
+)
 from ..helpers import normalize_duration_seconds
 from ..middleware import RetryOptions
+from ..middleware.third_party import keeping_url_credentials
 from ..types.api.models import VideoModelSpec
 from ..types.api.requests.video import (
     CameraKeyframe,
@@ -49,7 +55,14 @@ from ..types.api.video import (
     VideoRetrieveResponse,
     VideoTranscriptionResponse,
 )
-from ..utils.errors import read_body, wrap_aiohttp_errors
+from ..utils.errors import (
+    ResponseSummary,
+    forget_parsed_text,
+    parse_json,
+    read_body,
+    url_free_transport_error,
+    validate_hiding_input,
+)
 
 if TYPE_CHECKING:
     from .._client import VeniceClient  # noqa: F401
@@ -178,12 +191,7 @@ async def _preflight_validate_video_duration(
         )
 
 
-#: Status codes a ``DELETE`` on a queue-time ``download_url`` answers when the
-#: file is gone afterwards: removed now, or already removed earlier.
-_LINK_DELETED_STATUSES = frozenset({200, 202, 204, 404})
-
-#: The link is a bearer URL: it is sent once, without retries, so the retry
-#: middleware never writes it to a log.
+#: The ``DELETE`` on a download link is sent once, without retries.
 _NO_RETRIES = RetryOptions(max_attempts=0)
 
 
@@ -302,6 +310,18 @@ class VideoJob:
             benign = isinstance(e, InvalidRequestError) and _is_unknown_request_id(e)
             level = logging.DEBUG if benign else logging.WARNING
             logger.log(level, "VideoJob cleanup failed for queue_id=%s: %s", self.queue_id, e)
+
+    @property
+    def download_url(self) -> str | None:
+        """The queue-time link to the video, for models that return one.
+
+        These models hand the link out once, in the queue response, and
+        ``/video/retrieve`` does not repeat it. Save it with ``model`` and
+        ``queue_id`` if the job may outlive this process. The link grants access
+        on its own, without credentials, so treat it like a password: this SDK
+        never logs it, and it is not part of this object's ``repr``.
+        """
+        return self._download_url
 
     @property
     def status(self) -> VideoRetrieveResponse | None:
@@ -435,11 +455,15 @@ class VideoJob:
         lives behind that link and ``/video/complete`` does not know the job:
         it answers 400 "Request ID is invalid". This method first sends
         ``DELETE`` to the ``download_url`` (without the client's credentials:
-        the link authorizes itself), treating a 404 as already deleted, then
-        calls ``/video/complete``. When that call answers "Request ID is
-        invalid" after the link was deleted, the result is a synthesized
-        ``VideoCompleteResponse(success=True)``. Without a ``download_url``
-        this is a single ``/video/complete`` call.
+        the link authorizes itself), then calls ``/video/complete``. When the
+        ``DELETE`` answered a 2xx, or answered 404 for a job that has finished
+        (the file is already gone), a "Request ID is invalid" or
+        ``success: false`` from that call becomes a synthesized
+        ``VideoCompleteResponse(success=True)``. A 404 for a job not known to
+        have finished deleted nothing, since the file may not exist yet, so
+        the server's answer stands, whether ``success: false`` or the error.
+        Without a ``download_url`` this is a single ``/video/complete`` call
+        and its answer is returned as is.
 
         Named ``cancel`` (rather than the wire-format ``complete``) to
         distinguish it from the :attr:`is_complete` state check; terminal
@@ -452,25 +476,35 @@ class VideoJob:
         :raises APIError: If the ``DELETE`` on the ``download_url`` answers
             another error status (mapped by status code, e.g.
             :class:`~venice_ai.exceptions.PermissionDeniedError` for a 403),
-            or ``/video/complete`` fails. ``/video/complete`` is not called
-            when the ``DELETE`` fails.
+            or ``/video/complete`` raises an error, except the "Request ID is
+            invalid" that is synthesized away as described above.
+            ``/video/complete`` is not called when the ``DELETE`` fails. The
+            error's ``response`` for a failed ``DELETE`` is a
+            :class:`~venice_ai.utils.errors.ResponseSummary` showing only the
+            scheme and host of the link, with ``Retry-After`` as its only header.
         :raises APITimeoutError: If the ``DELETE`` times out.
         :raises APIConnectionError: If the connection fails during the ``DELETE``.
         """
-        link_deleted = False
+        file_gone = False
         if self._download_url:
-            await self._delete_download_url(self._download_url)
-            link_deleted = True
+            file_gone = await self._delete_download_url(self._download_url) or self._is_terminal
         try:
             result = await self._client.video.cancel(model=self.model, queue_id=self.queue_id)
         except InvalidRequestError as e:
-            if not (link_deleted and _is_unknown_request_id(e)):
+            if not (file_gone and _is_unknown_request_id(e)):
                 raise
             logger.debug(
                 "VideoJob queue_id=%s: /video/complete does not know a download_url job "
-                "(%s); its file was deleted through the link",
+                "(%s); its file is gone from the link",
                 self.queue_id,
                 e,
+            )
+            result = VideoCompleteResponse(success=True)
+        if file_gone and not result.success:
+            logger.debug(
+                "VideoJob queue_id=%s: /video/complete answered success=false for a "
+                "download_url job; its file is gone from the link",
+                self.queue_id,
             )
             result = VideoCompleteResponse(success=True)
         # Only a job that has finished has stored media to release; a release
@@ -480,32 +514,104 @@ class VideoJob:
             self._released = True
         return result
 
-    async def _delete_download_url(self, url: str) -> None:
+    async def _delete_download_url(self, url: str) -> bool:
         """Send ``DELETE`` to the queue-time ``download_url``.
 
-        The request goes through the client's session (so proxy, SSL and
-        timeout settings apply) with no per-request headers: the client's
-        credentials are attached per request, never to the session, so none
-        reach the storage host. It is sent once, without retries. A 2xx or a
-        404 (already deleted) counts as success. Error messages never include
-        the URL, which grants access to the file on its own.
+        The request goes through the client's session, so proxy, SSL and timeout
+        settings apply. The storage host receives ``Accept`` and ``User-Agent``, and
+        no credentials, ``headers=`` or default headers of a caller-supplied
+        ``http_client``. It is sent once, without retries. Error messages never
+        include the URL, which grants access to the file on its own.
+
+        :return: ``True`` for a 2xx, which deleted the file. ``False`` for a 404,
+            which deleted nothing: the file is already gone, or does not exist yet.
+        :raises APIError: For any other status, mapped by status code.
         """
         session = await self._client._get_session()
-        async with self._client.with_retries(_NO_RETRIES), wrap_aiohttp_errors():
-            resp = await session.delete(url, timeout=self._client._timeout)
+        # Raised after the except block, which keeps aiohttp's error, and the URL
+        # it quotes, out of __context__.
+        failure: Exception
+        async with self._client.with_retries(_NO_RETRIES):
+            try:
+                with keeping_url_credentials(url):
+                    resp = await session.delete(
+                        url,
+                        timeout=self._client._timeout,
+                        **self._client._session_request_options(),
+                    )
+            except (TimeoutError, aiohttp.ClientError) as e:
+                failure = url_free_transport_error(e)
+            else:
+                return await self._read_delete_result(resp)
+        raise failure
+
+    @staticmethod
+    async def _read_delete_result(resp: aiohttp.ClientResponse) -> bool:
+        """Interpret and release the response to a ``DELETE`` on a download link."""
         try:
-            if resp.status in _LINK_DELETED_STATUSES:
-                return
-            raw = await read_body(resp)
+            if 200 <= resp.status < 300:
+                return True
+            if resp.status == 404:
+                return False
             from ..exceptions import _make_status_error
 
+            # The body is left off, since a storage host's error text can echo the
+            # link, and the response is reduced to what does not hold the link.
             raise _make_status_error(
                 f"Deleting the video's download_url failed with status {resp.status}",
-                body=raw.decode("utf-8", errors="replace"),
-                response=resp,
+                body=None,
+                response=ResponseSummary.url_free(resp),
             )
         finally:
             resp.release()
+
+
+#: Boxes an MP4 or MOV file can open with, including fragmented files.
+_MP4_LEADING_BOXES = frozenset(
+    {b"ftyp", b"styp", b"moov", b"mdat", b"free", b"skip", b"wide", b"moof"}
+)
+#: Content types a storage host may give a video, which the bytes must then confirm.
+_GENERIC_VIDEO_TYPES = frozenset(
+    {"", "application/octet-stream", "binary/octet-stream", "application/mp4"}
+)
+
+
+def _is_video_container(data: bytes) -> bool:
+    """Whether *data* opens with an MP4/MOV box or the EBML header of WebM/Matroska."""
+    return data[4:8] in _MP4_LEADING_BOXES or data[:4] == b"\x1a\x45\xdf\xa3"
+
+
+async def _read_inline_video(raw_response: Any, content_type: str) -> bytes:
+    """Read a non-JSON ``/video/retrieve`` body as the finished video.
+
+    A ``video/*`` Content-Type with a non-empty body is taken as given. A generic
+    binary type, or none, is accepted when the bytes are a known video container.
+    Anything else (a proxy's HTML page, a status body served as text, an
+    empty body) is not a video, and the error shows and keeps none of the body.
+
+    Args:
+        raw_response: The unread aiohttp response; it is read and closed.
+        content_type: The response's Content-Type header.
+
+    Raises:
+        APIResponseProcessingError: If the body is not a video.
+    """
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    try:
+        body = await read_body(raw_response)
+    finally:
+        raw_response.close()
+    if media_type.startswith("video/"):
+        is_video = bool(body)
+    else:
+        is_video = media_type in _GENERIC_VIDEO_TYPES and _is_video_container(body)
+    if not is_video:
+        raise APIResponseProcessingError(
+            f"video.retrieve returned a 2xx response with Content-Type {content_type!r} "
+            f"({len(body)} bytes), which is neither a JSON status nor a video",
+            response=ResponseSummary.without_body(raw_response),
+        )
+    return body
 
 
 class Video(APIResource["VeniceClient"]):
@@ -934,27 +1040,35 @@ class Video(APIResource["VeniceClient"]):
         :rtype: VideoRetrieveResponse
 
         :raises venice_ai.exceptions.APIError: If the API request fails.
+        :raises venice_ai.exceptions.APIResponseProcessingError: If a 2xx response is
+            neither a JSON status nor a video, such as a proxy's HTML page or an empty
+            body. The error holds none of the body, which can hold a download link.
         :raises pydantic.ValidationError: If request parameters are invalid.
 
         Example::
 
             import asyncio
 
-            # Poll until complete
+            from venice_ai.resources.video import VideoJob
+
+            model = await client.models.resolve_video()
+            queued = await client.video.submit(model=model, prompt="...", duration_seconds=5)
+
+            # Poll until complete, then save the video. The status's ``url`` grants
+            # access on its own, so keep it out of output and logs.
+            job = VideoJob(client, queued)
             while True:
                 status = await client.video.retrieve(
-                    model="wan-2.6-text-to-video",
-                    queue_id="queue_abc123",
+                    model=queued.model, queue_id=queued.queue_id
                 )
-                if hasattr(status, 'url'):
-                    print(f"Video ready: {status.url}")
+                if status.status == "COMPLETED":
+                    await job.download("output.mp4", status)
                     break
-                elif hasattr(status, 'error'):
+                if status.status == "FAILED":
                     print(f"Failed: {status.error}")
                     break
-                else:
-                    print(f"Processing: {status.progress_percent:.0f}%")
-                    await asyncio.sleep(5)
+                print(f"Processing: {status.progress_percent:.0f}%")
+                await asyncio.sleep(5)
         """
         request = VideoRetrieveRequest.model_validate(
             {
@@ -983,20 +1097,12 @@ class Video(APIResource["VeniceClient"]):
             raw_response.content_length,
         )
 
-        # If the response is not JSON, it may be binary video data (COMPLETED)
-        if "application/json" not in content_type:
+        # The API streams a completed video as binary data; a JSON body is a status.
+        if "application/json" not in content_type.lower():
+            video_bytes = await _read_inline_video(raw_response, content_type)
             logger.info(
-                "video.retrieve returned non-JSON content-type %r — "
-                "reading COMPLETED binary video (%s bytes declared).",
-                content_type,
-                raw_response.content_length,
+                "video.retrieve returned COMPLETED binary video (%d bytes).", len(video_bytes)
             )
-            # The API streams the completed video as binary data.
-            # Read the body so callers can save it to disk.
-            try:
-                video_bytes = await read_body(raw_response)
-            finally:
-                raw_response.close()
 
             result = VideoCompletedStatus.model_validate(
                 {
@@ -1014,31 +1120,32 @@ class Video(APIResource["VeniceClient"]):
         # is an APITimeoutError, and a body that is not JSON is a parse error.
         body_bytes = await read_body(raw_response)
         try:
-            response_data = await raw_response.json()
+            response_data = await parse_json(raw_response)
         except (aiohttp.ContentTypeError, ValueError) as e:
             logger.error(
                 "Failed to parse JSON from video.retrieve response: %s. "
-                "Content-Type: %r, Body preview: %.500s",
+                "Content-Type: %r, body length: %d",
                 e,
                 content_type,
-                body_bytes[:500].decode("utf-8", errors="replace"),
+                len(body_bytes),
             )
+            forget_parsed_text(e)
             raise
 
         # Parse the response into the appropriate status type
         if isinstance(response_data, dict):
             status = response_data.get("status")
             if status == "FAILED":
-                return VideoFailedStatus.model_validate(response_data)
+                return validate_hiding_input(VideoFailedStatus, response_data)
             if status == "COMPLETED":
-                return VideoCompletedStatus.model_validate(response_data)
+                return validate_hiding_input(VideoCompletedStatus, response_data)
             if isinstance(status, str):
                 if status != "PROCESSING":
                     logger.warning(
                         "video.retrieve returned unknown status %r; treating it as in progress",
                         status,
                     )
-                return VideoProcessingStatus.model_validate(response_data)
+                return validate_hiding_input(VideoProcessingStatus, response_data)
 
         # Fallback: try each status type
         for status_type in (
@@ -1053,7 +1160,10 @@ class Video(APIResource["VeniceClient"]):
                 continue
 
         # If nothing worked, raise
-        raise ValueError(f"Unable to parse video retrieve response: {response_data}")
+        raise ValueError(
+            f"Unable to parse video retrieve response: got {type(response_data).__name__}, "
+            "not a recognized status object"
+        )
 
     async def cancel(
         self,
@@ -1231,31 +1341,31 @@ class Video(APIResource["VeniceClient"]):
         *,
         response_format: Literal["json", "text"] = "json",
     ) -> VideoTranscriptionResponse | str:
-        """Transcribe a public video URL to text.
+        """Transcribe a public video URL to text. The endpoint has been retired.
 
-        Wraps ``POST /api/v1/video/transcriptions``. Priced at a flat $0.02
-        per request.
+        Wraps ``POST /api/v1/video/transcriptions``, which Venice has deprecated
+        and documents as answering every request with a 410, so this call raises
+        :class:`~venice_ai.exceptions.ModelGoneError` and returns nothing. For
+        video analysis, summarization or questions about a video, call
+        ``client.chat.completions.create`` with the URL in a ``video_url``
+        content part, on a model whose
+        ``model_spec.capabilities.supportsVideoInput`` is true.
 
         :param url: Publicly accessible video URL (e.g. a YouTube watch URL).
         :type url: str
-        :param response_format: ``"json"`` (default) returns a
-            :class:`VideoTranscriptionResponse` with ``transcript`` and
-            ``lang``; ``"text"`` returns the raw transcript as ``str``.
+        :param response_format: ``json`` (default) or ``text``. It makes no
+            difference to the 410.
         :type response_format: Literal["json", "text"]
 
-        :return: Either the parsed response model or the plain transcript
-            string, depending on ``response_format``.
+        :return: Declared as the parsed response or a plain string per
+            ``response_format``; no call reaches it, since the endpoint answers 410.
         :rtype: VideoTranscriptionResponse | str
 
-        :raises venice_ai.exceptions.APIError: If the API request fails.
+        :raises venice_ai.exceptions.ModelGoneError: On the 410 the endpoint
+            answers.
+        :raises venice_ai.exceptions.APIError: If the API request fails another
+            way.
         :raises pydantic.ValidationError: If ``url`` is not an http(s) URL.
-
-        Example::
-
-            result = await client.video.transcribe(
-                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-            )
-            print(result.lang, result.transcript)
         """
         request = VideoTranscriptionRequest.model_validate(
             {"url": url, "response_format": response_format}

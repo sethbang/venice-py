@@ -272,7 +272,7 @@ async def test_unrecognised_octet_stream_is_rejected() -> None:
 
 @pytest.mark.parametrize("content_type", ["text/html", "text/plain", ""])
 async def test_non_audio_bodies_are_rejected(content_type: str) -> None:
-    with pytest.raises(APIResponseProcessingError, match="preview"):
+    with pytest.raises(APIResponseProcessingError, match="neither a JSON status nor audio"):
         await _retrieve(b"<html>captive portal</html>", content_type)
 
 

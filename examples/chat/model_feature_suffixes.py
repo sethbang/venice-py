@@ -300,9 +300,8 @@ async def comparison_example(client: VeniceClient, base_model: str) -> bool:
     print_subsection("Approach 2: venice_parameters Object", "🔧")
     print(f"📍 Model: {base_model}")
     print("📍 venice_parameters: VeniceParameters(include_venice_system_prompt=False)")
-    # A VeniceParameters object sends every field that has a default, not only
-    # the one you set.
-    print(f"   Sent on the wire: {params.model_dump(exclude_none=True)}")
+    # Only the fields set on a VeniceParameters object are sent; to_wire() is that body.
+    print(f"   Sent on the wire: {params.to_wire()}")
 
     response_params = await client.chat.completions.create(
         model=base_model,
@@ -332,8 +331,7 @@ async def comparison_example(client: VeniceClient, base_model: str) -> bool:
         and ok
     )
     print("   • Suffix approach:   one setting, carried in the model string")
-    print("   • venice_parameters: the object's defaults for the other fields are sent too;")
-    print("     they match the server's defaults, so the effect is the same here")
+    print("   • venice_parameters: only the fields set on the object are sent")
     return ok
 
 

@@ -190,13 +190,14 @@ class APIResource(Generic[ClientT]):
         session = await self._client._get_session()
         request_headers = self._client._request_headers(session, call_headers)
 
-        from .utils.errors import read_body, resolve_timeout, wrap_aiohttp_errors
+        from .utils.errors import parse_json, read_body, resolve_timeout, wrap_aiohttp_errors
 
         request_kwargs: dict[str, Any] = {
             "method": method,
             "url": url,
             "data": form_data,
             "headers": request_headers,
+            **self._client._session_request_options(),
         }
         request_kwargs["timeout"] = resolve_timeout(timeout, self._client._timeout)
 
@@ -236,7 +237,7 @@ class APIResource(Generic[ClientT]):
                     # a parsing error rather than a connection failure.
                     await read_body(response)
         try:
-            json_response: dict[str, Any] = await response.json()
+            json_response: dict[str, Any] = await parse_json(response)
         except (aiohttp.ContentTypeError, ValueError) as e:
             from .exceptions import APIResponseProcessingError
 

@@ -12,7 +12,7 @@ Exception Hierarchy::
     │   │   └── ApiKeyIpRestrictedError (403 — source IP not in the key's allowlist)
     │   ├── InvalidRequestError (400 Bad Request)
     │   ├── NotFoundError (404 Not Found)
-    │   ├── ModelGoneError (410 Gone — retired/unroutable model)
+    │   ├── ModelGoneError (410 Gone — retired/unroutable model, or retired endpoint)
     │   ├── ConflictError (409 Conflict)
     │   ├── UnprocessableEntityError (422 Unprocessable Entity)
     │   ├── RateLimitError (429 Too Many Requests)
@@ -47,7 +47,7 @@ import logging
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Self
 
 import aiohttp
 
@@ -207,6 +207,10 @@ class VeniceError(Exception):
         self.response_obj = response
         self.message = message
 
+    def __deepcopy__(self, _memo: dict[int, Any]) -> Self:
+        # Keyword-only constructor arguments and a live response cannot be copied.
+        return self
+
     @property
     def request(self) -> Any | None:
         return self.request_obj
@@ -313,12 +317,17 @@ class NotFoundError(APIError):
 
 
 class ModelGoneError(APIError):
-    """Raised for HTTP 410 Gone — the requested model has been retired and
-    could not be auto-routed to a replacement.
+    """Raised for HTTP 410 Gone — a retired model that could not be auto-routed
+    to a replacement, or a retired endpoint.
 
     Venice auto-routes deprecated models to a similar model where possible;
-    a 410 means routing was not possible (technical or safety reasons). Pick
-    a current model (see ``client.models.list()``) or resolve one via traits.
+    a 410 on a model means routing was not possible (technical or safety
+    reasons). Pick a current model (see ``client.models.list()``) or resolve one
+    via traits.
+
+    A retired endpoint answers every request with a 410, so neither retrying nor
+    changing the model helps. ``client.video.transcribe`` is one; its docstring
+    says what to use instead.
     """
 
 
@@ -427,7 +436,11 @@ class APIConnectionError(VeniceError):
     proxy configuration issues.
 
     Attributes:
-        original_error: The underlying exception that triggered this error.
+        original_error: The underlying exception that triggered this error, or
+            ``None`` when its text could quote a URL that must stay secret. An
+            aiohttp error kept here holds no request headers.
+        original_error_type: The type of the underlying exception. It is set
+            even when ``original_error`` is ``None``.
     """
 
     def __init__(
@@ -435,18 +448,26 @@ class APIConnectionError(VeniceError):
         message: str = "Connection error",
         *,
         original_error: Exception | None = None,
+        original_error_type: type[Exception] | None = None,
         request: Any | None = None,
         response: aiohttp.ClientResponse | Any | None = None,
     ) -> None:
         super().__init__(message, request=request, response=response)
         self.original_error = original_error
+        self.original_error_type = original_error_type or (
+            type(original_error) if original_error is not None else None
+        )
 
 
 class APITimeoutError(VeniceError):
     """Raised when an API request exceeds the configured timeout.
 
     Attributes:
-        original_error: The underlying timeout exception.
+        original_error: The underlying timeout exception, or ``None`` when its
+            text could quote a URL that must stay secret. An aiohttp error kept
+            here holds no request headers.
+        original_error_type: The type of the underlying exception. It is set
+            even when ``original_error`` is ``None``.
     """
 
     def __init__(
@@ -454,11 +475,15 @@ class APITimeoutError(VeniceError):
         message: str = "Request timed out",
         *,
         original_error: Exception | None = None,
+        original_error_type: type[Exception] | None = None,
         request: Any | None = None,
         response: aiohttp.ClientResponse | Any | None = None,
     ) -> None:
         super().__init__(message, request=request, response=response)
         self.original_error = original_error
+        self.original_error_type = original_error_type or (
+            type(original_error) if original_error is not None else None
+        )
 
 
 class BillingTimeoutError(APITimeoutError):
@@ -512,7 +537,8 @@ class APIResponseProcessingError(VeniceError):
     and type conversion failures.
 
     Attributes:
-        original_error: The underlying parse / processing exception.
+        original_error: The underlying parse / processing exception. An aiohttp
+            error kept here holds no request headers.
     """
 
     def __init__(
@@ -533,8 +559,17 @@ class APIResponseValidationError(APIResponseProcessingError):
     response — typically caused by an API format change.
 
     Attributes:
-        validation_error: The original ``pydantic.ValidationError``.
-        response_data: The raw response data that failed validation.
+        validation_error: The original ``pydantic.ValidationError``, or the
+            parse error if the body was not JSON, which holds no request
+            headers. For a model that sets
+            ``hide_input_in_errors``, whose body can hold a secret, it is a
+            ``ValidationError`` copy with each error's ``input`` set to ``None``,
+            or a ``ValueError`` naming the parse error's type, and nothing is
+            chained.
+        response_data: The raw response data that failed validation. ``None``
+            for a model that sets ``hide_input_in_errors``; the error's
+            ``response``, if it has one, is then a
+            :class:`~venice_ai.utils.errors.ResponseSummary`, without the body.
         model_name: The Pydantic model name that failed validation.
     """
 

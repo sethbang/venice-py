@@ -550,3 +550,161 @@ async def test_generate_returns_video_job(mock_client):
     assert isinstance(job, VideoJob)
     assert job.model == "wan-2.6-text-to-video"
     assert job.queue_id == "q-2"
+
+
+# ---------------------------------------------------------------------------
+# cancel(): /video/complete answering success=False after the link was deleted
+# ---------------------------------------------------------------------------
+
+
+def _completed() -> VideoCompletedStatus:
+    return VideoCompletedStatus(status="COMPLETED", url=None, expires_at=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("link_status", [204, 404])
+async def test_cancel_counts_a_deleted_link_as_success_when_complete_says_false(
+    link_status, monkeypatch
+):
+    async with (
+        _link_server(link_status) as (base, seen),
+        VeniceClient(api_key="sk-test") as client,
+    ):
+        complete = AsyncMock(return_value=VideoCompleteResponse(success=False))
+        monkeypatch.setattr(client.video, "cancel", complete)
+        job = _link_job(client, base)
+        job._status = _completed()
+        result = await job.cancel()
+
+    assert result.success is True
+    assert job._released is True
+    assert [r.method for r in seen] == ["DELETE"]
+    complete.assert_awaited_once_with(model=job.model, queue_id=job.queue_id)
+
+
+@pytest.mark.asyncio
+async def test_aexit_does_not_release_again_after_cancel_when_complete_says_false(
+    monkeypatch, caplog
+):
+    async with _link_server(204) as (base, seen), VeniceClient(api_key="sk-test") as client:
+        complete = AsyncMock(return_value=VideoCompleteResponse(success=False))
+        monkeypatch.setattr(client.video, "cancel", complete)
+        with caplog.at_level(logging.DEBUG):
+            async with _link_job(client, base) as job:
+                job._status = _completed()
+                await job.cancel()
+
+    assert [r.method for r in seen] == ["DELETE"]
+    complete.assert_awaited_once()
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.asyncio
+async def test_aexit_on_exception_after_cancel_does_not_warn_media_was_kept(monkeypatch, caplog):
+    async with _link_server(204) as (base, seen), VeniceClient(api_key="sk-test") as client:
+        monkeypatch.setattr(
+            client.video, "cancel", AsyncMock(return_value=VideoCompleteResponse(success=False))
+        )
+        with caplog.at_level(logging.DEBUG), pytest.raises(OSError):
+            async with _link_job(client, base) as job:
+                job._status = _completed()
+                await job.cancel()
+                raise OSError("disk full")
+
+    assert [r.method for r in seen] == ["DELETE"]
+    assert "not released" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_a_failed_delete_raises_whatever_complete_would_say(monkeypatch):
+    async with _link_server(403) as (base, _seen), VeniceClient(api_key="sk-test") as client:
+        complete = AsyncMock(return_value=VideoCompleteResponse(success=False))
+        monkeypatch.setattr(client.video, "cancel", complete)
+        job = _link_job(client, base)
+        job._status = _completed()
+        with pytest.raises(PermissionDeniedError):
+            await job.cancel()
+    complete.assert_not_awaited()
+    assert job._released is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_terminal_status_does_not_mark_the_job_released(monkeypatch):
+    async with _link_server(204) as (base, _seen), VeniceClient(api_key="sk-test") as client:
+        monkeypatch.setattr(
+            client.video, "cancel", AsyncMock(return_value=VideoCompleteResponse(success=False))
+        )
+        job = _link_job(client, base)
+        await job.cancel()
+    assert job._released is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_download_url_keeps_a_false_answer(mock_client, queue_response):
+    mock_client.video.cancel.return_value = VideoCompleteResponse(success=False)
+    job = VideoJob(mock_client, queue_response)
+    job._status = _completed()
+    result = await job.cancel()
+    assert result.success is False
+    assert job._released is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [
+        None,
+        VideoProcessingStatus(
+            status="PROCESSING", average_execution_time=1000.0, execution_duration=250.0
+        ),
+    ],
+    ids=["never-polled", "processing"],
+)
+async def test_cancel_reports_the_servers_false_when_a_404_deleted_nothing(status, monkeypatch):
+    """A generating job's link answers 404 because no file exists yet."""
+    async with _link_server(404) as (base, _seen), VeniceClient(api_key="sk-test") as client:
+        monkeypatch.setattr(
+            client.video, "cancel", AsyncMock(return_value=VideoCompleteResponse(success=False))
+        )
+        job = _link_job(client, base)
+        job._status = status
+        result = await job.cancel()
+    assert result.success is False
+    assert job._released is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_reraises_unknown_request_id_when_a_404_deleted_nothing(monkeypatch):
+    async with _link_server(404) as (base, _seen), VeniceClient(api_key="sk-test") as client:
+        monkeypatch.setattr(client.video, "cancel", AsyncMock(side_effect=_unknown_request_id()))
+        job = _link_job(client, base)
+        with pytest.raises(InvalidRequestError, match="Request ID is invalid"):
+            await job.cancel()
+    assert job._released is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_counts_a_real_delete_on_a_generating_job_without_releasing_it(monkeypatch):
+    async with _link_server(204) as (base, _seen), VeniceClient(api_key="sk-test") as client:
+        monkeypatch.setattr(client.video, "cancel", AsyncMock(side_effect=_unknown_request_id()))
+        job = _link_job(client, base)
+        result = await job.cancel()
+    assert result.success is True
+    assert job._released is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("link_status", [200, 201, 202, 204])
+async def test_cancel_counts_every_2xx_as_deleted(link_status, monkeypatch):
+    async with (
+        _link_server(link_status) as (base, _seen),
+        VeniceClient(api_key="sk-test") as client,
+    ):
+        monkeypatch.setattr(
+            client.video, "cancel", AsyncMock(return_value=VideoCompleteResponse(success=False))
+        )
+        job = _link_job(client, base)
+        job._status = _completed()
+        result = await job.cancel()
+    assert result.success is True
+    assert job._released is True

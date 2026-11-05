@@ -9,11 +9,18 @@ from unittest.mock import AsyncMock, Mock
 
 import aiohttp
 import pytest
+from pydantic import ValidationError
 
 from tests.fixtures.mock_fixtures import with_request_plumbing
 from venice_ai.exceptions import APIError
 from venice_ai.resources.audio import REGION_LANGUAGE_MAPPING, Audio
-from venice_ai.types import AudioResponse, ResponseFormat, Voice, VoiceList
+from venice_ai.types import (
+    AudioResponse,
+    ImageMultiEditRequest,
+    ResponseFormat,
+    Voice,
+    VoiceList,
+)
 
 
 class TestRegionLanguageMapping:
@@ -798,3 +805,15 @@ def test_enhanced_prompt_is_none_without_the_header():
     )
     resp._response = NS(headers={})
     assert resp.enhanced_prompt is None
+
+
+@pytest.mark.parametrize("count", [1, 3, 4, 14])
+def test_multi_edit_request_leaves_the_image_cap_to_the_model(count: int) -> None:
+    request = ImageMultiEditRequest(prompt="combine", images=["a"] * count)
+
+    assert len(request.images) == count
+
+
+def test_multi_edit_request_needs_an_image() -> None:
+    with pytest.raises(ValidationError):
+        ImageMultiEditRequest(prompt="combine", images=[])

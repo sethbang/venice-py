@@ -508,9 +508,8 @@ async def show_balance() -> BillingBalanceResponse | None:
     This hits the stable ``GET /billing/balance`` endpoint and reports the USD,
     DIEM, bundled-credit and earned-credit balances plus the DIEM epoch
     allocation. Every field on :class:`BillingBalanceResponse` is optional, so
-    guard before dereferencing. The two credit balances are not typed fields on
-    the model, so they are read from ``model_extra``. Returns the response, or
-    ``None`` when the request failed.
+    guard before dereferencing. Returns the response, or ``None`` when the request
+    failed.
 
     This is the ACCOUNT balance. ``client.api_keys.get_rate_limits().data.balances``
     and the ``x-venice-balance-usd`` response header (``response.balance_info``)
@@ -547,13 +546,11 @@ async def show_balance() -> BillingBalanceResponse | None:
             print(
                 f"   💎 DIEM credit left this epoch: {balance.balances.diem:,.4f} DIEM (1 DIEM = $1)"
             )
-        extra = balance.balances.model_extra or {}
-        for label, field in (
-            ("Bundled credits", "bundledCredits"),
-            ("Earned credits", "earnedCredits"),
+        for label, amount in (
+            ("Bundled credits", balance.balances.bundledCredits),
+            ("Earned credits", balance.balances.earnedCredits),
         ):
-            amount = extra.get(field)
-            if isinstance(amount, int | float):
+            if amount is not None:
                 print(f"   🎁 {label} left: {amount:,.4f}")
     else:
         print("   ℹ️ No per-currency balance breakdown returned")

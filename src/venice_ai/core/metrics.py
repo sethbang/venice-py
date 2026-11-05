@@ -72,12 +72,29 @@ class MetricsCollector:
     ) -> None:
         self.enable_prometheus = enable_prometheus and PROMETHEUS_AVAILABLE
 
-        # Registry kept for observability/metrics.py which reads _registry
         self._registry: Any | None = None
 
         self._init_prometheus_metrics()
 
         logger.info("MetricsCollector initialized (Prometheus: %s)", self.enable_prometheus)
+
+    @property
+    def registry(self) -> Any | None:
+        """The ``CollectorRegistry`` holding the SDK's metrics, or ``None`` without Prometheus.
+
+        The SDK's metrics are not in ``prometheus_client``'s default registry, and
+        the SDK starts no server. To serve them, pass this registry explicitly::
+
+            from prometheus_client import start_http_server
+
+            from venice_ai.core.metrics import get_metrics_collector
+
+            registry = get_metrics_collector().registry
+            start_http_server(8000, addr="127.0.0.1", registry=registry)
+
+        :meth:`reset` replaces the registry, so read it again after a reset.
+        """
+        return self._registry
 
     # ------------------------------------------------------------------
     # Prometheus initialisation

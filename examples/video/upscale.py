@@ -189,7 +189,7 @@ async def upscale_job(client: VeniceClient, model: str, factor: UpscaleFactor) -
         print_recovery(job)
         return False
     except aiohttp.ClientResponseError as e:
-        # Only the status: the error's text contains the link, which grants access.
+        # The error shows the storage host at most, never the link.
         print(f"❌ The download answered HTTP {e.status} (queue_id={job.queue_id})")
         print_recovery(job)
         return False

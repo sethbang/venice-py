@@ -193,7 +193,7 @@ async def traced_create(client, **kwargs):
         prompt_tokens=response.usage.prompt_tokens if response.usage else None,
         completion_tokens=response.usage.completion_tokens if response.usage else None,
         balance_usd=response.balance_info.usd if response.balance_info else None,
-        request_id=response.headers.get("x-request-id") if response.headers else None,
+        request_id=response.request_id,
     )
     return response
 ```

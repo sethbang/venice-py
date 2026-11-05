@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import asdict, is_dataclass
+from dataclasses import fields, is_dataclass
 from typing import Any
 
 import click
@@ -433,9 +433,13 @@ def _render_cheapest_video(
     """Render a CheapestVideoResult or CheapestMusicResult to stdout."""
     # ``is_dataclass()`` is True for both instances and the class itself; we
     # only want the instance branch here. The ``not isinstance(..., type)``
-    # guard narrows mypy's view to ``DataclassInstance``.
+    # guard narrows mypy's view to ``DataclassInstance``. ``asdict()`` would
+    # deep-copy the exceptions in the private ``_quote_failures`` into the JSON;
+    # ``skipped`` already gives the reason for each dropped candidate.
     if is_dataclass(result) and not isinstance(result, type):
-        payload = asdict(result)
+        payload = {
+            f.name: getattr(result, f.name) for f in fields(result) if not f.name.startswith("_")
+        }
     elif hasattr(result, "model_dump"):
         payload = result.model_dump()
     else:

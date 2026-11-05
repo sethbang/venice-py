@@ -787,7 +787,9 @@ class ChatCompletions(APIResource["VeniceClient"]):
                 model behavior. Accepts a :class:`VeniceParameters` or a
                 plain mapping of the same fields; a mapping is validated
                 into the model while the request body is built, so an
-                invalid value still raises before the request is sent.
+                invalid value still raises before the request is sent. Only
+                the fields set here are sent; the server's defaults apply to
+                the rest.
                 Note that :class:`VeniceParameters` is ``extra="allow"``,
                 so an unrecognized key is carried through rather than
                 rejected — the same for either form.
@@ -806,9 +808,7 @@ class ChatCompletions(APIResource["VeniceClient"]):
                 uses the standard TTL; ``"extended"`` or ``"24h"`` keep
                 the prompt cached for longer, improving hit rates for
                 long-running agents at a small storage premium.
-            store: OpenAI-compat flag forwarded to the upstream model;
-                controls whether the completion is stored server-side for
-                replay.
+            store: Accepted for OpenAI compatibility; Venice does not use it.
             text: OpenAI-compat text configuration (e.g.
                 ``{"verbosity": "low"}``). Forwarded verbatim.
             include: OpenAI-compat inclusion specifier; an array of
@@ -1043,8 +1043,13 @@ class ChatCompletions(APIResource["VeniceClient"]):
         # Convert to API payload
         body = chat_request.model_dump(exclude_none=True)
 
-        # Handle specific naming or structuring if needed
-        # e.g. if venice_parameters needs special handling
+        # Only the venice_parameters the caller set go on the wire, so the
+        # server's defaults apply to the rest.
+        body.pop("venice_parameters", None)
+        if chat_request.venice_parameters is not None:
+            wire_venice_parameters = chat_request.venice_parameters.to_wire()
+            if wire_venice_parameters:
+                body["venice_parameters"] = wire_venice_parameters
 
         # --- E2EE (Venice confidential-compute) path -------------------------
         # Engaged when e2ee=... is truthy OR venice_parameters.enable_e2ee=True.

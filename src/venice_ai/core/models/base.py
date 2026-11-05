@@ -11,7 +11,7 @@ resolved at runtime via lazy imports inside each property method.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self, TypeVar, overload
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
@@ -24,6 +24,75 @@ if TYPE_CHECKING:
         PaginationInfo,
         RateLimitInfo,
     )
+
+
+_T = TypeVar("_T")
+
+
+def _fold(key: Any) -> Any:
+    """Lowercase a header name, leaving anything that is not a string as it is."""
+    return key.lower() if isinstance(key, str) else key
+
+
+class CaseInsensitiveHeaders(dict[str, str]):
+    """HTTP response headers: a ``dict`` whose lookups ignore the case of the name.
+
+    HTTP header names are case-insensitive, and servers choose their own casing.
+    Names are stored lowercase, so iterating or serializing yields lowercase names
+    while ``headers["CF-RAY"]``, ``headers.get("cf-ray")`` and ``"Cf-Ray" in headers``
+    all find the same entry. A repeated header keeps one value, as ``dict(...)`` of
+    the source mapping does.
+    """
+
+    def __init__(self, source: Any = (), /, **kwargs: str) -> None:
+        super().__init__()
+        self.update(source, **kwargs)
+
+    def __getitem__(self, key: str) -> str:
+        return super().__getitem__(_fold(key))
+
+    def __setitem__(self, key: str, value: str) -> None:
+        super().__setitem__(_fold(key), value)
+
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(_fold(key))
+
+    def __contains__(self, key: object) -> bool:
+        return super().__contains__(_fold(key))
+
+    @overload
+    def get(self, key: str, default: None = None, /) -> str | None: ...
+
+    @overload
+    def get(self, key: str, default: str, /) -> str: ...
+
+    @overload
+    def get(self, key: str, default: _T, /) -> str | _T: ...
+
+    def get(self, key: str, default: Any = None, /) -> Any:
+        return super().get(_fold(key), default)
+
+    def pop(self, key: str, *default: Any) -> Any:
+        return super().pop(_fold(key), *default)
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        return super().setdefault(_fold(key), default)
+
+    def update(self, source: Any = (), /, **kwargs: str) -> None:
+        for key, value in {**dict(source), **kwargs}.items():
+            self[key] = value
+
+    def copy(self) -> CaseInsensitiveHeaders:
+        return CaseInsensitiveHeaders(self)
+
+    def __or__(self, other: Any) -> CaseInsensitiveHeaders:  # type: ignore[override]
+        merged = self.copy()
+        merged.update(other)
+        return merged
+
+    def __ior__(self, other: Any) -> Self:  # type: ignore[override]
+        self.update(other)
+        return self
 
 
 # ============================================================================
@@ -49,10 +118,14 @@ class VeniceBaseModel(BaseModel):
     _response: Any | None = PrivateAttr(default=None)
 
     @property
-    def headers(self) -> dict[str, str] | None:
-        """Access raw headers from the HTTP response."""
+    def headers(self) -> CaseInsensitiveHeaders | None:
+        """The HTTP response headers, with names looked up in any casing.
+
+        Names are stored lowercase; see :class:`CaseInsensitiveHeaders`. ``None``
+        when the model did not come from an HTTP response.
+        """
         if self._response and hasattr(self._response, "headers"):
-            return dict(self._response.headers)
+            return CaseInsensitiveHeaders(self._response.headers)
         return None
 
     @property
@@ -310,6 +383,7 @@ class TimestampMixin(BaseModel):
 
 
 __all__ = [
+    "CaseInsensitiveHeaders",
     "VeniceBaseModel",
     "TimestampMixin",
 ]

@@ -11,7 +11,7 @@ from typing import Any
 
 from ..audio_helpers import _id3v2_tag_length, _layer3_frame_layout
 from ..exceptions import APIResponseProcessingError
-from ..utils.errors import read_body
+from ..utils.errors import ResponseSummary, read_body
 
 
 def _skip_id3(data: bytes) -> bytes:
@@ -81,7 +81,9 @@ async def read_inline_audio(
     An ``audio/*`` Content-Type is taken as given. ``application/octet-stream``
     is accepted when the bytes are a known audio container, and reported as
     that container's media type. Anything else (an HTML proxy page, plain
-    text, an empty body) is not audio and raises.
+    text, an empty body) is not audio and raises. The error shows none of the
+    body and keeps none of it, since a status body can hold a download link
+    whatever Content-Type it is served with.
 
     Args:
         raw_response: The unread aiohttp response; it is read and closed.
@@ -100,22 +102,22 @@ async def read_inline_audio(
         if not body:
             raise APIResponseProcessingError(
                 f"{operation} returned an empty {media_type} body",
-                response=raw_response,
+                response=ResponseSummary.without_body(raw_response),
             )
     elif media_type == "application/octet-stream":
         sniffed = sniff_audio_format(body)
         if sniffed is None:
             raise APIResponseProcessingError(
                 f"{operation} returned application/octet-stream that is not a "
-                f"recognised audio format; preview: {body[:120]!r}",
-                response=raw_response,
+                f"recognised audio format ({len(body)} bytes)",
+                response=ResponseSummary.without_body(raw_response),
             )
         media_type = _SNIFFED_MEDIA_TYPES[sniffed]
     else:
         raise APIResponseProcessingError(
             f"{operation} returned a 2xx response with Content-Type "
-            f"{content_type!r}, which is neither a JSON status nor audio; "
-            f"preview: {body[:200]!r}",
-            response=raw_response,
+            f"{content_type!r}, which is neither a JSON status nor audio "
+            f"({len(body)} bytes)",
+            response=ResponseSummary.without_body(raw_response),
         )
     return media_type, body

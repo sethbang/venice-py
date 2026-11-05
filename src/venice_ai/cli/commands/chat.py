@@ -534,7 +534,7 @@ async def _chat_async(
                         )
                 else:
                     print_error(f"Conversation '{continue_id}' not found.")
-                    return
+                    raise SystemExit(1)
 
             # Add system message if provided (after restoring history)
             if system_prompt and not any(
@@ -1007,6 +1007,7 @@ def chat_history(ctx: click.Context, json_output: bool, delete_id: str | None) -
                 print_success(f"Deleted conversation: [bold]{delete_id}[/bold]")
         else:
             print_error(f"Conversation '{delete_id}' not found.")
+            raise SystemExit(1)
         return
 
     conversations = list_conversations()

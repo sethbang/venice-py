@@ -9,7 +9,7 @@ examples/
 ├── README.md                     # This file
 ├── basic/                        # Simple getting started examples
 │   ├── quick_start.py           # Minimal setup and usage
-│   ├── sync_client.py           # Blocking calls with SyncVeniceClient: chat, a stream and a paged list, and what still needs VeniceClient
+│   ├── sync_client.py           # Blocking calls with SyncVeniceClient: chat, a stream and a paginator, and what stays async
 │   ├── offline_testing.py       # Test your own code with no network, API key or spend, using a real client against a local stand-in
 │   ├── client_setup.py          # Ways to configure the client; reads back the API root, connection_limits and retry_options (production section needs Redis)
 │   └── error_handling.py        # Live SDK exceptions, APITimeoutError, billing-aware retries (paid requests never resent once processed), fallbacks

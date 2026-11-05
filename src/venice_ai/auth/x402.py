@@ -166,10 +166,12 @@ class X402Auth:
         signs with this auth's private key, and base64-encodes the v2 payment
         envelope ready for :meth:`venice_ai.resources.x402.X402.top_up`.
 
-        Validates ``network``, ``asset``, and ``amount`` BEFORE signing —
-        refuses to sign payloads that deviate from expectations. This is a
-        security control: a misbehaving or malicious server could otherwise
-        ask you to sign a transfer to an attacker-controlled address.
+        Validates ``network``, ``asset``, and ``amount`` BEFORE signing and
+        refuses to sign on a mismatch. The recipient is not verified: ``payTo``
+        is only checked for presence, because the SDK has no list of Venice's
+        addresses to compare it with, and the transfer goes to whatever ``payTo``
+        the requirement names. These checks limit which token and how much a
+        misbehaving server can ask for, not where it goes.
 
         Currently supports **only USDC on Base mainnet** (``eip155:8453``).
         Other tokens / chains would need different EIP-712 domain parameters

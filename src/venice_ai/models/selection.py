@@ -81,6 +81,17 @@ class CheapestVideoResult:
     all_quotes: dict[str, float] = field(default_factory=dict)
     request_params: dict[str, Any] = field(default_factory=dict)
     skipped: dict[str, str] = field(default_factory=dict)
+    _quote_failures: dict[str, Exception] = field(default_factory=dict, compare=False, repr=False)
+
+    @property
+    def quote_failures(self) -> dict[str, Exception]:
+        """Candidates whose quote raised, mapped to the exception.
+
+        A failed quote drops the candidate, so :attr:`model` is the cheapest of
+        the quotes that succeeded. Candidates never quoted are only in
+        :attr:`skipped`.
+        """
+        return dict(self._quote_failures)
 
 
 @dataclass
@@ -107,6 +118,17 @@ class CheapestMusicResult:
     effective_seconds: int | None = None
     all_quotes: dict[str, float] = field(default_factory=dict)
     skipped: dict[str, str] = field(default_factory=dict)
+    _quote_failures: dict[str, Exception] = field(default_factory=dict, compare=False, repr=False)
+
+    @property
+    def quote_failures(self) -> dict[str, Exception]:
+        """Candidates whose quote raised, mapped to the exception.
+
+        A failed quote drops the candidate, so :attr:`model` is the cheapest of
+        the quotes that succeeded. Candidates never quoted are only in
+        :attr:`skipped`.
+        """
+        return dict(self._quote_failures)
 
 
 @dataclass
@@ -1440,6 +1462,7 @@ class DynamicModelSelector:
         require_e2ee: bool = False,
         exclude_reasoning: bool = False,
         exclude_uncensored: bool = False,
+        exclude_e2ee: bool = False,
     ) -> str:
         """
         Select a suitable chat completion model.
@@ -1500,6 +1523,9 @@ class DynamicModelSelector:
                 ``reasoning_effort="none"`` with the request instead.
             exclude_uncensored: If True, skip models Venice flags as
                 ``uncensored``.
+            exclude_e2ee: If True, skip end-to-end encrypted models. Use it for
+                endpoints that reject them, such as ``/responses``. Cannot be
+                combined with ``require_e2ee``.
 
         Returns:
             Selected model ID
@@ -1507,8 +1533,14 @@ class DynamicModelSelector:
         Raises:
             NoMatchingModelError: If no suitable model is found.
             ValueError: If ``exclude_reasoning`` is combined with
-                ``require_reasoning`` or ``require_reasoning_effort``.
+                ``require_reasoning`` or ``require_reasoning_effort``, or
+                ``exclude_e2ee`` with ``require_e2ee``.
         """
+        if exclude_e2ee and require_e2ee:
+            raise ValueError(
+                "exclude_e2ee=True cannot be combined with require_e2ee: "
+                "the filters admit disjoint sets of models"
+            )
         if exclude_reasoning and (require_reasoning or require_reasoning_effort is not None):
             raise ValueError(
                 "exclude_reasoning=True cannot be combined with require_reasoning or "
@@ -1540,6 +1572,7 @@ class DynamicModelSelector:
                 require_prompt_caching,
                 require_multiple_images,
                 require_e2ee,
+                exclude_e2ee,
                 exclude_reasoning,
                 exclude_uncensored,
             ]
@@ -1617,6 +1650,8 @@ class DynamicModelSelector:
                 # Check end-to-end encryption
                 if require_e2ee and not _is_e2ee_model(model_data):
                     continue
+                if exclude_e2ee and _is_e2ee_model(model_data):
+                    continue
 
                 # Check models that never reason
                 if exclude_reasoning and capabilities.get("supportsReasoning", False):
@@ -1644,6 +1679,7 @@ class DynamicModelSelector:
                     f"reasoning_effort={require_reasoning_effort!r}, "
                     f"prompt_caching={require_prompt_caching}, "
                     f"multiple_images={require_multiple_images}, e2ee={require_e2ee}, "
+                    f"exclude_e2ee={exclude_e2ee}, "
                     f"exclude_reasoning={exclude_reasoning}, "
                     f"exclude_uncensored={exclude_uncensored}",
                     resource_type="chat",
@@ -2371,6 +2407,7 @@ class DynamicModelSelector:
             all_quotes={mid: price for mid, price, _ in valid},
             request_params=cheapest_params,
             skipped=skipped,
+            _quote_failures=failures,
         )
 
     async def select_audio_model(
@@ -2713,6 +2750,7 @@ class DynamicModelSelector:
             effective_seconds=best_params.get("duration_seconds"),
             all_quotes=dict(valid),
             skipped=skipped,
+            _quote_failures=failures,
         )
 
     async def select_decision_model(

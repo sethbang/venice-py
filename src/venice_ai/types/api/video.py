@@ -24,7 +24,7 @@ class VideoQueueResponse(VeniceBaseModel):
     Contains the queue_id needed to poll for results.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
 
     model: str = Field(..., description="Model ID used for generation")
     queue_id: str = Field(..., description="Unique queue ID for tracking")
@@ -67,7 +67,7 @@ class VideoProcessingStatus(VeniceBaseModel):
     polling continues until it finishes or the poll limit is reached.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
 
     status: str = Field(..., description='Current status, normally ``"PROCESSING"``')
     average_execution_time: float = Field(
@@ -101,7 +101,7 @@ class VideoFailedStatus(VeniceBaseModel):
     Unknown error fields returned by the API are preserved via ``extra="allow"``.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
 
     status: Literal["FAILED"] = Field(..., description="Failed status")
     error: str | None = Field(default=None, description="Error message if available")
@@ -120,7 +120,7 @@ class VideoCompletedStatus(VeniceBaseModel):
        via the :attr:`data` property.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
 
     status: Literal["COMPLETED"] = Field(..., description="Completed status")
     url: str | None = Field(default=None, description="Download URL if provided")
@@ -178,7 +178,11 @@ VideoRetrieveResponse = Annotated[
 
 
 class VideoTranscriptionResponse(VeniceBaseModel):
-    """Response from ``POST /api/v1/video/transcriptions`` (JSON format)."""
+    """Declared response of ``POST /api/v1/video/transcriptions``.
+
+    The endpoint is retired and answers every request with a 410, so no call
+    produces this.
+    """
 
     model_config = ConfigDict(extra="allow")
 

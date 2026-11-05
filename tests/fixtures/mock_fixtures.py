@@ -27,6 +27,7 @@ def with_request_plumbing(client: Any) -> Any:
 
     client._request_headers = Mock(side_effect=request_headers)
     client._siwe_resigning = Mock(side_effect=lambda *a, **k: nullcontext())
+    client._session_request_options = Mock(return_value={})
     return client
 
 

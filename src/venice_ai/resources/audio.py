@@ -48,7 +48,7 @@ from ..types.api import (
     VoiceList,
 )
 from ..types.enums import ResponseFormat, Voice
-from ..utils.errors import read_body, resolve_timeout, wrap_aiohttp_errors
+from ..utils.errors import parse_json, read_body, resolve_timeout, wrap_aiohttp_errors
 from ..validation.validators import validate_model_id
 from ._inline_audio import sniff_audio_format
 
@@ -479,12 +479,13 @@ class Audio(APIResource["VeniceClient"]):
                     params=params,
                     headers=request_headers,
                     timeout=final_timeout,
+                    **self._client._session_request_options(),
                 ) as response,
             ):
                 resign_scope.close()
                 if not response.ok:
                     try:
-                        body = await response.json()
+                        body = await parse_json(response)
                     except (aiohttp.ContentTypeError, json.JSONDecodeError):
                         body = await response.text()
 
@@ -843,7 +844,8 @@ class Audio(APIResource["VeniceClient"]):
             transcript as a plain ``str`` (the server responds with
             ``text/plain``, so it is not JSON-decoded).
         :type response_format: Optional[str]
-        :param timestamps: If ``True``, include word-level timestamps in the response.
+        :param timestamps: If ``True``, ask for word-level timestamps. Not every
+            model provides them.
         :type timestamps: Optional[bool]
         :param language: Language of the input audio (e.g., ``"en"``).
         :type language: Optional[str]

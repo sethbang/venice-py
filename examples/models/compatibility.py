@@ -113,9 +113,8 @@ async def chat_migration(text_compat: dict[str, str], resolved_chat: str) -> boo
             "    )",
         ]
     )
-    print("\n   Prefer blocking code? SyncVeniceClient runs coroutine methods without await.")
-    print("   iter_* paginators and job objects, including what run() returns, stay async,")
-    print("   so blocking code pages with list() and handles jobs with submit() and retrieve().")
+    print("\n   Prefer blocking code? SyncVeniceClient runs these without await, including")
+    print("   iter_* paginators, stream helpers and job objects.")
 
     print("\n🔍 Live text alias map:")
     if not text_compat:

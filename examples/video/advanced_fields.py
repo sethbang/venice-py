@@ -258,12 +258,8 @@ def _lists_audio_input(constraints: VideoModelConstraints) -> bool:
 
 
 def _quote_failures(pick: CheapestVideoResult) -> dict[str, str]:
-    """The candidates the resolver dropped because their quote failed.
-
-    ``skipped`` also lists models that cannot serve the request at all; those
-    do not make the pick any less the cheapest.
-    """
-    return {m: reason for m, reason in pick.skipped.items() if reason.startswith("quote failed")}
+    """The candidates the resolver dropped because their quote failed, with the reason."""
+    return {m: f"quote failed: {e}" for m, e in pick.quote_failures.items()}
 
 
 async def _cheapest(
@@ -507,7 +503,7 @@ async def _run_section(
         print_recovery(job)
         return False
     except aiohttp.ClientResponseError as e:
-        # Only the status: the error's text contains the link, which grants access.
+        # The error shows the storage host at most, never the link.
         print(f"❌ The download answered HTTP {e.status} (queue_id={job.queue_id})")
         print_recovery(job)
         return False

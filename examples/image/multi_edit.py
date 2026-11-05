@@ -4,11 +4,13 @@ Venice AI SDK - Multi-Image Editing
 ===================================
 
 This example demonstrates ``client.image.multi_edit()``. Unlike the
-single-image ``edit()`` method, ``multi_edit()`` accepts up to **three input
-images** (``image``, ``image_2``, ``image_3``) plus a text prompt. The first
-image is the base; the others are references the model draws on. It is
-prompt-driven editing, not pixel compositing: the model decides how to
-combine the inputs from the instruction and may invent new detail.
+single-image ``edit()`` method, ``multi_edit()`` accepts **several input images**
+(``image``, ``image_2``, ``image_3``) plus a text prompt. To send more than
+three, pass ``images=[...]`` instead, up to the model's limit: its catalog entry's
+``constraints.maxInputImages``, or 3 when that is absent. The first image is the
+base; the others are references the model draws on. It is prompt-driven editing,
+not pixel compositing: the model decides how to combine the inputs from the
+instruction and may invent new detail.
 
 Only edit models whose ``constraints.combineImages`` is true accept more than
 one image, so the multi-image demos select their model with
@@ -273,7 +275,8 @@ async def main() -> int:
         print("\n💡 Key concepts demonstrated:")
         print("   - Single-image multi-edit (simplest case)")
         print("   - Two input images (image + image_2)")
-        print("   - Three input images (image + image_2 + image_3)")
+        print("   - Three input images (image + image_2 + image_3); images=[...] takes more,")
+        print("     up to the model's constraints.maxInputImages")
         print("   - resolve_inpaint(require_combine_images=True, prefer='cheapest')")
         print("   - Self-contained generate → multi-edit workflow")
 

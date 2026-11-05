@@ -427,16 +427,18 @@ class TestGenerateImageAsync:
                 ),
                 patch("venice_ai.cli.commands.image.generate.print_error") as mock_error,
             ):
-                await _generate_image_async(
-                    ctx=mock_ctx,
-                    prompt="test",
-                    model="hidream",
-                    size="1024x1024",
-                    num_images=1,
-                    output=None,
-                    save_dir=None,
-                    show_timing=True,
-                )
+                with pytest.raises(SystemExit) as exit_info:
+                    await _generate_image_async(
+                        ctx=mock_ctx,
+                        prompt="test",
+                        model="hidream",
+                        size="1024x1024",
+                        num_images=1,
+                        output=None,
+                        save_dir=None,
+                        show_timing=True,
+                    )
+                assert exit_info.value.code == 1
                 mock_error.assert_called()
 
     @pytest.mark.asyncio
@@ -610,7 +612,9 @@ class TestInteractiveImageGeneration:
                 patch("venice_ai.cli.commands.image.wizard.print_error"),
                 patch("venice_ai.cli.commands.image.wizard.print_info"),
             ):
-                await _interactive_image_generation(mock_ctx)
+                with pytest.raises(SystemExit) as exit_info:
+                    await _interactive_image_generation(mock_ctx)
+                assert exit_info.value.code == 1
 
     @pytest.mark.asyncio
     async def test_interactive_models_fetch_error(self, mock_ctx, mock_config):
@@ -634,7 +638,9 @@ class TestInteractiveImageGeneration:
                 patch("venice_ai.cli.commands.image.wizard.print_error"),
                 patch("venice_ai.cli.commands.image.wizard.print_info"),
             ):
-                await _interactive_image_generation(mock_ctx)
+                with pytest.raises(SystemExit) as exit_info:
+                    await _interactive_image_generation(mock_ctx)
+                assert exit_info.value.code == 1
 
     @pytest.mark.asyncio
     async def test_interactive_styles_fetch_error(
@@ -1408,13 +1414,15 @@ class TestBatchGenerateAsync:
                 mock_cm.__aexit__ = AsyncMock(return_value=None)
                 MockClient.return_value = mock_cm
 
-                await _batch_generate_async(
-                    ctx=mock_ctx,
-                    prompts_file=str(prompts_file),
-                    model="hidream",
-                    size="1024x1024",
-                    save_dir=tmpdir,
-                )
+                with pytest.raises(SystemExit) as exit_info:
+                    await _batch_generate_async(
+                        ctx=mock_ctx,
+                        prompts_file=str(prompts_file),
+                        model="hidream",
+                        size="1024x1024",
+                        save_dir=tmpdir,
+                    )
+                assert exit_info.value.code == 1
 
     @pytest.mark.asyncio
     async def test_batch_generate_prompt_exception(self, mock_ctx, mock_config):
@@ -1454,13 +1462,15 @@ class TestBatchGenerateAsync:
                 mock_cm.__aexit__ = AsyncMock(return_value=None)
                 MockClient.return_value = mock_cm
 
-                await _batch_generate_async(
-                    ctx=mock_ctx,
-                    prompts_file=str(prompts_file),
-                    model="hidream",
-                    size="1024x1024",
-                    save_dir=tmpdir,
-                )
+                with pytest.raises(SystemExit) as exit_info:
+                    await _batch_generate_async(
+                        ctx=mock_ctx,
+                        prompts_file=str(prompts_file),
+                        model="hidream",
+                        size="1024x1024",
+                        save_dir=tmpdir,
+                    )
+                assert exit_info.value.code == 1
 
     @pytest.mark.asyncio
     async def test_batch_generate_venice_error(self, mock_ctx, mock_config):
@@ -2351,13 +2361,15 @@ class TestBatchGenerateAsyncPlainMode:
             MockClient.return_value = mock_cm
 
             with patch("asyncio.sleep", return_value=None), patch("click.echo") as mock_echo:
-                await _batch_generate_async(
-                    ctx=plain_ctx,
-                    prompts_file=str(prompts_file),
-                    model="hidream",
-                    size="1024x1024",
-                    save_dir=str(tmp_path),
-                )
+                with pytest.raises(SystemExit) as exit_info:
+                    await _batch_generate_async(
+                        ctx=plain_ctx,
+                        prompts_file=str(prompts_file),
+                        model="hidream",
+                        size="1024x1024",
+                        save_dir=str(tmp_path),
+                    )
+                assert exit_info.value.code == 1
                 echo_calls = " ".join(str(c) for c in mock_echo.call_args_list)
                 assert "Failed" in echo_calls
 
@@ -2384,13 +2396,15 @@ class TestBatchGenerateAsyncPlainMode:
             MockClient.return_value = mock_cm
 
             with patch("asyncio.sleep", return_value=None), patch("click.echo") as mock_echo:
-                await _batch_generate_async(
-                    ctx=plain_ctx,
-                    prompts_file=str(prompts_file),
-                    model="hidream",
-                    size="1024x1024",
-                    save_dir=str(tmp_path),
-                )
+                with pytest.raises(SystemExit) as exit_info:
+                    await _batch_generate_async(
+                        ctx=plain_ctx,
+                        prompts_file=str(prompts_file),
+                        model="hidream",
+                        size="1024x1024",
+                        save_dir=str(tmp_path),
+                    )
+                assert exit_info.value.code == 1
                 echo_calls = " ".join(str(c) for c in mock_echo.call_args_list)
                 assert "Warning" in echo_calls or "No image" in echo_calls
 
@@ -3457,7 +3471,9 @@ class TestInteractiveImageGenerationPlainMode:
                     side_effect=Exception("Thread error"),
                 ),
             ):
-                await _interactive_image_generation(mock_ctx)
+                with pytest.raises(SystemExit) as exit_info:
+                    await _interactive_image_generation(mock_ctx)
+                assert exit_info.value.code == 1
                 # Should have called print_error for the outer exception
                 mock_err.assert_called()
 
@@ -3494,13 +3510,15 @@ class TestBatchGenerateAsyncAdditionalBranches:
             MockClient.return_value = mock_cm
 
             with patch("asyncio.sleep", return_value=None), patch("click.echo") as mock_echo:
-                await _batch_generate_async(
-                    ctx=plain_ctx,
-                    prompts_file=str(prompts_file),
-                    model="hidream",
-                    size="1024x1024",
-                    save_dir=str(tmp_path),
-                )
+                with pytest.raises(SystemExit) as exit_info:
+                    await _batch_generate_async(
+                        ctx=plain_ctx,
+                        prompts_file=str(prompts_file),
+                        model="hidream",
+                        size="1024x1024",
+                        save_dir=str(tmp_path),
+                    )
+                assert exit_info.value.code == 1
                 echo_str = " ".join(str(c) for c in mock_echo.call_args_list)
                 assert "Failed" in echo_str
 

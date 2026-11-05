@@ -362,7 +362,7 @@ async def download_video(job: VideoJob, output_path: Path, status: VideoComplete
     """Save a finished video, retrying a dropped transfer.
 
     A model that returns a ``download_url`` hands the link out once, at queue
-    time, and only this job object holds it, so this process is the one chance
+    time. Unless ``job.download_url`` was saved, this process is the one chance
     to save the billed video. The link is short-lived but survives a few
     retries, and fetching it costs nothing. The last failure is raised.
     """
@@ -412,5 +412,5 @@ def print_recovery(job: VideoJob) -> None:
         "   Its stored video was not released. Fetch it with "
         f"client.video.retrieve(model={job.model!r}, queue_id={job.queue_id!r}); a model "
         "that gives its download link only at queue time cannot be fetched once this "
-        "process exits."
+        "process exits, unless job.download_url was saved."
     )

@@ -17,6 +17,7 @@ import pytest
 pytest.importorskip("eth_account", reason="x402 extra not installed")
 pytest.importorskip("siwe", reason="x402 extra not installed")
 
+from venice_ai import VeniceClient
 from venice_ai.auth.x402 import USDC_BASE_MAINNET, X402Auth
 from venice_ai.exceptions import PaymentRequiredError
 from venice_ai.resources.x402 import X402
@@ -523,19 +524,80 @@ async def test_top_up_with_caps_via_max_amount(x402_resource: X402, auth: X402Au
 
 
 @pytest.mark.asyncio
-async def test_top_up_with_rejects_below_minimum(x402_resource: X402, auth: X402Auth) -> None:
-    """amount_usdc < server minimum → ValueError, no signing."""
+async def test_top_up_with_refuses_amount_below_requirement(
+    x402_resource: X402, auth: X402Auth
+) -> None:
+    """Asking for less than the server's requirement raises, unsigned."""
     probe_err = _payment_required_error(
         {"x402Version": 2, "accepts": [_good_requirement()]}  # server requires 5 USDC
     )
     x402_resource.top_up = AsyncMock(side_effect=[probe_err])  # type: ignore[method-assign]
 
     # Setting max_amount_usdc=10 keeps the cap check passing so we exercise
-    # the below-minimum branch specifically.
-    with pytest.raises(ValueError, match="below server minimum"):
+    # the amount comparison specifically.
+    with pytest.raises(ValueError, match=r"amount_usdc=\$3\.0 differs .*\$5\.0 USDC"):
         await x402_resource.top_up_with(auth=auth, amount_usdc=3.0, max_amount_usdc=10.0)
 
     assert x402_resource.top_up.call_count == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_top_up_with_refuses_amount_above_requirement(
+    x402_resource: X402, auth: X402Auth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asking for more than the server's requirement raises, naming both figures, unsigned."""
+    probe_err = _payment_required_error({"x402Version": 2, "accepts": [_good_requirement()]})
+    x402_resource.top_up = AsyncMock(side_effect=[probe_err])  # type: ignore[method-assign]
+    sign = MagicMock(side_effect=AssertionError("must not sign"))
+    monkeypatch.setattr(auth, "build_payment_header", sign)
+
+    with pytest.raises(ValueError, match=r"amount_usdc=\$10\.0 differs .*\$5\.0 USDC"):
+        await x402_resource.top_up_with(auth=auth, amount_usdc=10.0)
+
+    sign.assert_not_called()
+    assert x402_resource.top_up.call_count == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_top_up_with_cap_above_amount_does_not_widen_the_match(
+    x402_resource: X402, auth: X402Auth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server figure between amount_usdc and max_amount_usdc is still a mismatch."""
+    probe_err = _payment_required_error(
+        {"x402Version": 2, "accepts": [{**_good_requirement(), "amount": "7000000"}]}
+    )
+    x402_resource.top_up = AsyncMock(side_effect=[probe_err])  # type: ignore[method-assign]
+    sign = MagicMock(side_effect=AssertionError("must not sign"))
+    monkeypatch.setattr(auth, "build_payment_header", sign)
+
+    with pytest.raises(ValueError, match=r"amount_usdc=\$5\.0 differs .*\$7\.0 USDC"):
+        await x402_resource.top_up_with(auth=auth, amount_usdc=5.0, max_amount_usdc=10.0)
+
+    sign.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("amount_usdc", "max_amount_usdc"),
+    [
+        (5.0, None),
+        (5.0, 10.0),  # a cap above the amount changes nothing that is signed
+        (5.0000001, None),  # compared in base units, so sub-unit float noise matches
+    ],
+)
+@pytest.mark.asyncio
+async def test_top_up_with_signs_exactly_the_requirement_when_amount_matches(
+    x402_resource: X402, auth: X402Auth, amount_usdc: float, max_amount_usdc: float | None
+) -> None:
+    probe_err = _payment_required_error({"x402Version": 2, "accepts": [_good_requirement()]})
+    x402_resource.top_up = AsyncMock(side_effect=[probe_err, _settle_response()])  # type: ignore[method-assign]
+
+    await x402_resource.top_up_with(
+        auth=auth, amount_usdc=amount_usdc, max_amount_usdc=max_amount_usdc
+    )
+
+    header = x402_resource.top_up.call_args_list[1].kwargs["payment_header"]  # type: ignore[attr-defined]
+    envelope = json.loads(base64.b64decode(header).decode())
+    assert envelope["payload"]["authorization"]["value"] == "5000000"
 
 
 @pytest.mark.asyncio
@@ -607,6 +669,56 @@ async def test_top_up_with_handles_alternate_scheme_names(
 
     result = await x402_resource.top_up_with(auth=auth, amount_usdc=5.0)
     assert result.data.amountCredited == 5.0
+
+
+# ---------------------------------------------------------------------------
+# Which credentials each client setup attaches
+# ---------------------------------------------------------------------------
+
+_SIWE_HEADER = "X-Sign-In-With-X"
+_FAKE_API_KEY = "vn_unit_test_X402Headers_12345678"
+
+
+def _attached(client: VeniceClient, *, siwe_auth: X402Auth | None = None) -> tuple[bool, bool]:
+    """Return (has Bearer, has wallet envelope) for one request's headers."""
+    headers = client._request_headers(MagicMock(headers={}), siwe_auth=siwe_auth)
+    return "Authorization" in headers, _SIWE_HEADER in headers
+
+
+def test_client_needs_a_key_or_a_wallet(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VENICE_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="No authentication provided"):
+        VeniceClient()
+
+
+def test_empty_api_key_sends_only_the_wallet_envelope(
+    auth: X402Auth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VENICE_API_KEY", _FAKE_API_KEY)
+    client = VeniceClient(api_key="", auth=auth)
+
+    assert _attached(client) == (False, True)
+    assert _attached(client, siwe_auth=auth) == (False, True)
+
+
+def test_env_key_wins_over_client_auth_on_default_requests(
+    auth: X402Auth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``VeniceClient(auth=auth)`` with VENICE_API_KEY set: Bearer only, no envelope."""
+    monkeypatch.setenv("VENICE_API_KEY", _FAKE_API_KEY)
+    client = VeniceClient(auth=auth)
+
+    assert _attached(client) == (True, False)
+
+
+def test_wallet_reads_with_a_key_send_both_credentials(
+    auth: X402Auth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``balance``/``transactions`` name the wallet per call, so the key does not displace it."""
+    monkeypatch.setenv("VENICE_API_KEY", _FAKE_API_KEY)
+    client = VeniceClient()
+
+    assert _attached(client, siwe_auth=auth) == (True, True)
 
 
 # ---------------------------------------------------------------------------

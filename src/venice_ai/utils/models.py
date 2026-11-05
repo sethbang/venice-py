@@ -169,7 +169,8 @@ def build_model_id(model: str, **params: str | int | float | bool) -> str:
 
     Args:
         model: Base model ID (e.g., ``"llama-3.3-70b"``).
-        **params: Feature parameters (e.g., ``reasoning_effort="high"``).
+        **params: Feature parameters (e.g., ``reasoning_effort="high"``). A bool
+            renders as lowercase ``true`` or ``false``.
 
     Returns:
         Model ID with feature suffix, or just the base model ID if no
@@ -196,5 +197,8 @@ def build_model_id(model: str, **params: str | int | float | bool) -> str:
         )
     if not params:
         return model
-    suffix = "&".join(f"{key}={value}" for key, value in params.items())
+    suffix = "&".join(
+        f"{key}={str(value).lower() if isinstance(value, bool) else value}"
+        for key, value in params.items()
+    )
     return f"{model}:{suffix}"

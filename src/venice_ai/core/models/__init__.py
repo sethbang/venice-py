@@ -6,7 +6,7 @@ All models provide full validation, type safety, and auto-completion for Python 
 
 The package is organized into modules:
 
-* **base**    — ``VeniceBaseModel``, ``TimestampMixin``
+* **base**    — ``VeniceBaseModel``, ``CaseInsensitiveHeaders``, ``TimestampMixin``
 * **enums**   — ``ModelType``, ``APIKeyType``, ``Currency``, ``FinishReason``, ``MessageRole``
 * **headers** — ``RateLimitInfo``, ``DeprecationInfo``, ``BalanceInfo``, ``ContentSafetyInfo``, ``ModelInfo``, ``PaginationInfo``
 * **metrics** — ``UsageInfo``, ``TimingInfo``, ``SchedulerMetrics``, ``CacheStats``
@@ -20,7 +20,7 @@ comprehensive type safety and validation through Pydantic v2.
 # Import from focused submodules (the canonical sources)
 # Order matters: submodules must load before .common which calls model_rebuild()
 # ---------------------------------------------------------------------------
-from .base import TimestampMixin, VeniceBaseModel  # noqa: I001
+from .base import CaseInsensitiveHeaders, TimestampMixin, VeniceBaseModel  # noqa: I001
 from .enums import APIKeyType, Currency, FinishReason, MessageRole, ModelType
 from .headers import (
     BalanceInfo,
@@ -69,6 +69,7 @@ from .common import (
 __all__ = [
     # From base module
     "VeniceBaseModel",
+    "CaseInsensitiveHeaders",
     "TimestampMixin",
     # From enums module
     "ModelType",

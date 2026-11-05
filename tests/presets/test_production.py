@@ -105,12 +105,46 @@ class TestCreateProductionConfigLocalhostValidation:
         assert config.backend.redis is not None
         assert config.backend.redis.redis_url == "redis://127.0.0.1:6379"
 
-    def test_localhost_in_path_rejected(self):
-        """Test localhost appearing in path is also rejected."""
-        with pytest.raises(ValueError) as exc_info:
-            create_production_config(redis_url="redis://myhost:6379/localhost")
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "redis://:localhost-secret@prod-redis:6379/0",
+            "redis://localhost:secret@prod-redis:6379/0",
+            "redis://:127.0.0.1@prod-redis:6379/0",
+            "redis://myhost:6379/localhost",
+            "redis://prod-redis:6379/0?client_name=localhost",
+            "redis://localhost.example.com:6379",
+            "redis://notlocalhost:6379",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "factory",
+        [
+            create_production_config,
+            create_production_config_high_throughput,
+            create_production_config_conservative,
+        ],
+    )
+    def test_localhost_elsewhere_than_the_host_is_accepted(self, factory, url):
+        config = factory(redis_url=url)
 
-        assert "Invalid Redis URL for production" in str(exc_info.value)
+        assert config.backend.redis.redis_url == url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "redis://localhost:6379",
+            "redis://LOCALHOST:6379",
+            "rediss://user:pass@localhost:6379/0",
+            "redis://:not-local@127.0.0.1:6379",
+            "redis://cache.localhost:6379",
+            "localhost:6379",
+            "127.0.0.1:6379",
+        ],
+    )
+    def test_localhost_and_127_0_0_1_are_rejected_however_written(self, url):
+        with pytest.raises(ValueError, match="Invalid Redis URL for production"):
+            create_production_config(redis_url=url)
 
     def test_env_var_with_localhost_rejected(self):
         """Test that localhost from env var is also rejected (line 96 from env path)."""

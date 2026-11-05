@@ -165,7 +165,7 @@ async def _wait_and_save(
         print_recovery(job)
         return False
     except aiohttp.ClientResponseError as e:
-        # Only the status: the error's text contains the link, which grants access.
+        # The error shows the storage host at most, never the link.
         print(f"❌ The download answered HTTP {e.status} (queue_id={job.queue_id})")
         print_recovery(job)
         return False
@@ -207,22 +207,13 @@ def _report_queue_failure(e: Exception) -> None:
         _report_error(e)
 
 
-def _quote_failures(pick: CheapestVideoResult) -> dict[str, str]:
-    """The candidates the resolver dropped because their quote failed.
-
-    ``skipped`` also lists models that cannot serve the request at all; those
-    do not make the pick any less the cheapest.
-    """
-    return {m: reason for m, reason in pick.skipped.items() if reason.startswith("quote failed")}
-
-
 def _print_pick(pick: CheapestVideoResult) -> None:
     """Show the resolver's choice and how many models it compared."""
     print(f"📍 Cheapest of {len(pick.all_quotes)} quoted models: {pick.model}")
     print(f"📐 Request parameters it was quoted with: {pick.request_params}")
     print(f"💵 Quoted cost: ${pick.quote_usd:.4f}")
-    for model_id, reason in _quote_failures(pick).items():
-        print(f"⚠️  Not compared: {model_id} ({reason})")
+    for model_id, error in pick.quote_failures.items():
+        print(f"⚠️  Not compared: {model_id} (quote failed: {error})")
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +248,7 @@ async def basic_text_to_video(client: VeniceClient) -> Outcome:
                 "⏭️  Not queued: set VENICE_RUN_PAID_VIDEO=1 to generate (incurs the quoted cost)."
             )
             return NOT_PAID
-        if failures := _quote_failures(pick):
+        if failures := pick.quote_failures:
             print(
                 f"❌ Not queued: {len(failures)} models could not be priced, and any of them "
                 "may be cheaper than this pick."
@@ -377,7 +368,7 @@ async def advanced_options(client: VeniceClient) -> Outcome:
                 "⏭️  Not queued: set VENICE_RUN_PAID_VIDEO=1 to generate (incurs the quoted cost)."
             )
             return NOT_PAID
-        if failures := _quote_failures(pick):
+        if failures := pick.quote_failures:
             print(
                 f"❌ Not queued: {len(failures)} models could not be priced, and any of them "
                 "may be cheaper than this pick."

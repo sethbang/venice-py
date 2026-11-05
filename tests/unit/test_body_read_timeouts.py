@@ -152,7 +152,11 @@ async def test_stalled_body_raises_api_timeout_error(call: Call) -> None:
     async with _server() as base, _client(base) as client:
         with pytest.raises(APITimeoutError, match=BODY_TIMEOUT) as excinfo:
             await asyncio.wait_for(call(client, base), timeout=STALL_SECONDS / 2)
-    assert isinstance(excinfo.value.original_error, TimeoutError)
+    if call is BINARY_CASES["fetch_external"]:
+        # It attaches no original: aiohttp's error text can quote the URL it fetched.
+        assert excinfo.value.original_error is None
+    else:
+        assert isinstance(excinfo.value.original_error, TimeoutError)
 
 
 async def test_stalled_csv_usage_history_is_a_billing_timeout() -> None:
