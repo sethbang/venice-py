@@ -108,7 +108,7 @@ model = await client.models.resolve_chat(
     require_vision=False,
     require_reasoning=False,
     require_code_optimization=False,
-    require_response_schema=False,       # for `parse()` / `response_format=BaseModel`
+    require_response_schema=False,       # for `parse()` / `response_format=BaseModel` / `responses.create(text=...)`
     min_context_tokens=None,
     require_private=False,                # privacy-first models
     require_web_search=False,             # honors enable_web_search

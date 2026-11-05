@@ -27,6 +27,11 @@ PromptCacheRetention = Literal["in_memory", "24h", "default", "extended"]
 ResponsesItemStatus = Literal["completed", "in_progress", "incomplete"]
 """Status of a tool-call item replayed in ``input``."""
 
+ResponsesWebSearchCallStatus = Literal[
+    "in_progress", "searching", "completed", "failed", "incomplete"
+]
+"""Status of a ``web_search_call`` item replayed in ``input``."""
+
 
 # ============================================================================
 # Tool definitions
@@ -226,17 +231,140 @@ class ResponsesInputToolSearchOutput(BaseModel):
     status: Literal["completed"] | None = Field(default=None, description="Item status.")
 
 
+class ResponsesWebSearchSource(BaseModel):
+    """A source a web search consulted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["url"]
+    url: str = Field(..., description="URL of the source.")
+
+
+class ResponsesWebSearchActionSearch(BaseModel):
+    """The ``search`` action of a :class:`ResponsesInputWebSearchCall`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["search"]
+    query: str | None = Field(default=None, description="The search query.")
+    queries: list[str] | None = Field(default=None, description="The search queries.")
+    sources: list[ResponsesWebSearchSource] | None = Field(
+        default=None, description="Sources the search consulted."
+    )
+
+
+class ResponsesWebSearchActionOpenPage(BaseModel):
+    """The ``open_page`` action of a :class:`ResponsesInputWebSearchCall`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["open_page"]
+    url: str | None = Field(default=None, description="URL of the page opened.")
+
+
+class ResponsesWebSearchActionFindInPage(BaseModel):
+    """The ``find_in_page`` action of a :class:`ResponsesInputWebSearchCall`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["find_in_page"]
+    url: str = Field(..., description="URL of the page searched.")
+    pattern: str = Field(..., description="Text searched for on the page.")
+
+
+ResponsesWebSearchAction = Annotated[
+    ResponsesWebSearchActionSearch
+    | ResponsesWebSearchActionOpenPage
+    | ResponsesWebSearchActionFindInPage,
+    Field(discriminator="type"),
+]
+"""What a ``web_search_call`` did: searched, opened a page, or searched within one."""
+
+
+class ResponsesInputWebSearchCall(BaseModel):
+    """A ``web_search_call`` item replayed in ``input`` as conversation history."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["web_search_call"]
+    id: str = Field(..., description="Item ID from the original output.")
+    status: ResponsesWebSearchCallStatus = Field(..., description="Item status.")
+    action: ResponsesWebSearchAction | None = Field(
+        default=None, description="What the search call did."
+    )
+
+
 ResponsesInputItem = Annotated[
     dict[str, Any]
     | ResponsesInputCustomToolCall
     | ResponsesInputCustomToolCallOutput
     | ResponsesInputAdditionalTools
     | ResponsesInputToolSearchCall
-    | ResponsesInputToolSearchOutput,
+    | ResponsesInputToolSearchOutput
+    | ResponsesInputWebSearchCall,
     Field(union_mode="left_to_right"),
 ]
 """One entry of a list ``input``: a typed item or a raw dict (messages,
 reasoning items, function calls and their outputs, item references)."""
+
+
+# ============================================================================
+# Text output options
+# ============================================================================
+
+
+class ResponsesTextFormatText(BaseModel):
+    """Plain text output, the default."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["text"]
+
+
+class ResponsesTextFormatJSONObject(BaseModel):
+    """Any valid JSON object."""
+
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["json_object"]
+
+
+class ResponsesTextFormatJSONSchema(BaseModel):
+    """Output that follows a JSON Schema.
+
+    The schema goes in the ``schema`` keyword. The attribute is ``schema_`` because
+    ``schema`` is taken on pydantic's ``BaseModel``.
+    """
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    type: Literal["json_schema"]
+    name: str = Field(..., min_length=1, description="Name of the response format.")
+    schema_: dict[str, Any] = Field(
+        ..., alias="schema", description="JSON Schema the response must follow."
+    )
+    strict: bool | None = Field(default=None, description="Enforce the schema strictly.")
+    description: str | None = Field(default=None, description="What the format is for.")
+
+
+ResponsesTextFormat = Annotated[
+    ResponsesTextFormatText | ResponsesTextFormatJSONObject | ResponsesTextFormatJSONSchema,
+    Field(discriminator="type"),
+]
+"""The ``format`` of a :class:`ResponsesTextConfig`."""
+
+
+class ResponsesTextConfig(BaseModel):
+    """Text output options, including structured output."""
+
+    model_config = ConfigDict(extra="allow")
+
+    format: ResponsesTextFormat | None = Field(
+        default=None,
+        description=(
+            "Requests structured output. A model without structured output support returns 400."
+        ),
+    )
 
 
 # ============================================================================
@@ -322,6 +450,13 @@ class ResponsesRequest(BaseModel):
     stream: bool | None = Field(
         default=None, description="Whether to stream partial progress via SSE."
     )
+    text: ResponsesTextConfig | None = Field(
+        default=None,
+        description=(
+            "Text output options. ``format`` requests structured output: ``json_schema`` "
+            "with a ``name`` and ``schema``, or ``json_object``."
+        ),
+    )
     venice_parameters: VeniceParameters | None = Field(
         default=None, description="Venice-specific request parameters."
     )
@@ -343,11 +478,23 @@ __all__ = [
     "ResponsesInputItem",
     "ResponsesInputToolSearchCall",
     "ResponsesInputToolSearchOutput",
+    "ResponsesInputWebSearchCall",
     "ResponsesItemStatus",
     "ResponsesNamedToolChoice",
     "ResponsesRequest",
+    "ResponsesTextConfig",
+    "ResponsesTextFormat",
+    "ResponsesTextFormatJSONObject",
+    "ResponsesTextFormatJSONSchema",
+    "ResponsesTextFormatText",
     "ResponsesTool",
     "ResponsesToolChoice",
     "ResponsesToolChoiceFunctionName",
     "ResponsesToolSearchTool",
+    "ResponsesWebSearchAction",
+    "ResponsesWebSearchActionFindInPage",
+    "ResponsesWebSearchActionOpenPage",
+    "ResponsesWebSearchActionSearch",
+    "ResponsesWebSearchCallStatus",
+    "ResponsesWebSearchSource",
 ]

@@ -2,6 +2,8 @@
 
 Sourced from `ChatCompletions.parse` in `src/venice_ai/resources/chat/completions.py` and the `parsed` / `parse_as` members of `src/venice_ai/types/api/chat.py`.
 
+`client.responses` has no `parse()`. Its `text=` argument sends a JSON Schema you write by hand and returns a JSON string; see `responses-api.md`.
+
 ## Two paths — pick `parse()` for new code
 
 | Path | Method | Returns | Validates server-side response? | Streaming? |

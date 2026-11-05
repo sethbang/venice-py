@@ -9,6 +9,9 @@ Covers:
 - The request classifier routes ``responses`` to ``ResourceType.LLM``.
 - ``stream=True`` routes through ``_stream_request`` and yields parsed
   :class:`ResponsesStreamEvent` chunks.
+- ``text`` reaches the body with the API's own keys, and invalid formats fail
+  before sending.
+- ``web_search_call`` items replay in ``input``, with statuses of their own.
 """
 
 from collections.abc import AsyncIterator
@@ -23,11 +26,15 @@ from venice_ai._request_classifier import RequestClassifier
 from venice_ai.resources.responses import Responses
 from venice_ai.types.api import (
     ResponsesFunctionCallOutput,
+    ResponsesInputCustomToolCall,
+    ResponsesInputWebSearchCall,
     ResponsesMessageOutput,
     ResponsesReasoningOutput,
     ResponsesRequest,
     ResponsesResponse,
     ResponsesStreamEvent,
+    ResponsesTextConfig,
+    ResponsesTextFormatJSONSchema,
     ResponsesWebSearchCallOutput,
 )
 
@@ -245,3 +252,178 @@ class TestResponsesStreaming:
         assert call_kwargs["path"] == "responses"
         assert call_kwargs["json_data"]["stream"] is True
         assert call_kwargs["cast_to"] is ResponsesStreamEvent
+
+
+GREET_SCHEMA = {
+    "type": "object",
+    "properties": {"greeting": {"type": "string"}},
+    "required": ["greeting"],
+}
+
+
+class TestStructuredOutput:
+    """``text.format`` asks for structured output from ``/responses``."""
+
+    @pytest.mark.asyncio
+    async def test_json_schema_dict_reaches_the_body_with_the_wire_key(
+        self, resource: Responses
+    ) -> None:
+        text = {
+            "format": {
+                "type": "json_schema",
+                "name": "greet",
+                "schema": GREET_SCHEMA,
+                "strict": True,
+            }
+        }
+        await resource.create(model="m", input="hi", text=text)
+        assert _body_sent(resource)["text"] == text
+
+    @pytest.mark.asyncio
+    async def test_typed_json_schema_format_sends_schema_not_schema_underscore(
+        self, resource: Responses
+    ) -> None:
+        await resource.create(
+            model="m",
+            input="hi",
+            text=ResponsesTextConfig(
+                format=ResponsesTextFormatJSONSchema(
+                    type="json_schema", name="greet", schema=GREET_SCHEMA
+                )
+            ),
+        )
+        assert _body_sent(resource)["text"] == {
+            "format": {"type": "json_schema", "name": "greet", "schema": GREET_SCHEMA}
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["text", "json_object"])
+    async def test_formats_without_a_schema(self, resource: Responses, kind: str) -> None:
+        await resource.create(model="m", input="hi", text={"format": {"type": kind}})
+        assert _body_sent(resource)["text"] == {"format": {"type": kind}}
+
+    @pytest.mark.asyncio
+    async def test_keys_the_sdk_does_not_model_are_still_sent(self, resource: Responses) -> None:
+        text = {"format": {"type": "text", "future": 1}, "verbosity": "low"}
+        await resource.create(model="m", input="hi", text=text)
+        assert _body_sent(resource)["text"] == text
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"format": {"type": "yaml"}},
+            {"format": {"type": "json_schema", "schema": GREET_SCHEMA}},
+            {"format": {"type": "json_schema", "name": "", "schema": GREET_SCHEMA}},
+            {"format": {"type": "json_schema", "name": "greet"}},
+        ],
+    )
+    def test_formats_the_api_rejects_fail_before_sending(self, bad: dict[str, Any]) -> None:
+        with pytest.raises(ValidationError):
+            ResponsesRequest(model="m", input="hi", text=bad)
+
+    @pytest.mark.asyncio
+    async def test_by_alias_dump_leaves_the_other_fields_unchanged(
+        self, resource: Responses
+    ) -> None:
+        kwargs: dict[str, Any] = {
+            "model": "m",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "reasoning": {"effort": "high", "summary": "concise"},
+            "tools": [{"type": "web_search", "external_web_access": False}],
+            "venice_parameters": {"enable_web_search": "on", "character_slug": "c"},
+            "anon_user_id": "user-1",
+        }
+        await resource.create(**kwargs)
+        body = _body_sent(resource)
+        assert body["tools"] == kwargs["tools"]
+        assert body["input"] == kwargs["input"]
+        assert body["reasoning"] == kwargs["reasoning"]
+        assert body["anon_user_id"] == "user-1"
+        assert body["venice_parameters"]["character_slug"] == "c"
+        assert body["venice_parameters"]["enable_web_search"] == "on"
+
+
+class TestChatOnlyVeniceParameters:
+    @pytest.mark.asyncio
+    async def test_are_left_out_of_the_body(self, resource: Responses) -> None:
+        chat_only = {
+            "strip_thinking_response": True,
+            "disable_thinking": True,
+            "return_search_results_as_documents": True,
+            "enable_x_search": True,
+        }
+        await resource.create(
+            model="m",
+            input="hi",
+            venice_parameters={**chat_only, "enable_web_search": "on"},
+        )
+        sent = _body_sent(resource)["venice_parameters"]
+        assert not set(chat_only) & set(sent)
+        assert sent["enable_web_search"] == "on"
+
+
+class TestWebSearchCallReplay:
+    """A ``web_search_call`` can go back in ``input`` as history."""
+
+    @pytest.mark.parametrize(
+        "status", ["in_progress", "searching", "completed", "failed", "incomplete"]
+    )
+    def test_typed_item_takes_every_status(self, status: str) -> None:
+        item = ResponsesInputWebSearchCall(type="web_search_call", id="ws_1", status=status)
+        assert item.status == status
+
+    def test_typed_item_rejects_an_unknown_status(self) -> None:
+        with pytest.raises(ValidationError):
+            ResponsesInputWebSearchCall(type="web_search_call", id="ws_1", status="bogus")
+
+    @pytest.mark.parametrize("status", ["searching", "failed"])
+    def test_web_search_statuses_stay_on_web_search_items(self, status: str) -> None:
+        with pytest.raises(ValidationError):
+            ResponsesInputCustomToolCall(
+                type="custom_tool_call", call_id="c", name="n", input="i", status=status
+            )
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            {
+                "type": "search",
+                "query": "q",
+                "queries": ["q"],
+                "sources": [{"type": "url", "url": "https://example.com"}],
+            },
+            {"type": "open_page", "url": "https://example.com"},
+            {"type": "find_in_page", "url": "https://example.com", "pattern": "x"},
+        ],
+    )
+    def test_typed_item_serialises_each_action(self, action: dict[str, Any]) -> None:
+        item = ResponsesInputWebSearchCall(
+            type="web_search_call", id="ws_1", status="completed", action=action
+        )
+        request = ResponsesRequest(model="m", input=[item])
+        assert request.model_dump(exclude_none=True)["input"][0]["action"] == action
+
+    def test_find_in_page_needs_a_pattern(self) -> None:
+        with pytest.raises(ValidationError):
+            ResponsesInputWebSearchCall(
+                type="web_search_call",
+                id="ws_1",
+                status="completed",
+                action={"type": "find_in_page", "url": "https://example.com"},
+            )
+
+    def test_parsed_output_replays_through_model_dump(self) -> None:
+        raw = {
+            "type": "web_search_call",
+            "id": "ws_1",
+            "status": "completed",
+            "action": {"type": "open_page", "url": "https://example.com"},
+        }
+        response = ResponsesResponse(
+            id="r", object="response", created_at=1, model="m", status="completed", output=[raw]
+        )
+        block = response.output[0]
+        assert isinstance(block, ResponsesWebSearchCallOutput)
+        assert block.action == raw["action"]
+        request = ResponsesRequest(model="m", input=[block.model_dump(exclude_none=True)])
+        assert request.model_dump(exclude_none=True)["input"] == [raw]
