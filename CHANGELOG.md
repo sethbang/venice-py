@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Covers the Venice API changes of 2026-10-27 and 2026-11-04: cache breakpoints on assistant and tool messages, Exa as a web search provider, structured output on `/responses`, and `web_search_call` items in `/responses` history.
+## [2.10.0] - 2026-11-04
+
+Covers the Venice API changes of 2026-10-27 and 2026-11-04: cache breakpoints on assistant and tool messages, Exa as a web search provider, structured output on `/responses`, and `web_search_call` items in `/responses` history. Request and response models also stop dropping fields they do not declare.
+
+Two changes under **Changed** can affect working code. A key in a chat message that the SDK used to drop is now sent, so the API sees it. `cache_control` now rejects invalid values before sending, and a type checker rejects a variable annotated `dict[str, str]`.
 
 ### Added
 
@@ -1315,7 +1319,8 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.9.0...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.10.0...HEAD
+[2.10.0]: https://github.com/sethbang/venice-py/compare/v2.9.0...v2.10.0
 [2.9.0]: https://github.com/sethbang/venice-py/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/sethbang/venice-py/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/sethbang/venice-py/compare/v2.6.0...v2.7.0
