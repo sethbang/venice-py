@@ -1680,6 +1680,15 @@
         "body.fallbacks[].model",
         "body.include",
         "body.input",
+        "body.input[].action",
+        "body.input[].action.pattern",
+        "body.input[].action.queries",
+        "body.input[].action.query",
+        "body.input[].action.sources",
+        "body.input[].action.sources[].type",
+        "body.input[].action.sources[].url",
+        "body.input[].action.type",
+        "body.input[].action.url",
         "body.input[].arguments",
         "body.input[].call_id",
         "body.input[].content",
@@ -1715,6 +1724,7 @@
         "body.input[].tools[].environment",
         "body.input[].tools[].excluded_x_handles",
         "body.input[].tools[].execution",
+        "body.input[].tools[].external_web_access",
         "body.input[].tools[].from_date",
         "body.input[].tools[].function",
         "body.input[].tools[].function.defer_loading",
@@ -1750,6 +1760,13 @@
         "body.reasoning.summary",
         "body.stream",
         "body.temperature",
+        "body.text",
+        "body.text.format",
+        "body.text.format.description",
+        "body.text.format.name",
+        "body.text.format.schema",
+        "body.text.format.strict",
+        "body.text.format.type",
         "body.tool_choice",
         "body.tool_choice.function",
         "body.tool_choice.function.name",
@@ -1769,6 +1786,7 @@
         "body.tools[].environment",
         "body.tools[].excluded_x_handles",
         "body.tools[].execution",
+        "body.tools[].external_web_access",
         "body.tools[].from_date",
         "body.tools[].function",
         "body.tools[].function.defer_loading",
@@ -1822,6 +1840,15 @@
             "model",
             "object",
             "output",
+            "output[].action",
+            "output[].action.pattern",
+            "output[].action.queries",
+            "output[].action.query",
+            "output[].action.sources",
+            "output[].action.sources[].type",
+            "output[].action.sources[].url",
+            "output[].action.type",
+            "output[].action.url",
             "output[].arguments",
             "output[].call_id",
             "output[].content",
@@ -2477,6 +2504,14 @@
     "POST /responses response.200.object": [
       "\"response\""
     ],
+    "POST /responses response.200.output[].action.sources[].type": [
+      "\"url\""
+    ],
+    "POST /responses response.200.output[].action.type": [
+      "\"find_in_page\"",
+      "\"open_page\"",
+      "\"search\""
+    ],
     "POST /responses response.200.output[].content[].annotations[].type": [
       "\"url_citation\""
     ],
@@ -3060,6 +3095,14 @@
       "2",
       "4"
     ],
+    "schemas/ResponsesRequest.input[].action.sources[].type": [
+      "\"url\""
+    ],
+    "schemas/ResponsesRequest.input[].action.type": [
+      "\"find_in_page\"",
+      "\"open_page\"",
+      "\"search\""
+    ],
     "schemas/ResponsesRequest.input[].content[].detail": [
       "\"auto\"",
       "\"high\"",
@@ -3090,8 +3133,10 @@
     ],
     "schemas/ResponsesRequest.input[].status": [
       "\"completed\"",
+      "\"failed\"",
       "\"in_progress\"",
-      "\"incomplete\""
+      "\"incomplete\"",
+      "\"searching\""
     ],
     "schemas/ResponsesRequest.input[].summary[].type": [
       "\"summary_text\""
@@ -3129,7 +3174,8 @@
       "\"message\"",
       "\"reasoning\"",
       "\"tool_search_call\"",
-      "\"tool_search_output\""
+      "\"tool_search_output\"",
+      "\"web_search_call\""
     ],
     "schemas/ResponsesRequest.prompt_cache_retention": [
       "\"24h\"",
@@ -3150,6 +3196,11 @@
       "\"auto\"",
       "\"concise\"",
       "\"detailed\""
+    ],
+    "schemas/ResponsesRequest.text.format.type": [
+      "\"json_object\"",
+      "\"json_schema\"",
+      "\"text\""
     ],
     "schemas/ResponsesRequest.tool_choice": [
       "\"auto\"",
@@ -3194,6 +3245,14 @@
     ],
     "schemas/ResponsesResponse.object": [
       "\"response\""
+    ],
+    "schemas/ResponsesResponse.output[].action.sources[].type": [
+      "\"url\""
+    ],
+    "schemas/ResponsesResponse.output[].action.type": [
+      "\"find_in_page\"",
+      "\"open_page\"",
+      "\"search\""
     ],
     "schemas/ResponsesResponse.output[].content[].annotations[].type": [
       "\"url_citation\""

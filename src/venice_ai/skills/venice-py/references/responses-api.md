@@ -9,7 +9,7 @@ Venice serves each request in one of two modes. Most OpenAI models are forwarded
 | Use chat.completions when | Use responses when |
 |---|---|
 | You want a managed tool loop (`run_with_tools`) | Your client already speaks the Responses format (Codex-style agents) |
-| You need `parse()` / `response_format` structured output | You want OpenAI models served natively, with encrypted reasoning replay |
+| You want `parse()` to return a validated pydantic model | You want OpenAI models served natively, with encrypted reasoning replay |
 | You need streaming with `ChatStream` helpers | You need custom (freeform-input) tools or client-executed `tool_search` |
 | You're targeting an E2EE-capable model | (Responses doesn't support E2EE models — use chat.completions with E2EE headers) |
 
@@ -43,7 +43,7 @@ Returns `ResponsesResponse` (typed; not the same shape as `ChatCompletionRespons
 | Output | `response.choices[0].message.content` | `response.output` (list of typed blocks) |
 | Reasoning | `reasoning_effort` kwarg | `reasoning={"effort": "...", "summary": "..."}` |
 | Streaming | `client.chat.completions.stream(...)` → `ChatStream` | `create(stream=True)` → `AsyncIterable[ResponsesStreamEvent]` |
-| Structured output | `parse()` / `response_format=` | Not modeled; use chat.completions for typed parsing |
+| Structured output | `parse()` / `response_format=`, validated into a pydantic model | `text={"format": ...}`, a JSON string you parse yourself |
 
 ## Conversations are stateless
 
@@ -72,7 +72,7 @@ Output models are not accepted in `input` directly; dump them to dicts as above.
 | `function_call` | `ResponsesFunctionCallOutput` | `call_id`, `name`, `namespace`, `arguments` (JSON string) |
 | `custom_tool_call` | `ResponsesCustomToolCallOutput` | `call_id`, `name`, `namespace`, `input` (raw text) |
 | `tool_search_call` | `ResponsesToolSearchCallOutput` | `call_id`, `execution`, `arguments` (dict) |
-| `web_search_call` | `ResponsesWebSearchCallOutput` | `id`, `status` |
+| `web_search_call` | `ResponsesWebSearchCallOutput` | `id`, `status`, `action` (dict) |
 | anything else | `ResponsesUnknownOutput` | `type` plus the raw fields |
 
 ```python
@@ -214,7 +214,43 @@ response = await client.responses.create(
 
 The output may include a `web_search_call` block, then a `message` block with the answer. Web search, `x_search`, and Venice-only `venice_parameters` route OpenAI models to translated mode. Web search is billed as search augmentation.
 
+`action` on a `web_search_call`, when the API returns one, says what it did: `search` (`query`, `queries`, `sources`), `open_page` (`url`), or `find_in_page` (`url`, `pattern`). To keep the call in the conversation, send the block back in `input` with `model_dump(exclude_none=True)`, or build a `ResponsesInputWebSearchCall`.
+
+`{"type": "web_search", "external_web_access": False}` declares the tool without live web access. That declaration does not enable Venice web search.
+
 For more control, use `client.augment.search(...)` and pass results into chat.completions — covered in `characters-and-augment.md`.
+
+## Structured output
+
+`text.format` asks for JSON. The result is still a string in the message text, so parse it yourself:
+
+```python
+import json
+
+model = await client.models.resolve_chat(require_response_schema=True)  # other models return 400
+response = await client.responses.create(
+    model=model,
+    input="Name a primary color.",
+    text={
+        "format": {
+            "type": "json_schema",
+            "name": "color",
+            "schema": {
+                "type": "object",
+                "properties": {"color": {"type": "string"}},
+                "required": ["color"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    },
+)
+for block in response.output:
+    if block.type == "message":
+        print(json.loads(block.content[0].text))
+```
+
+`{"format": {"type": "json_object"}}` asks for any JSON object. `ResponsesTextConfig` and `ResponsesTextFormatJSONSchema` are the typed forms. `ResponsesTextFormatJSONSchema` takes the keyword `schema` and exposes it as the attribute `schema_`.
 
 ## Prompt caching
 

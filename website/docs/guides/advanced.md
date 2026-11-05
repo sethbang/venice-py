@@ -436,6 +436,7 @@ async with VeniceClient() as client:
 | `instructions` | System instructions, applied before `input`. |
 | `parallel_tool_calls` | Whether the model may call more than one tool per turn. |
 | `prompt_cache_retention` | `"in_memory"`, `"default"`, `"24h"`, or `"extended"`, for supported OpenAI models. |
+| `text` | Structured output: `{"format": {"type": "json_schema", "name": ..., "schema": ...}}` or `{"format": {"type": "json_object"}}`, or a `ResponsesTextConfig`. The JSON comes back as a string in the message text. A model without structured output support returns 400. |
 | `tools` | Dicts, the shared `Tool` model, `ResponsesFunctionTool` (adds `defer_loading`), or a client-executed `ResponsesToolSearchTool`. |
 | `tool_choice` | `"auto"`, `"none"`, `"required"`, `{"type": "function" \| "custom", "name": ..., "namespace": ...}`, or `{"type": "function", "function": {"name": ...}}`. |
 
@@ -447,4 +448,5 @@ async with VeniceClient() as client:
 the output blocks (as dicts) and a result item to `input`:
 `function_call_output`, `custom_tool_call_output`
 (`ResponsesInputCustomToolCallOutput`), or `tool_search_output`
-(`ResponsesInputToolSearchOutput`).
+(`ResponsesInputToolSearchOutput`). A `web_search_call` block can go back the
+same way, or as a `ResponsesInputWebSearchCall`.

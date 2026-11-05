@@ -29,6 +29,7 @@ from ..types.api.requests.responses import (
     PromptCacheRetention,
     ResponsesInputItem,
     ResponsesRequest,
+    ResponsesTextConfig,
     ResponsesTool,
     ResponsesToolChoice,
 )
@@ -66,6 +67,7 @@ class Responses(APIResource["VeniceClient"]):
         tool_choice: ResponsesToolChoice | None = None,
         prompt_cache_retention: PromptCacheRetention | None = None,
         web_search: bool | None = None,
+        text: ResponsesTextConfig | dict[str, Any] | None = None,
         venice_parameters: Any | None = None,
         anon_user_id: str | None = None,
         stream: Literal[False] = False,
@@ -89,6 +91,7 @@ class Responses(APIResource["VeniceClient"]):
         tool_choice: ResponsesToolChoice | None = None,
         prompt_cache_retention: PromptCacheRetention | None = None,
         web_search: bool | None = None,
+        text: ResponsesTextConfig | dict[str, Any] | None = None,
         venice_parameters: Any | None = None,
         anon_user_id: str | None = None,
         stream: Literal[True],
@@ -112,6 +115,7 @@ class Responses(APIResource["VeniceClient"]):
         tool_choice: ResponsesToolChoice | None = None,
         prompt_cache_retention: PromptCacheRetention | None = None,
         web_search: bool | None = None,
+        text: ResponsesTextConfig | dict[str, Any] | None = None,
         venice_parameters: Any | None = None,
         anon_user_id: str | None = None,
         stream: bool,
@@ -134,6 +138,7 @@ class Responses(APIResource["VeniceClient"]):
         tool_choice: ResponsesToolChoice | None = None,
         prompt_cache_retention: PromptCacheRetention | None = None,
         web_search: bool | None = None,
+        text: ResponsesTextConfig | dict[str, Any] | None = None,
         venice_parameters: Any | None = None,
         anon_user_id: str | None = None,
         stream: bool = False,
@@ -152,7 +157,7 @@ class Responses(APIResource["VeniceClient"]):
                 be dicts or the typed ``ResponsesInput*`` models
                 (``custom_tool_call``, ``custom_tool_call_output``,
                 ``additional_tools``, ``tool_search_call``,
-                ``tool_search_output``).
+                ``tool_search_output``, ``web_search_call``).
             instructions: System instructions, applied before ``input``.
             include: Additional response fields to include.
             max_output_tokens: Maximum tokens to generate.
@@ -179,6 +184,11 @@ class Responses(APIResource["VeniceClient"]):
                 ``"extended"``. ``"24h"`` and ``"extended"`` keep cached
                 prefixes for up to 24 hours.
             web_search: Enable web search for this request.
+            text: Text output options. ``format`` requests structured output:
+                ``{"format": {"type": "json_schema", "name": ..., "schema": ...}}``
+                or ``{"format": {"type": "json_object"}}``. The output stays a
+                JSON string in the message text. A model without structured
+                output support returns 400.
             venice_parameters: Venice-specific request parameters.
             stream: When ``True``, returns an async iterator of
                 :class:`ResponsesStreamEvent` chunks parsed from
@@ -234,10 +244,11 @@ class Responses(APIResource["VeniceClient"]):
             tool_choice=tool_choice,
             prompt_cache_retention=prompt_cache_retention,
             web_search=web_search,
+            text=cast("ResponsesTextConfig | None", text),
             venice_parameters=venice_parameters,
             anon_user_id=anon_user_id,
         )
-        body = request.model_dump(exclude_none=True)
+        body = request.model_dump(exclude_none=True, by_alias=True)
         # /responses documents only a subset of venice_parameters; the SDK reuses
         # the shared chat VeniceParameters model, so drop the chat-only keys the
         # Responses endpoint does not document (swagger ResponsesRequest).

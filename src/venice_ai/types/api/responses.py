@@ -277,6 +277,14 @@ class ResponsesWebSearchCallOutput(BaseModel):
         ...,
         description="Search call status. Known values are in KNOWN_RESPONSE_WEB_SEARCH_CALL_STATUSES.",
     )
+    action: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "What the call did, when the API reports it. ``type`` is ``'search'`` (``query``, ``queries``, "
+            "``sources``), ``'open_page'`` (``url``) or ``'find_in_page'`` (``url``, "
+            "``pattern``)."
+        ),
+    )
 
 
 class ResponsesUnknownOutput(BaseModel):

@@ -4,11 +4,13 @@
 change means for the SDK, using the SDK's own pydantic models:
 
 - **Needs SDK work**: a gap the SDK provably has. A new endpoint, a request
-  field no SDK request model has, or a new value on a request field the SDK
-  restricts to a fixed set.
+  field no SDK request model has, a field the public method has no argument
+  for, or a new value on a request field the SDK restricts to a fixed set.
 - **Review**: anything that cannot be decided from the models, such as a
   removed field the SDK may still send, a content-type or status-code change,
-  query parameters, or an endpoint with no mapped request model.
+  query parameters, or an endpoint with no mapped request model. Also a new
+  value the typed models lack on a field that takes a raw dict too: callers can
+  send it, but the typed models need a look.
 - **No SDK change**: only what the SDK provably already handles. New values on
   request fields the SDK types as open strings, and new response fields or
   values, which response models accept by construction (enforced by
@@ -25,11 +27,13 @@ Run through ``api_drift.py``; this module needs venice-py importable.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import re
 import sys
 import types
 import typing
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -39,6 +43,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import api_drift as drift  # noqa: E402
 
+from venice_ai.resources.chat.completions import ChatCompletions  # noqa: E402
+from venice_ai.resources.responses import Responses  # noqa: E402
 from venice_ai.types.api.augment import AugmentScrapeRequest, AugmentSearchRequest  # noqa: E402
 from venice_ai.types.api.requests.api_keys import (  # noqa: E402
     CreateApiKeyRequest,
@@ -115,6 +121,15 @@ MODEL_MAP: dict[str, list[type[BaseModel]]] = {
     "POST /video/retrieve": [VideoRetrieveRequest],
 }
 
+# The public method behind each endpoint whose request model allows unknown
+# fields. Such a model accepts anything, so it cannot show that a caller can send
+# a field: the method's own signature decides that. A test fails when a
+# passthrough request model is missing here.
+PUBLIC_METHODS: dict[str, Callable[..., Any]] = {
+    "POST /chat/completions": ChatCompletions.create,
+    "POST /responses": Responses.create,
+}
+
 # Endpoints with a request body but no request model to check it against.
 UNMODELLED: dict[str, str] = {
     "POST /audio/voices": "the resource builds this multipart form by hand",
@@ -141,8 +156,9 @@ KNOWN_OMISSIONS: dict[str, dict[str, str]] = {
 
 RESPONSE_GATE = "tests/unit/type_defs/test_response_models_tolerant.py"
 
-# Reached through a request model with ``extra="allow"``: the field is not typed,
-# but the model passes it through, so callers can already send it.
+# Reached through a request model with ``extra="allow"`` or a plain dict arm: the
+# field is not typed, but the model passes it through. Whether a caller can reach
+# a top-level field is up to the public method; see ``PUBLIC_METHODS``.
 PASSTHROUGH: Any = object()
 _RANK = {drift.NEEDS_WORK: 0, drift.REVIEW: 1, drift.NO_CHANGE: 2}
 
@@ -370,6 +386,24 @@ def _with(item: drift.Item, group: str, reason: str) -> drift.Item:
     return dataclasses.replace(item, group=group, reason=reason)
 
 
+def _method_gap(endpoint: str, path: str) -> str | None:
+    """Why callers cannot send body field ``path``, or ``None`` if they can.
+
+    Only the top-level name is checked: a nested field travels inside an argument
+    the method already takes.
+    """
+    method = PUBLIC_METHODS.get(endpoint)
+    if method is None:
+        return None
+    top = _top(path)
+    parameters = inspect.signature(method).parameters
+    if top in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    ):
+        return None
+    return f"`{method.__qualname__}()` has no `{top}` argument, so callers cannot send it"
+
+
 def _classify_param_added(item: drift.Item) -> drift.Item:
     """Classify an added field and every field folded under it.
 
@@ -392,6 +426,12 @@ def _classify_added_path(item: drift.Item, param: str) -> drift.Item:
     models = MODEL_MAP.get(item.subject)
     if models is None:
         return _with(item, drift.REVIEW, "Endpoint has no mapped SDK request model")
+    omission = KNOWN_OMISSIONS.get(item.subject, {}).get(_top(path))
+    if omission:
+        return _with(item, drift.NO_CHANGE, f"Deliberately not modelled: {omission}")
+    gap = _method_gap(item.subject, path)
+    if gap:
+        return _with(item, drift.NEEDS_WORK, gap)
     leaves = resolve(models, path)
     if leaves is not None and _passthrough_only(leaves):
         return _with(
@@ -402,9 +442,6 @@ def _classify_added_path(item: drift.Item, param: str) -> drift.Item:
         )
     if leaves is not None:
         return _with(item, drift.NO_CHANGE, "The SDK request model already has this field")
-    omission = KNOWN_OMISSIONS.get(item.subject, {}).get(_top(path))
-    if omission:
-        return _with(item, drift.NO_CHANGE, f"Deliberately not modelled: {omission}")
     names = ", ".join(m.__name__ for m in models)
     return _with(item, drift.NEEDS_WORK, f"No SDK request model has this field ({names})")
 
@@ -451,15 +488,19 @@ def _classify_enum_added(item: drift.Item, usages: dict[str, list[Usage]]) -> dr
         if models is None:
             verdicts.append((drift.REVIEW, f"{usage.endpoint} has no mapped SDK request model"))
             continue
+        omission = KNOWN_OMISSIONS.get(usage.endpoint, {}).get(_top(usage.path))
+        if omission:
+            verdicts.append((drift.NO_CHANGE, f"Deliberately not modelled: {omission}"))
+            continue
+        gap = _method_gap(usage.endpoint, usage.path)
+        if gap:
+            verdicts.append((drift.NEEDS_WORK, gap))
+            continue
         leaves = resolve(models, usage.path)
         if leaves is None:
-            omission = KNOWN_OMISSIONS.get(usage.endpoint, {}).get(_top(usage.path))
-            if omission:
-                verdicts.append((drift.NO_CHANGE, f"Deliberately not modelled: {omission}"))
-            else:
-                verdicts.append(
-                    (drift.NEEDS_WORK, f"The SDK does not model `{usage.path}` on {usage.endpoint}")
-                )
+            verdicts.append(
+                (drift.NEEDS_WORK, f"The SDK does not model `{usage.path}` on {usage.endpoint}")
+            )
             continue
         if _passthrough_only(leaves):
             verdicts.append(
@@ -470,6 +511,15 @@ def _classify_enum_added(item: drift.Item, usages: dict[str, list[Usage]]) -> dr
         rejected = [v for v in values if not _accepts(typed, v)]
         if rejected:
             shown = ", ".join(json.dumps(v) for v in rejected)
+            if len(typed) != len(leaves):
+                verdicts.append(
+                    (
+                        drift.REVIEW,
+                        f"The typed SDK models for `{usage.path}` on {usage.endpoint} do not "
+                        f"include {shown}, but a raw dict can already send them",
+                    )
+                )
+                continue
             verdicts.append(
                 (
                     drift.NEEDS_WORK,

@@ -699,6 +699,7 @@ def test_a_dict_arm_is_untyped_not_a_typed_hit():
 
 
 def test_enum_on_a_union_with_a_dict_arm_is_judged_by_the_typed_arms():
+    """A value the typed arms lack is reported, but as sendable through the dict arm."""
     usage = impact.Usage("POST /responses", "body", "tool_choice.type")
     usages = {"schemas/ResponsesRequest.tool_choice.type": [usage]}
     gained = drift.Item(
@@ -707,5 +708,103 @@ def test_enum_on_a_union_with_a_dict_arm_is_judged_by_the_typed_arms():
     known = drift.Item(
         "enum_members_added", "schemas/ResponsesRequest.tool_choice.type", values=('"custom"',)
     )
-    assert impact._classify_enum_added(gained, usages).group == drift.NEEDS_WORK
+    verdict = impact._classify_enum_added(gained, usages)
+    assert verdict.group == drift.REVIEW
+    assert '"brand_new"' in verdict.reason
+    assert "dict" in verdict.reason
+    assert "restricts" not in verdict.reason
     assert impact._classify_enum_added(known, usages).group == drift.NO_CHANGE
+
+
+def test_closed_literal_with_no_dict_arm_still_needs_sdk_work():
+    """Only a real way around the Literal softens the verdict."""
+    usage = impact.Usage("POST /chat/completions", "body", "reasoning_effort")
+    usages = {"schemas/ChatRequest.reasoning_effort": [usage]}
+    item = drift.Item(
+        "enum_members_added", "schemas/ChatRequest.reasoning_effort", values=('"turbo"',)
+    )
+    verdict = impact._classify_enum_added(item, usages)
+    assert verdict.group == drift.NEEDS_WORK
+    assert "restricts" in verdict.reason
+
+
+def test_field_the_public_method_cannot_take_needs_sdk_work():
+    """``extra="allow"`` on the model is no use when ``create()`` rejects the keyword."""
+    item = drift.Item("param_added", "POST /responses", "body.brand_new_knob")
+    verdict = impact._classify_param_added(item)
+    assert verdict.group == drift.NEEDS_WORK
+    assert "Responses.create()" in verdict.reason
+    assert "can already be sent" not in verdict.reason
+
+
+def test_nested_field_under_a_taken_argument_can_still_be_sent():
+    item = drift.Item("param_added", "POST /responses", "body.tools[].brand_new_flag")
+    verdict = impact._classify_param_added(item)
+    assert verdict.group == drift.REVIEW
+    assert "can already be sent" in verdict.reason
+
+
+def test_a_method_with_var_keyword_takes_any_top_level_field():
+    item = drift.Item("param_added", "POST /chat/completions", "body.brand_new_knob")
+    assert impact._classify_param_added(item).group == drift.REVIEW
+
+
+def test_modelled_field_missing_from_the_method_needs_sdk_work(monkeypatch):
+    """A field on the model alone is not reachable by callers either."""
+
+    def create(self, *, model, input):  # noqa: A002
+        raise AssertionError
+
+    monkeypatch.setitem(impact.PUBLIC_METHODS, "POST /responses", create)
+    item = drift.Item("param_added", "POST /responses", "body.temperature")
+    verdict = impact._classify_param_added(item)
+    assert verdict.group == drift.NEEDS_WORK
+    assert "create()" in verdict.reason
+
+
+def test_enum_under_a_field_the_method_cannot_take_needs_sdk_work():
+    usage = impact.Usage("POST /responses", "body", "brand_new_knob.type")
+    usages = {"schemas/ResponsesRequest.brand_new_knob.type": [usage]}
+    item = drift.Item("enum_added", "schemas/ResponsesRequest.brand_new_knob.type", values=('"a"',))
+    verdict = impact._classify_enum_added(item, usages)
+    assert verdict.group == drift.NEEDS_WORK
+    assert "Responses.create()" in verdict.reason
+
+
+def test_a_deliberate_omission_outranks_the_method_check(monkeypatch):
+    monkeypatch.setitem(
+        impact.KNOWN_OMISSIONS, "POST /responses", {"brand_new_knob": "left out on purpose"}
+    )
+    item = drift.Item("param_added", "POST /responses", "body.brand_new_knob")
+    verdict = impact._classify_param_added(item)
+    assert verdict.group == drift.NO_CHANGE
+    assert "left out on purpose" in verdict.reason
+    usage = impact.Usage("POST /responses", "body", "brand_new_knob.type")
+    usages = {"schemas/ResponsesRequest.brand_new_knob.type": [usage]}
+    enum = drift.Item("enum_added", "schemas/ResponsesRequest.brand_new_knob.type", values=('"a"',))
+    assert impact._classify_enum_added(enum, usages).group == drift.NO_CHANGE
+
+
+def test_public_methods_cover_every_passthrough_request_model():
+    """A passthrough model is the only case where the model cannot show reachability."""
+    passthrough = {
+        endpoint
+        for endpoint, models in impact.MODEL_MAP.items()
+        if any(model.model_config.get("extra") == "allow" for model in models)
+    }
+    assert passthrough
+    assert not sorted(passthrough - set(impact.PUBLIC_METHODS)), (
+        "add these to PUBLIC_METHODS in tools/api_drift_impact.py"
+    )
+    assert not sorted(set(impact.PUBLIC_METHODS) - set(impact.MODEL_MAP))
+
+
+def test_public_methods_take_every_top_level_field_in_the_snapshot():
+    data = json.loads(drift.DEFAULT_SNAPSHOT.read_text(encoding="utf-8"))
+    unreachable = set()
+    for endpoint in impact.PUBLIC_METHODS:
+        for param in data["endpoints"][endpoint]["params"]:
+            path = param.removeprefix("body.")
+            if param != path and impact._method_gap(endpoint, path):
+                unreachable.add((endpoint, path))
+    assert not unreachable
