@@ -41,6 +41,9 @@ from venice_ai import (
 )
 from venice_ai.types.api import VeniceParameters
 
+# Plenty for the short replies these sections ask for.
+REPLY_MAX_TOKENS = 64
+
 
 def memory_config(**sections: Any) -> VeniceAIConfig:
     """Build a ``VeniceAIConfig`` with an explicit in-memory backend.
@@ -60,7 +63,7 @@ async def check_reply(client: VeniceClient, prompt: str) -> bool:
         response = await client.chat.completions.create(
             model=chat_model,
             messages=[UserMessage(content=prompt)],
-            max_completion_tokens=64,
+            max_completion_tokens=REPLY_MAX_TOKENS,
             venice_parameters=VeniceParameters(include_venice_system_prompt=False),
         )
     except VeniceError as e:
@@ -72,7 +75,11 @@ async def check_reply(client: VeniceClient, prompt: str) -> bool:
     finish = response.choices[0].finish_reason
     text = (response.text or "").strip()
     print(f"   🤖 {chat_model}: {text!r} (finish_reason={finish})")
-    if finish == "length" or not text:
+    # Some backends report finish_reason="stop" at the token cap, so a reply that
+    # used the whole budget, or has no usage to check, counts as truncated too.
+    usage = response.usage
+    capped = usage is None or usage.completion_tokens >= REPLY_MAX_TOKENS
+    if capped or finish == "length" or not text:
         print("   ❌ The reply was truncated or empty")
         return False
     return True
@@ -242,7 +249,12 @@ async def high_concurrency_config() -> bool:
 
 
 async def development_config() -> bool:
-    """Show a configuration that fails fast while debugging."""
+    """Show a configuration with no retries at all, for debugging.
+
+    Two layers retry independently: ``HttpClientConfig.max_retries`` covers
+    connection failures and 5xx responses, and ``RateLimiterConfig.max_retries``
+    covers 429. Both must be 0 for every error to surface on the first failure.
+    """
     print("\n🔧 Development Configuration")
     print("-" * 40)
 
@@ -250,7 +262,11 @@ async def development_config() -> bool:
         http_client=HttpClientConfig(
             timeout=120.0,  # Room for stepping through code in a debugger
             max_connections=10,
-            max_retries=0,  # Surface every error immediately
+            max_retries=0,  # No resends after a connection failure or 5xx
+        ),
+        rate_limiter=RateLimiterConfig(
+            mode=RateLimiterMode.SIMPLE,
+            max_retries=0,  # No resends after a 429
         ),
     )
     client = VeniceClientFactory.create_client(config=config)
@@ -263,9 +279,14 @@ async def development_config() -> bool:
             max_retries=config.http_client.max_retries,
             pool_limit=config.http_client.max_connections,
         )
+        limiter_retries = getattr(client.rate_limiter, "max_retries", None)
+        print(f"   - 429 retries (rate limiter): {limiter_retries}")
+        if limiter_retries != 0:
+            print(f"   ❌ 429 retries: the client has {limiter_retries}, expected 0")
+            ok = False
         print("\n📊 Configuration Summary:")
         print(f"   Backend: {config.backend.backend_type.value} (no external dependencies)")
-        print("   0 retries: errors surface on the first failure")
+        print("   0 retries in both layers: errors, 429 included, surface on the first failure")
         return await check_reply(client, "Reply with the single word: debugging") and ok
 
 

@@ -17,6 +17,9 @@ so every output can be compared with the same original. Each output's pixel
 size is read from its header and checked against the expected size. A quote
 of the run's catalog price is printed first. Outputs are written to
 ``examples/results/``.
+
+After printing that quote, each run makes 5 paid calls: 1 generation for the
+source image and 4 upscales.
 """
 
 import asyncio

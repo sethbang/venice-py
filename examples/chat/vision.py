@@ -36,6 +36,7 @@ import asyncio
 import base64
 import importlib.util
 import io
+import re
 import sys
 
 import aiohttp
@@ -107,9 +108,14 @@ def _check_complete(response: ChatCompletionResponse, label: str) -> str:
 
 
 def _check_keywords(content: str, keywords: list[str], label: str) -> None:
-    """Raise if the answer mentions none of the expected keywords."""
-    lowered = content.lower()
-    if not any(kw.lower() in lowered for kw in keywords):
+    """Raise if the answer mentions none of the expected keywords.
+
+    A keyword must start and end on a word boundary, allowing a plural or "-ed"
+    ending: "cat" matches "cats" but not "indicate", and "round" matches
+    "rounded" but not "background".
+    """
+    pattern = rf"\b(?:{'|'.join(re.escape(kw) for kw in keywords)})(?:s|es|ed)?\b"
+    if not re.search(pattern, content, re.IGNORECASE):
         raise VisionCheckError(f"{label}: the answer mentions none of {keywords}")
 
 

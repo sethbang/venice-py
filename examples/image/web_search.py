@@ -29,8 +29,10 @@ web search is used, on top of the catalog image price, without giving the
 amount. To show what the render cost, the example takes ``response.balance_info.usd``
 (what the API key could spend before the request) and subtracts what it can
 spend afterwards (``GET /api_keys/rate_limits``, free). It prints that drop and
-how far it exceeds the catalog image price. Other spending on the same key in
-that window adds to the drop, so it is printed as a measurement, not checked.
+how far it exceeds the catalog image price. The drop is the render's cost only
+when USD paid all of it: Venice spends DIEM first, then bundled credits, then
+USD. Other spending on the same key in that window adds to the drop, so it is
+printed as a measurement, not checked.
 If the balance cannot be read after the render, the example says the cost is
 unavailable and why; the render itself still counts as a success.
 
@@ -132,8 +134,12 @@ async def generate_with_web_search(client: VeniceClient) -> list[Path] | None:
         else:
             spent = before - after
             print(f"   💳 The key's spendable USD fell ${spent:.4f} across this render")
-            if price is not None:
+            if price is not None and spent >= price:
                 print(f"      ${spent - price:.4f} above the catalog image price of ${price:.2f}")
+            elif price is not None:
+                print(f"      Below the catalog image price of ${price:.2f}: DIEM or bundled")
+                print("      credits paid some of it, or the charge had not posted yet")
+            print("      This is the render's cost only if USD paid all of it")
 
     data = response.bytes(0)
     width, height = image_dimensions(data)

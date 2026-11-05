@@ -15,9 +15,10 @@ This routes inbound support tickets using all three question types:
 * :class:`ChoiceQuestion` → one of a fixed option set ("which team?")
 * :class:`ScoreQuestion`  → a position on an ordered rubric ("how frustrated?")
 
-The point is the **calibration**. Every answer carries a confidence, so the
-interesting line in this file is not the routing decision — it's the threshold
-that sends a low-confidence ticket to a human instead.
+The point is the **calibration**. Choice and score answers carry a confidence,
+and a noul answer is itself a probability, so the interesting line in this file
+is not the routing decision — it's the threshold that sends a low-confidence
+ticket to a human instead.
 
 Three tickets, each with what the example checks:
 

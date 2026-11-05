@@ -10,7 +10,8 @@ input methods, and model discovery.
 The demo is self-contained: it first generates a short TTS audio clip, then
 transcribes it back to text — a complete round-trip without external audio files.
 Each transcript is compared with the text that was spoken, so a wrong or empty
-transcription fails the run.
+transcription fails the run. With no TTS model to make the clips or no ASR model
+to transcribe them, the example skips and exits 77.
 """
 
 import asyncio
@@ -34,6 +35,9 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 #: Minimum share of the spoken words a transcript must contain.
 MIN_OVERLAP = 0.8
+
+#: Exit status for a run that skipped because a prerequisite is missing.
+EXIT_SKIPPED = 77
 
 #: Paths written by this run, listed at the end on success.
 WRITTEN: list[Path] = []
@@ -318,14 +322,19 @@ async def response_format_options(client: VeniceClient, clips: ClipMaker, asr_mo
 async def main() -> int:
     """Run all speech-to-text examples.
 
-    Returns ``0`` only if every demo succeeded, ``1`` otherwise.
+    Returns ``0`` only if every demo succeeded, ``77`` when the catalog lacks
+    a TTS or ASR model, and ``1`` otherwise.
     """
     print("🚀 Venice AI Speech-to-Text Examples")
     print("=" * 60)
 
     async with VeniceClient() as client:
-        clips = await ClipMaker.create(client)
-        asr_model = await client.models.resolve_asr(prefer="cheapest")
+        try:
+            clips = await ClipMaker.create(client)
+            asr_model = await client.models.resolve_asr(prefer="cheapest")
+        except NoMatchingModelError as e:
+            print(f"\nSKIPPED: the catalog lacks a model this example needs ({e})")
+            return EXIT_SKIPPED
         print(
             f"🔊 TTS model for the test clips: {clips.model_id} (voice {clips.voice!r}, {clips.fmt})"
         )

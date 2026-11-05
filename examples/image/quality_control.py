@@ -37,11 +37,14 @@ Around each tier render and the ``multi_edit()`` call, the example reads what
 the API key can still spend (``GET /api_keys/rate_limits``, free) and prints
 the drop next to the catalog price. Once the call's charge has posted, and
 provided nothing is credited to the key in that window, the drop is at least
-what the call was billed: other spending on the same key adds to it. So it is
-printed as a measurement, not checked, and it can only rule a price out. A
-drop below a tier's price shows that tier was not billed, but no drop shows
-which cheaper tier was. If the balance cannot be read, the measurement is
-reported as unavailable and the demo is still judged on its output.
+what the call was billed, provided USD paid all of it: Venice spends DIEM first,
+then bundled credits, then USD, so a call they cover drops the USD balance by
+less or not at all. Other spending on the same key adds to the drop. So it is
+printed as a measurement, not checked, and on a USD-paid call it can only rule
+a price out. A drop below a tier's price then shows that tier was not billed,
+but no drop shows which cheaper tier was. If the balance cannot be read, the
+measurement is reported as unavailable and the demo is still judged on its
+output.
 
 Each run makes five paid generations or edits. If no catalog model offers the
 needed quality tiers, the example prints a ``SKIPPED:`` line and exits with
@@ -215,9 +218,11 @@ def _report_multi_edit_charge(
     The edit response is bare image bytes with no request echo, so the drop
     is the only evidence of the tier billed, and it is one-sided: other
     spending on the key can only raise it (a credit to the key in the same
-    window would lower it, which the example assumes does not happen). A tier priced above the drop was
-    therefore not billed for this call. Every tier priced at or below the drop
-    stays possible, and the drop cannot tell them apart.
+    window would lower it, which the example assumes does not happen). It also
+    assumes USD paid the whole call, since DIEM and bundled credits spend first
+    and lower the drop. On that condition a tier priced above the drop was not
+    billed for this call. Every tier priced at or below the drop stays possible,
+    and the drop cannot tell them apart.
     """
     listed = ", ".join(f"{tier} {format_price(price)}" for tier, price in tier_prices.items())
     print(f"      💳 The key's spendable USD fell ${spent:.4f} (catalog: {listed})")
@@ -228,19 +233,21 @@ def _report_multi_edit_charge(
         print("      ℹ️ The catalog prices no tier, so the drop cannot be compared")
     elif not possible:
         print(
-            "      ℹ️ The drop is below every tier's price: the charge had not posted by the"
-            " second reading, so it shows nothing about the tier"
+            "      ℹ️ The drop is below every tier's price: DIEM or bundled credits paid some of"
+            " the charge, or it had not posted by the second reading, so it shows nothing about"
+            " the tier"
         )
     elif ruled_out:
         default_note = (
-            f" That includes the default {default_quality!r} tier, so quality='low' was not"
-            " ignored in favour of the default."
+            f" That includes the default {default_quality!r} tier, so on that condition"
+            " quality='low' was not ignored in favour of the default."
             if default_quality in ruled_out
             else ""
         )
         print(
-            f"      ✔ Not billed at {', '.join(repr(t) for t in ruled_out)}: each costs more than"
-            f" the whole drop.{default_note}"
+            f"      ℹ️ If USD paid this call in full (DIEM and bundled credits spend first), it was"
+            f" not billed at {', '.join(repr(t) for t in ruled_out)}: each costs more than the"
+            f" whole drop.{default_note}"
         )
         if len(possible) == 1:
             print(f"      ℹ️ Of the listed tiers, only {possible[0]!r} is priced within the drop")
@@ -391,7 +398,7 @@ async def main() -> int:
         print("   - client.image.create(..., quality=<tier>) with a per-call timeout")
         print("   - Quoting each tier from the catalog pricing matrix")
         if measured:
-            print("   - Bounding the billed amount with the key's spendable balance")
+            print("   - Bounding a USD-paid call's billed amount with the key's spendable balance")
         if "edit_output_controls" not in skipped:
             print("   - client.image.edit(..., output_format=...)")
             print("   - client.image.multi_edit(..., quality=..., aspect_ratio=...)")

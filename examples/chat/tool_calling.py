@@ -287,23 +287,29 @@ async def multiple_tools_example(client: VeniceClient, model_id: str) -> bool:
 
     names = {call.function.name for call in tool_calls}
     missing = {"calculate_area", "get_random_fact"} - names
+    if not tool_calls:
+        print("❌ Expected a tool call; the model answered directly")
+        _print_answer("Response", response.text or "")
+        return False
+
+    for call in tool_calls:
+        args = call.function.arguments_dict
+        if call.function.name == "calculate_area":
+            if sorted([args.get("width"), args.get("height")]) != [3, 5]:
+                print(f"❌ calculate_area received the wrong dimensions: {args}")
+                return False
+        elif call.function.name == "get_random_fact":
+            topic = args.get("topic")
+            if not isinstance(topic, str) or not topic.strip():
+                print(f"❌ get_random_fact received no topic: {args}")
+                return False
+
     if missing:
-        print(f"❌ Expected both tools in one turn; missing: {', '.join(sorted(missing))}")
-        if not tool_calls:
-            _print_answer("Response", response.text or "")
-        return False
-
-    area_args = next(c for c in tool_calls if c.function.name == "calculate_area")
-    dims = area_args.function.arguments_dict
-    if sorted([dims.get("width"), dims.get("height")]) != [3, 5]:
-        print(f"❌ calculate_area received the wrong dimensions: {dims}")
-        return False
-
-    fact_call = next(c for c in tool_calls if c.function.name == "get_random_fact")
-    topic = fact_call.function.arguments_dict.get("topic")
-    if not isinstance(topic, str) or not topic.strip():
-        print(f"❌ get_random_fact received no topic: {fact_call.function.arguments_dict}")
-        return False
+        # parallel_tool_calls=True permits several calls in a turn; it does not
+        # require them. The model would ask for the other tool on a later turn.
+        print(f"\nℹ️  This model called one tool this turn; not yet: {', '.join(sorted(missing))}")
+        print("✅ The tool it requested has the right arguments.")
+        return True
 
     print("\n✅ Both tools were requested in a single turn with the right arguments.")
     return True

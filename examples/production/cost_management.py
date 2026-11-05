@@ -5,10 +5,16 @@ This example demonstrates how to track, monitor, and optimize costs when using
 the Venice AI SDK in production:
 
 1. Token usage tracking via the built-in :class:`venice_ai.CostTracker`
-2. Cost estimation per request, checked against the actual bill
+2. Cost estimation per request, checked against the usage the server reports
 3. Model selection by price, using catalog pricing
 4. Usage analytics and reporting
 5. Budget management via :class:`venice_ai.BudgetManager`
+
+Dollar figures labelled "tracked" are catalog math: :class:`venice_ai.CostTracker`
+prices the server's reported token counts at the catalog's rates and never reads
+the charge itself. Non-streaming responses also carry the server's own figure in
+``response.cost``, split into USD and DIEM, and it is printed beside the tracked
+one wherever it is present.
 
 Requirements:
     pip install venice-py
@@ -30,6 +36,7 @@ from venice_ai import (
     VeniceClient,
     model_price,
 )
+from venice_ai.costs import ChatCostEstimate
 from venice_ai.exceptions import VeniceError
 from venice_ai.types.api.chat import ChatCompletionResponse
 from venice_ai.types.api.requests import (
@@ -89,6 +96,21 @@ def check_answer(response: ChatCompletionResponse) -> bool:
     return True
 
 
+def reported_cost(response: ChatCompletionResponse) -> str:
+    """Format ``response.cost``, the server's own figure for this request.
+
+    Either currency can be absent, and a DIEM-paid request reports little or no
+    USD, so this is printed for comparison rather than checked.
+    """
+    cost = response.cost
+    parts = []
+    if cost is not None and cost.usd is not None:
+        parts.append(f"${cost.usd:.6f} USD")
+    if cost is not None and cost.diem is not None:
+        parts.append(f"{cost.diem:.6f} DIEM")
+    return " + ".join(parts) or "not reported"
+
+
 def usage_breakdown(response: ChatCompletionResponse) -> tuple[int, int, int, int]:
     """Return (prompt, cached, cache_written, completion) token counts."""
     usage = response.usage
@@ -116,8 +138,8 @@ async def example_basic_cost_tracking(client: VeniceClient, tracker: CostTracker
     print("Pattern 1: Basic Cost Tracking — tracker.track()")
     print("=" * 60)
 
-    # A model with a cached-input price, so the bill below can show cached
-    # prompt tokens charged at the lower rate. The catalog's default ranking is
+    # A model with a cached-input price, so the breakdown below can show cached
+    # prompt tokens priced at the lower rate. The catalog's default ranking is
     # used rather than prefer="cheapest": a cache price is the only caching
     # signal Venice publishes, and some of the cheapest cache-priced models do
     # not serve cache hits.
@@ -180,9 +202,12 @@ async def example_basic_cost_tracking(client: VeniceClient, tracker: CostTracker
             f"   Tokens: {prompt_tokens} prompt ({cached} cache read, {written} cache write) "
             f"+ {completion} completion"
         )
-        print(f"   Tracked cost: ${cost:.6f}")
+        print(
+            f"   Tracked cost (catalog rates): ${cost:.6f}; "
+            f"server-reported cost: {reported_cost(response)}"
+        )
 
-        # Rebuild the bill from the published rates to show how it is made up.
+        # Rebuild the tracked cost from the published rates to show how it is made up.
         by_hand = (
             Decimal(prompt_tokens - cached - written) * input_rate
             + Decimal(cached) * cache_rate
@@ -219,16 +244,16 @@ async def example_basic_cost_tracking(client: VeniceClient, tracker: CostTracker
     summary = await tracker.summary()
     print("📊 Summary:")
     print(f"   Total requests: {summary.total_requests}")
-    print(f"   Total cost: ${summary.total_cost_usd:.6f}")
+    print(f"   Total tracked cost: ${summary.total_cost_usd:.6f}")
     print(f"   Total tokens: {summary.total_tokens}")
-    print(f"   Avg cost/request: ${summary.average_cost_usd:.6f}")
+    print(f"   Avg tracked cost/request: ${summary.average_cost_usd:.6f}")
     if verified_cached == 0:
-        print("   ❌ No request read the handbook from cache at the cached rate")
+        print("   ❌ No request reported reading the handbook from cache")
         ok = False
     else:
         print(
             f"\n   ℹ️  {verified_cached} request(s) read the shared handbook prefix from "
-            "cache, and those tokens were billed at the cached rate."
+            "cache, and the catalog's cached rate made those tokens cheaper in the tracked cost."
         )
     return ok and summary.total_requests >= 2
 
@@ -243,17 +268,18 @@ async def _estimate_and_send(
     response_format: type[UnitTestBenefits] | None = None,
     template_floor: int = 0,
 ) -> tuple[bool, int]:
-    """Estimate one request, send it, and check the estimate against the bill.
+    """Estimate one request, send it, and check the estimate against its reported usage.
 
     Returns whether the checks passed and the prompt tokens the request billed.
 
-    ``estimate_cost`` promises an upper bound on what the request itself
-    bills: its prompt estimate is meant to be at least the prompt tokens of
-    the messages, tools, schema and chat template, and its completion side is
-    the cap. Some models' templates also carry a built-in system prompt that
+    ``estimate_cost`` returns an estimate meant to err high, not a guarantee:
+    its prompt estimate is meant to be at least the prompt tokens of the
+    messages, tools, schema and chat template, and its completion side is the
+    cap. Some models' templates also carry a built-in system prompt that
     the catalog does not publish, so *template_floor* (measured once per model
     by :func:`_measure_template_floor`) is added before comparing. The check is
-    that neither the prompt tokens nor the total cost came out above that.
+    that neither the reported prompt tokens nor the tracked cost came out above
+    that.
     How far above the bill the estimate lands is printed, not checked: the
     tools and schema allowances are sized for the most expensive chat
     templates measured, so on a model that renders them compactly the
@@ -315,8 +341,9 @@ async def _estimate_and_send(
     cost = await tracker.track(response)
     prompt_tokens, cached, _, completion = usage_breakdown(response)
     print(
-        f"   💵 Actual:   {prompt_tokens} prompt tokens ({cached} cached) "
-        f"+ {completion} completion = ${cost:.6f}"
+        f"   💵 Reported: {prompt_tokens} prompt tokens ({cached} cached) "
+        f"+ {completion} completion = ${cost:.6f} tracked at catalog rates; "
+        f"server-reported cost: {reported_cost(response)}"
     )
 
     if prompt_tokens == 0:
@@ -329,17 +356,18 @@ async def _estimate_and_send(
         ok = False
     else:
         print(
-            f"   ✅ Prompt estimate{floor_note} covers the bill: "
+            f"   ✅ Prompt estimate{floor_note} covers the reported prompt: "
             f"{covered / prompt_tokens:.2f}x the actual prompt"
         )
-    floor_cost = Decimal(0)
-    if template_floor:
-        input_rate = estimate.prompt_cost_usd / max(estimate.prompt_tokens, 1)
-        floor_cost = input_rate * template_floor
-    if cost > estimate.total_cost_usd + floor_cost:
-        print("   ❌ Actual cost exceeded the estimate; budget checks would under-reserve")
+    if cost > estimate.total_cost_usd + _floor_cost(estimate, template_floor):
+        print("   ❌ Tracked cost exceeded the estimate; budget checks would under-reserve")
         ok = False
     return ok, prompt_tokens
+
+
+def _floor_cost(estimate: ChatCostEstimate, template_floor: int) -> Decimal:
+    """Price *template_floor* prompt tokens at the estimate's input rate."""
+    return estimate.prompt_cost_usd / max(estimate.prompt_tokens, 1) * template_floor
 
 
 async def _measure_template_floor(client: VeniceClient, tracker: CostTracker, model: str) -> int:
@@ -541,12 +569,15 @@ async def example_cost_optimization(
         cost = await tracker.track(response)
         per_model_cost[model] = cost
         print(f"   Answer: {(response.text or '').strip()}")
-        print(f"   Actual cost: ${cost:.6f}")
+        print(
+            f"   Tracked cost (catalog rates): ${cost:.6f}; "
+            f"server-reported cost: {reported_cost(response)}"
+        )
 
     if len(per_model_cost) == 2:
         cheap, pricey = (per_model_cost[m] for m in pair)
         ratio = f"{pricey / cheap:.1f}x" if cheap else "n/a"
-        print(f"\n   📐 The pricier model cost {ratio} as much for the same task")
+        print(f"\n   📐 At catalog rates, the pricier model cost {ratio} as much for this task")
     else:
         ok = False
 
@@ -589,15 +620,15 @@ async def example_cost_analytics(
             ok = check_answer(response) and ok
             await tracker.track(response, metadata={"scenario": scenario})
 
-    print("\n📊 Cost Breakdown by Model:")
+    print("\n📊 Tracked Cost Breakdown by Model:")
     for model_id, cost in (await tracker.by_model()).items():
         print(f"   {model_id}: ${cost:.6f}")
 
     summary = await tracker.summary()
     print("\n📈 Overall Statistics:")
     print(f"   Requests: {summary.total_requests}")
-    print(f"   Total cost: ${summary.total_cost_usd:.6f}")
-    print(f"   Average per request: ${summary.average_cost_usd:.6f}")
+    print(f"   Total tracked cost: ${summary.total_cost_usd:.6f}")
+    print(f"   Average tracked cost per request: ${summary.average_cost_usd:.6f}")
     print(f"   Total tokens: {summary.total_tokens}")
     return ok and summary.total_requests == len(models) * len(scenarios)
 
@@ -609,31 +640,37 @@ async def example_budget_management(client: VeniceClient, tracker: CostTracker) 
 
     model = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
     messages = [UserMessage(content="Name one prime number. Reply with the number only.")]
+    print(f"\nModel: {model}")
+    # estimate_cost cannot see a system prompt built into the model's template,
+    # so the amount reserved per request adds the measured floor. The probe's
+    # own cost is tracked below, so it counts against the cap as well.
+    floor = await _measure_template_floor(client, tracker, model)
     estimate = await client.chat.completions.estimate_cost(
         model=model,
         messages=messages,
         expected_completion_tokens=30,
         venice_parameters=OWN_PROMPT_ONLY,
     )
+    reserve = estimate.total_cost_usd + _floor_cost(estimate, floor)
 
-    # BudgetManager wraps an existing tracker; both daily and monthly caps are
-    # optional but at least one is required. The daily cap here is 3.5 times
-    # the per-request estimate so the demo reaches it. The estimate assumes the
-    # whole completion cap is used, so a short reply costs less and more than
-    # three requests usually fit.
-    budget = BudgetManager(
-        tracker=tracker,
-        daily_usd=estimate.total_cost_usd * Decimal("3.5"),
-        monthly_usd=Decimal("30.00"),
-    )
-    print(f"\n💵 Daily budget: ${budget.daily_usd:.6f} (3.5x the per-request estimate)")
-    print(f"📅 Monthly budget: ${budget.monthly_usd}")
-    print(f"Estimated cost per request: ${estimate.total_cost_usd:.6f}\n")
+    # BudgetManager has no clock and keeps its state in memory: every cap it
+    # holds is compared with the one running total of its tracker, and only the
+    # caller's tracker.reset() starts a new period. Until then daily_usd is a
+    # limit on everything tracked since the last reset, and a monthly_usd on the
+    # same tracker could never bind below it, so this demo sets one cap.
+    #
+    # The cap is 3.5 times the amount reserved per request so the demo reaches
+    # it. The reserve assumes the whole completion cap is used, so a short reply
+    # costs less and more than three requests usually fit.
+    cap = reserve * Decimal("3.5")
+    budget = BudgetManager(tracker=tracker, daily_usd=cap)
+    print(f"\n💵 Cap: ${cap:.6f} (3.5x the per-request reserve)")
+    print(f"Reserved per request: ${reserve:.6f} (estimate + template floor)\n")
 
     completed = 0
     stopped_by_budget = False
     for i in range(20):
-        if not await budget.can_afford(estimate.total_cost_usd):
+        if not await budget.can_afford(reserve):
             print(f"⚠️  Budget would be exceeded by request {i + 1}; stopping")
             stopped_by_budget = True
             break
@@ -650,12 +687,34 @@ async def example_budget_management(client: VeniceClient, tracker: CostTracker) 
         remaining = await budget.remaining()
         completed += 1
         print(
-            f"✅ Request {i + 1}: ${cost:.6f}, "
-            f"${remaining.daily_remaining_usd:.6f} of the daily budget left"
+            f"✅ Request {i + 1}: ${cost:.6f} tracked "
+            f"(server-reported: {reported_cost(response)}), "
+            f"${remaining.daily_remaining_usd:.6f} of the cap left"
         )
 
     print(f"\n   {completed} requests ran before the budget check stopped the loop")
-    return stopped_by_budget and completed > 0
+    # remaining() clamps at zero, so an overrun only shows in the total itself.
+    spent = (await tracker.summary()).total_cost_usd
+    within_cap = spent <= cap
+    print(
+        f"   {'✅' if within_cap else '❌'} Tracked spend ${spent:.6f} "
+        f"{'stayed within' if within_cap else 'went over'} the ${cap:.6f} cap"
+    )
+
+    print("\n   💡 For real daily and monthly limits, give each window its own tracker,")
+    print("   feed every response to both, and reset each one when its window rolls over:")
+    print("   ```python")
+    print("   day = CostTracker(pricing_map=pricing)")
+    print("   month = CostTracker(pricing_map=pricing)")
+    print("   daily = BudgetManager(tracker=day, daily_usd=Decimal('5.00'))")
+    print("   monthly = BudgetManager(tracker=month, monthly_usd=Decimal('30.00'))")
+    print("   if await daily.can_afford(reserve) and await monthly.can_afford(reserve):")
+    print("       response = await client.chat.completions.create(...)")
+    print("       await day.track(response)")
+    print("       await month.track(response)")
+    print("   ```")
+    print("   Both totals live in memory, so persist them if a restart must not clear them.")
+    return stopped_by_budget and completed > 0 and within_cap
 
 
 async def show_best_practices(client: VeniceClient) -> None:
@@ -705,14 +764,16 @@ async def show_best_practices(client: VeniceClient) -> None:
             [
                 "✅ Track every response with CostTracker.track()",
                 "✅ For one-off calculations use venice_ai.costs.calculate_completion_cost",
-                "✅ Reserve budget with estimate_cost(): an upper bound, not a forecast",
+                "✅ Reserve budget with estimate_cost() plus a measured template floor: "
+                "an estimate meant to err high, not a guarantee",
+                "✅ Compare tracked costs with response.cost, the server's own figure",
                 "✅ Review costs regularly",
             ],
         ),
         (
             "Budget Control",
             [
-                "✅ Set daily and monthly limits with BudgetManager",
+                "✅ Use one BudgetManager and CostTracker per window, and reset at each rollover",
                 "✅ Check can_afford() before each request",
                 "✅ Alert on unusual usage",
                 "✅ Review and adjust budgets periodically",
@@ -770,7 +831,7 @@ async def main() -> int:
     print("\n🔑 Key Takeaways:")
     print("   1. Track token usage and costs for every request")
     print("   2. Choose models by price for the task at hand")
-    print("   3. Set and monitor budgets (daily/monthly)")
+    print("   3. Set and monitor budgets, one tracker per time window")
     print("   4. Optimize prompts and max_completion_tokens settings")
     print("   5. Use cost analytics to identify optimization opportunities")
 

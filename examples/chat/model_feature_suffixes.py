@@ -204,11 +204,13 @@ async def multiple_params_example(client: VeniceClient, reasoning_model: str) ->
 
     ok = print_response(response, REASONING_CAP, "Multi-param Suffix Response")
     # Stripping only means something if the model actually reasoned.
-    used = reasoning_tokens(response) or 0
+    used = reasoning_tokens(response)
     ok = (
         check(
-            used > 0 and not response.thinking_blocks,
-            f"Reasoning trace stripped (the model still used {used} reasoning tokens)",
+            (used is None or used > 0) and not response.thinking_blocks,
+            f"Reasoning trace stripped (the model still used {used} reasoning tokens)"
+            if used is not None
+            else "No trace returned; this model does not report whether it reasoned",
             "A reasoning trace is still present"
             if response.thinking_blocks
             else "The model reported no reasoning tokens, so there was no trace to strip",
@@ -254,8 +256,8 @@ async def build_model_id_example(client: VeniceClient, reasoning_model: str) -> 
     ok = print_response(response, 1024, "build_model_id() Response")
     ok = (
         check(
-            reasoning_tokens(response) == 0 and not response.thinking_blocks,
-            "disable_thinking applied: 0 reasoning tokens and no trace",
+            not reasoning_tokens(response) and not response.thinking_blocks,
+            "disable_thinking applied: no reasoning tokens reported and no trace",
             f"The model still reasoned ({reasoning_tokens(response)} reasoning tokens)",
         )
         and ok
@@ -299,7 +301,7 @@ async def comparison_example(client: VeniceClient, base_model: str) -> bool:
     print(f"📍 Model: {base_model}")
     print("📍 venice_parameters: VeniceParameters(include_venice_system_prompt=False)")
     # A VeniceParameters object sends every field that has a default, not only
-    # the one you set. Pass a plain dict instead to send a single field.
+    # the one you set.
     print(f"   Sent on the wire: {params.model_dump(exclude_none=True)}")
 
     response_params = await client.chat.completions.create(

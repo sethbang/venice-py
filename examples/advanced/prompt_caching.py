@@ -9,8 +9,8 @@ cached-input price, the input bill.
 
 Key features covered:
 - prompt_cache_key: routing hint that makes a cache hit more likely
-- cache_control: markers on content blocks or assistant/tool messages,
-  needed by some providers
+- cache_control: a marker on a system message's content block, needed by some
+  providers
 - Reading cache reads and writes from ``response.usage.cached_tokens`` and
   ``response.usage.cache_write_tokens``
 
@@ -70,6 +70,9 @@ RUN_ID = uuid.uuid4().hex[:8]
 # Bill only the prompt shown here. Venice's own system prompt is shared by all
 # traffic and often already cached, which would hide whether *this* prompt hit.
 OWN_PROMPT_ONLY = VeniceParameters(include_venice_system_prompt=False)
+
+# Completion budget for every request in this example.
+MAX_TOKENS = 300
 
 # ---------------------------------------------------------------------------
 # Long system prompt used across examples to make caching worthwhile.
@@ -167,7 +170,9 @@ def report(response: ChatCompletionResponse, label: str, elapsed: float) -> bool
     """Print the answer and cache usage; fail an empty, truncated or unmeasured reply.
 
     ``prompt_tokens == 0`` is treated as a failed measurement, not a cache
-    miss: some providers report zero usage on a truncated reasoning reply.
+    miss: some providers report zero usage on a truncated reasoning reply. A
+    reply that used the whole budget counts as truncated, because some backends
+    report ``finish_reason="stop"`` at the token cap.
     """
     finish = response.choices[0].finish_reason
     text = (response.text or "").strip()
@@ -181,7 +186,7 @@ def report(response: ChatCompletionResponse, label: str, elapsed: float) -> bool
         f"   📊 [{label}] prompt: {usage.prompt_tokens}, completion: {usage.completion_tokens}, "
         f"cache read: {usage.cached_tokens}, cache write: {usage.cache_write_tokens}"
     )
-    if finish == "length" or not text:
+    if usage.completion_tokens >= MAX_TOKENS or finish == "length" or not text:
         print(f"   ❌ [{label}] answer was truncated or empty")
         return False
     return True
@@ -230,14 +235,14 @@ async def timed_create(
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
-            max_completion_tokens=300,
+            max_completion_tokens=MAX_TOKENS,
             venice_parameters=OWN_PROMPT_ONLY,
         )
     else:
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
-            max_completion_tokens=300,
+            max_completion_tokens=MAX_TOKENS,
             venice_parameters=OWN_PROMPT_ONLY,
             prompt_cache_key=cache_key,
         )

@@ -36,6 +36,7 @@ Performance note:
 import asyncio
 import json
 import math
+import re
 import sys
 
 from venice_ai import NoMatchingModelError, VeniceClient, model_price
@@ -165,8 +166,9 @@ async def character_example(client: VeniceClient) -> bool | None:
     A character carries its own persona prompt and names the model it was
     built for (``modelId``); chatting with it on that model gives the persona
     as designed. Venice sends the persona prompt in place of its own default
-    system prompt, so the persona's size shows up against the bare question
-    sent without Venice's system prompt (``include_venice_system_prompt=False``).
+    system prompt, so a comparison with that prompt on would hide the persona.
+    Both requests here leave it out (``include_venice_system_prompt=False``),
+    which leaves the character as the only difference between them.
 
     Characters run on whatever model their author chose, so check the price
     first: this picks the character whose model is cheapest, preferring one
@@ -208,7 +210,9 @@ async def character_example(client: VeniceClient) -> bool | None:
     )
     print(f"📍 Using the character's model: {model} ({price_note})", flush=True)
 
-    venice_params = VeniceParameters(character_slug=character.slug)
+    venice_params = VeniceParameters(
+        character_slug=character.slug, include_venice_system_prompt=False
+    )
     display_parameters(venice_params)
 
     # An in-character question: the persona decides how it is answered.
@@ -224,8 +228,8 @@ async def character_example(client: VeniceClient) -> bool | None:
             temperature=0.7,
         )
 
-    # The bare question, without Venice's system prompt, shows how much prompt
-    # the persona adds.
+    # The bare question, sent the same way but with no character, shows how much
+    # prompt the persona adds.
     bare = VeniceParameters(include_venice_system_prompt=False)
     response, plain = await asyncio.gather(ask(venice_params), ask(bare))
 
@@ -251,8 +255,26 @@ async def character_example(client: VeniceClient) -> bool | None:
         and ok
     )
     echoed = response.venice_parameters.character_slug if response.venice_parameters else None
-    print(f"📡 Server echoed character_slug: {echoed}", flush=True)
-    return ok
+    ok = (
+        check(
+            echoed == character.slug,
+            f"Server echoed character_slug: {echoed}",
+            f"Server echoed character_slug {echoed!r}, expected {character.slug!r}",
+        )
+        and ok
+    )
+    # The longest word of the name, so "Dr. Reed" and "The Oracle" need the part
+    # that identifies them.
+    name_word = max(re.findall(r"\w+", character.name), key=len, default=character.name)
+    named = re.search(rf"\b{re.escape(name_word)}\b", response.text or "", re.IGNORECASE)
+    return (
+        check(
+            named is not None,
+            f"The answer gives the character's name: {name_word}",
+            f"The answer never says {name_word!r}, so the persona did not answer",
+        )
+        and ok
+    )
 
 
 async def thinking_control_example(client: VeniceClient) -> bool | None:
@@ -349,20 +371,37 @@ async def thinking_control_example(client: VeniceClient) -> bool | None:
     print_subsection("Reasoning On vs Off Comparison", "🔬")
     on_tokens, off_tokens = reasoning_tokens(response_on), reasoning_tokens(response_off)
     print(f"   reasoning_tokens: on={on_tokens}, off={off_tokens}", flush=True)
+    # Some models return a trace without reporting reasoning tokens. For those
+    # the trace is the only evidence, and it cannot show hidden reasoning.
+    tokens_reported = on_tokens is not None
+    had_trace = bool(response_on.thinking_blocks)
+    if tokens_reported:
+        off_worked = bool(on_tokens) and off_tokens == 0 and not response_off.thinking_blocks
+        off_success = "disable_thinking skipped reasoning entirely (0 reasoning tokens, no trace)"
+    else:
+        off_worked = had_trace and not response_off.thinking_blocks
+        off_success = "disable_thinking removed the trace (this model reports no reasoning tokens)"
     ok = (
-        check(
-            bool(on_tokens) and off_tokens == 0 and not response_off.thinking_blocks,
-            "disable_thinking skipped reasoning entirely (0 reasoning tokens, no trace)",
-            "disable_thinking did not stop reasoning on this model",
-        )
+        check(off_worked, off_success, "disable_thinking did not stop reasoning on this model")
         and ok
     )
     stripped_tokens = reasoning_tokens(response_stripped)
     print(f"   reasoning_tokens with the trace stripped: {stripped_tokens}", flush=True)
+    if tokens_reported:
+        strip_worked = bool(stripped_tokens) and not response_stripped.thinking_blocks
+        strip_success = (
+            "strip_thinking_response kept the reasoning but left the trace out of the response"
+        )
+    else:
+        strip_worked = had_trace and not response_stripped.thinking_blocks
+        strip_success = (
+            "strip_thinking_response left the trace out; this model does not report "
+            "whether it still reasoned"
+        )
     ok = (
         check(
-            bool(stripped_tokens) and not response_stripped.thinking_blocks,
-            "strip_thinking_response kept the reasoning but left the trace out of the response",
+            strip_worked,
+            strip_success,
             "strip_thinking_response did not reason with a hidden trace on this model",
         )
         and ok
@@ -373,8 +412,9 @@ async def thinking_control_example(client: VeniceClient) -> bool | None:
 async def web_search_example(client: VeniceClient) -> bool | None:
     """Search the web, get citations, and also get the raw results as documents.
 
-    ``enable_web_search`` runs the search and ``enable_web_citations`` returns
-    the sources as ``response.web_search_citations``. With
+    ``enable_web_search`` runs the search and returns the sources as
+    ``response.web_search_citations``; ``enable_web_citations`` asks the model
+    to mark them in its answer as ``^1^`` or ``^1,2^``. With
     ``return_search_results_as_documents=True`` the response also carries a
     ``web_search`` tool call whose arguments hold the documents the answer was
     grounded on, so your own code can reuse or display them.
@@ -396,7 +436,7 @@ async def web_search_example(client: VeniceClient) -> bool | None:
 
     venice_params = VeniceParameters(
         enable_web_search="on",  # Always search ("auto" lets the model decide)
-        enable_web_citations=True,  # Ask for [REF] citation markers in the answer
+        enable_web_citations=True,  # Ask for ^1^ or ^1,2^ citation markers in the answer
         return_search_results_as_documents=True,  # Raw results as a tool call
         include_venice_system_prompt=False,  # Our system message is enough
     )

@@ -15,8 +15,8 @@ Shared helpers for Venice AI image examples.
   checks need Pillow; ``pillow_available`` says whether it is installed.
 - ``matches_aspect_ratio`` checks a returned size against a requested ratio.
 - ``catalog_price_usd`` and ``format_price`` read and display a model's
-  catalog price; ``spendable_usd`` reads what the API key can still spend, so
-  an example can show how much a call actually cost.
+  catalog price; ``spendable_usd`` reads the USD the API key can still spend,
+  so an example can show how much a call paid in USD actually cost.
 - ``SKIPPED`` is the exit code an example returns when its core feature cannot
   run, for example because no catalog model offers it
   (``NoMatchingModelError``); it prints a line starting with ``SKIPPED:``
@@ -140,9 +140,10 @@ async def spendable_usd(client: "VeniceClient") -> float:
     Reads ``balances.USD`` from ``GET /api_keys/rate_limits`` (a free call): the
     lesser of the account balance and what remains under the key's spending
     limit. Each response's ``balance_info.usd`` carries the same figure as it
-    stood before that request, so the cost of one call is the drop between a
+    stood before that request, so the USD one call took is the drop between a
     reading taken before it and one taken after it. Any other spending on the
-    key in between adds to that drop.
+    key in between adds to that drop. The drop equals the call's cost only when
+    USD paid all of it: Venice spends DIEM first, then bundled credits, then USD.
     """
     limits = await client.api_keys.get_rate_limits()
     return limits.data.balances.USD

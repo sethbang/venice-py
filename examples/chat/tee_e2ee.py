@@ -62,8 +62,17 @@ def reached_cap(response: object) -> bool:
     return used is None or used >= MAX_COMPLETION_TOKENS
 
 
+#: Consecutive 429s after which the walk stops. A second model answering 429
+#: points at the account's rate limit, which trying more models only makes worse.
+MAX_CONSECUTIVE_RATE_LIMITS = 2
+
+
 class NodeUnavailableError(Exception):
     """A confidential-compute node answered with a transient server error."""
+
+    def __init__(self, message: str, *, rate_limited: bool = False) -> None:
+        super().__init__(message)
+        self.rate_limited = rate_limited
 
 
 def _is_transient(error: APIError) -> bool:
@@ -186,11 +195,17 @@ async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
             print(f"   full quote verified: {verified}")
             print(f"   TCB status: {result.get('tcb_status')!r}  (fail-closed; reject-by-default)")
             print(f"   workload_identity_pinned: {result.get('workload_identity_pinned')}")
+            print(f"   evidence schema: {result.get('schema')!r}")
+            print(
+                f"   checks['compose_binding']: {result.get('checks', {}).get('compose_binding')!r}"
+            )
             print("   ℹ️  Tier B: this proves GENUINE non-debug Intel TDX hardware +")
             print("      a self-consistent dstack workload — but NOT that it is the")
             print("      legitimate Venice image. For per-dimension Tier A, pin an")
-            print("      INDEPENDENTLY-obtained reference, e.g.:")
-            print("        DcapTdxVerifier(collateral=..., expected_compose_hash='<ref>')")
+            print("      INDEPENDENTLY-obtained reference: the full 48-byte mr_config_id")
+            print("      field, not the bare compose hash, e.g.:")
+            print("        DcapTdxVerifier(collateral=...,")
+            print("                        expected_measurements={'mr_config_id': '<ref>'})")
             # Attach the verifier so every encrypted session below runs full
             # quote verification on its own attestation, not just this one.
             e2ee = TeeOptions(verifier=verifier)
@@ -242,7 +257,9 @@ async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
         raise
     except APIError as e:
         if _is_transient(e):
-            raise NodeUnavailableError(f"{type(e).__name__}: {e}") from e
+            raise NodeUnavailableError(
+                f"{type(e).__name__}: {e}", rate_limited=e.status_code == 429
+            ) from e
         raise
 
     reply = (response.text or "").strip()
@@ -286,12 +303,18 @@ async def tee_e2ee_demo() -> DemoResult:
             return DemoResult(ok=True, full_verification=False, skipped=True)
         print(f"🔎 Found {len(candidates)} E2EE-capable model(s)")
 
+        rate_limits = 0
         for model in candidates:
             print(f"\n📍 Using E2EE model: {model}")
             try:
                 return await run_encrypted_demo(client, model)
             except NodeUnavailableError as e:
-                print(f"\n   ⚠️  {model} is unavailable right now ({e}); trying the next one.")
+                print(f"\n   ⚠️  {model} is unavailable right now ({e}).")
+                rate_limits = rate_limits + 1 if e.rate_limited else 0
+                if rate_limits >= MAX_CONSECUTIVE_RATE_LIMITS:
+                    print("\n❌ Rate limited on consecutive models. Wait a minute and re-run.")
+                    return DemoResult(ok=False, full_verification=False)
+                print("      Trying the next one.")
             except ImportError as e:
                 # The [e2ee] extra (cryptography) is not installed, so the
                 # encrypting session cannot be opened.

@@ -15,12 +15,18 @@ image and that a new seed gives a new one (comparing pixels needs Pillow).
 Image generation is billed per request, so the client's default retry policy
 never resends one that the server may have processed. It retries a failed
 connection and a 503 meaning "model at capacity"; a 429 or any other error is
-recorded as that image's failure and the rest of the batch carries on. Each
-run makes 13 paid generations. Outputs are written to ``examples/results/``.
+recorded as that image's failure and the rest of the batch carries on.
+
+Generation costs real money, so by default this example only resolves the model
+(free), prints what it would run and exits 77 ("skipped"). Opt in to make the
+13 paid generations and write the outputs to ``examples/results/``::
+
+    VENICE_RUN_PAID_IMAGES=1
 """
 
 import asyncio
 import hashlib
+import os
 import sys
 import time
 from pathlib import Path
@@ -30,7 +36,13 @@ from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
 from venice_ai.types.api import ImageGenerationResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import SKIPPED, image_dimensions, mean_pixel_difference  # noqa: E402
+from _helpers import (  # noqa: E402
+    SKIPPED,
+    catalog_price_usd,
+    format_price,
+    image_dimensions,
+    mean_pixel_difference,
+)
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).
@@ -42,6 +54,17 @@ RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 # numeric noise some GPU pipelines add while still requiring the same picture.
 DIFFERENT_SEED_MIN_DIFF = 10.0
 SAME_SEED_MAX_RATIO = 0.10
+
+RUN_PAID = os.environ.get("VENICE_RUN_PAID_IMAGES") == "1"
+
+# Paid generations each demo makes.
+PAID_GENERATIONS = {
+    "simple_batch_generation": 2,
+    "concurrent_batch_generation": 3,
+    "batch_with_variations": 3,
+    "progressive_batch_generation": 3,
+    "batch_with_mixed_parameters": 2,
+}
 
 
 class InFlight:
@@ -325,11 +348,17 @@ async def main() -> int:
     """Run all batch generation examples.
 
     Returns ``0`` if every demo that ran succeeded (without Pillow the seed
-    checks are skipped), ``1`` if any failed, and ``77`` if no catalog image
-    model is sized by width/height.
+    checks are skipped), ``1`` if any failed, and ``77`` if
+    ``VENICE_RUN_PAID_IMAGES`` is unset or no catalog image model is sized by
+    width/height.
     """
     print("🚀 Venice AI Batch Image Generation Examples")
     print("=" * 50)
+    total_paid = sum(PAID_GENERATIONS.values())
+    if RUN_PAID:
+        print(f"💸 VENICE_RUN_PAID_IMAGES=1 — this run makes {total_paid} paid generations.")
+    else:
+        print("🧪 Preview only (default). Set VENICE_RUN_PAID_IMAGES=1 to generate images.")
 
     written: list[Path] = []
     async with VeniceClient() as client:
@@ -343,6 +372,16 @@ async def main() -> int:
             print(f"SKIPPED: no image model in the catalog takes width/height ({e})")
             return SKIPPED
         print(f"📍 Using image model: {image_model}\n")
+
+        if not RUN_PAID:
+            spec = (await client.models.get(image_model)).model_spec
+            print(f"🧾 This run would make {total_paid} paid generations:")
+            for name, count in PAID_GENERATIONS.items():
+                print(f"   - {name}: {count}")
+            print(f"💰 Catalog price per image: {format_price(catalog_price_usd(spec))}")
+            print("⏭️  Not generated: set VENICE_RUN_PAID_IMAGES=1 to generate (incurs this cost).")
+            print("SKIPPED: VENICE_RUN_PAID_IMAGES is not set, so no image was generated")
+            return SKIPPED
 
         results: list[tuple[str, bool | None]] = []
         for name, demo in [

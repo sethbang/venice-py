@@ -6,7 +6,8 @@ Venice AI SDK - Chat Completion Passthrough Fields
 Demonstrates the OpenAI-compatible passthrough fields plus Venice's
 ``prompt_cache_retention`` control on ``client.chat.completions.create()``:
 
-- ``store`` — OpenAI-compat flag for server-side storage.
+- ``store`` — accepted for OpenAI compatibility; Venice's API reference says
+  Venice does not use it.
 - ``text`` — OpenAI-compat text-config object (e.g. ``{"verbosity": "low"}``).
 - ``include`` — OpenAI-compat include-specifier for response enrichment.
 - ``metadata`` — free-form dict attached to the request (observability).

@@ -11,9 +11,20 @@ for the Venice AI SDK, including:
 5. Custom log formatters
 6. Integration patterns with external monitoring systems
 
+The error path runs for real: one deliberate request for a model that does not
+exist fails before any billing, and the example reads its error log back to
+check that the failure was written exactly once.
+
 Requirements:
     pip install venice-py
     export VENICE_API_KEY="your-api-key"
+
+Cost: three short chat requests on the cheapest model that answers directly,
+well under $0.001 in total. The deliberate failure is free.
+
+Exit status: ``0`` when every request behaved and every log checked out, ``1``
+when not, ``77`` (with a ``SKIPPED:`` line) when the catalog has no chat model
+that answers directly.
 
 Optional monitoring tools (shown conceptually):
     pip install sentry-sdk  # For error tracking
@@ -40,6 +51,9 @@ OWN_PROMPT_ONLY = VeniceParameters(include_venice_system_prompt=False)
 # examples/results/ instead of polluting whatever directory the example is run
 # from.
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
+
+# A name that is not in the model catalog, so a request for it fails unbilled.
+UNKNOWN_MODEL = "no-such-model-logging-demo"
 
 
 # =============================================================================
@@ -208,8 +222,12 @@ class RequestLogger:
         self.logger = logger
         self._request_counter = 0
 
-    def _get_request_id(self) -> str:
-        """Generate unique request ID."""
+    def _get_client_request_id(self) -> str:
+        """Generate a unique ID on the client side to tie this request's log records together.
+
+        It is not known to Venice. To quote a request to support, use its CF-RAY
+        header, which the failure record logs as ``cf_ray``.
+        """
         self._request_counter += 1
         timestamp = int(time.time() * 1000)
         return f"req_{timestamp}_{self._request_counter}"
@@ -233,14 +251,14 @@ class RequestLogger:
         Returns:
             Chat completion response
         """
-        request_id = self._get_request_id()
+        client_request_id = self._get_client_request_id()
         start_time = time.time()
 
         # Log request start
         self.logger.info(
             "Starting chat request",
             extra={
-                "request_id": request_id,
+                "client_request_id": client_request_id,
                 "model": model,
                 "message_count": len(messages),
             },
@@ -268,7 +286,7 @@ class RequestLogger:
             self.logger.info(
                 "Chat request completed",
                 extra={
-                    "request_id": request_id,
+                    "client_request_id": client_request_id,
                     "model": model,
                     "duration_ms": duration_ms,
                     "finish_reason": response.choices[0].finish_reason,
@@ -286,14 +304,20 @@ class RequestLogger:
             # Calculate duration even on error
             duration_ms = int((time.time() - start_time) * 1000)
 
-            # Log error with full context
+            # Log error with full context. The CF-RAY header identifies the
+            # request to Venice support; connection errors have no response.
+            headers = getattr(e.response, "headers", None)
             self.logger.error(
                 f"Chat request failed: {str(e)}",
                 extra={
-                    "request_id": request_id,
+                    "client_request_id": client_request_id,
                     "model": model,
                     "duration_ms": duration_ms,
                     "error_type": type(e).__name__,
+                    # Only API errors carry a status and code; a timeout has neither.
+                    "status_code": getattr(e, "status_code", None),
+                    "code": getattr(e, "code", None),
+                    "cf_ray": headers.get("CF-RAY") if headers else None,
                 },
                 exc_info=True,
             )
@@ -385,11 +409,16 @@ class ErrorTracker:
     - Sentry: sentry_sdk.capture_exception()
     - Datadog: statsd.increment('venice.errors')
     - CloudWatch: cloudwatch.put_metric_data()
+
+    It does not write to the log. ``RequestLogger`` already wrote this failure's
+    ERROR record, and a second one would make every failure count twice in
+    anything that alerts on the log.
     """
 
     def __init__(self, logger: logging.Logger, enable_external: bool = False):
         self.logger = logger
         self.enable_external = enable_external
+        self.tracked: list[dict[str, Any]] = []
 
     async def track_error(
         self,
@@ -401,14 +430,9 @@ class ErrorTracker:
 
         Args:
             error: The exception that occurred
-            context: Additional context (model, request_id, etc.)
+            context: Additional context (model, client_request_id, etc.)
         """
-        # Log locally
-        self.logger.error(
-            f"Error tracked: {str(error)}",
-            extra=context or {},
-            exc_info=True,
-        )
+        self.tracked.append({"error_type": type(error).__name__, **(context or {})})
 
         # Forward to an external error tracker (if enabled). This example has
         # none wired up; a real integration (for example Sentry's
@@ -549,39 +573,101 @@ async def example_production_logging() -> bool:
                 continue
             succeeded += 1
 
+        # A request that cannot succeed, so the error path runs on every run.
+        print(f"\nDeliberate failure: requesting unknown model {UNKNOWN_MODEL!r}")
+        print("   An ERROR record with a traceback on stderr is expected here.")
+        start = time.time()
+        try:
+            await request_logger.log_chat_request(
+                client=client,
+                model=UNKNOWN_MODEL,
+                messages=[UserMessage(content="This request is meant to fail.")],
+                max_completion_tokens=16,
+                venice_parameters=OWN_PROMPT_ONLY,
+            )
+        except VeniceError as e:
+            await error_tracker.track_error(e, context={"model": UNKNOWN_MODEL})
+            perf_monitor.record_request(int((time.time() - start) * 1000), error=e)
+            deliberate_error = e
+            print(f"   Failed as intended: {type(e).__name__}")
+        else:
+            deliberate_error = None
+            print("   ❌ A request for a model that does not exist succeeded")
+
         perf_monitor.log_summary()
 
-    # Close the file handlers so the log is flushed and later SDK activity in
-    # this process stays out of it.
+    # Close the file handlers so the logs are flushed and later SDK activity in
+    # this process stays out of them.
     _reset_handlers(logger)
 
     print("\n   Logs written to:")
     print(f"   - {main_log} (all logs)")
     print(f"   - {error_log} (errors only)")
 
-    ok = succeeded == attempts and _verify_structured_log(main_log, attempts)
+    failures = len(error_tracker.tracked)
+    structured_ok = _verify_structured_log(main_log, attempts, failures)
+    errors_ok = deliberate_error is not None and _verify_error_log(
+        error_log, type(deliberate_error).__name__, failures
+    )
+    ok = succeeded == attempts and structured_ok and errors_ok
     print(f"{'✅' if ok else '❌'} {succeeded}/{attempts} production requests succeeded")
     return ok
 
 
-def _verify_structured_log(path: Path, expected_requests: int) -> bool:
+def _verify_error_log(path: Path, expected_error_type: str, expected_failures: int) -> bool:
+    """Read the error log back and check each failure was written exactly once."""
+    records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    # The SDK logs to the same logger, so count this application's own records.
+    failed = [r for r in records if r["message"].startswith("Chat request failed")]
+    deliberate = [r for r in failed if r.get("model") == UNKNOWN_MODEL]
+
+    problems = []
+    if len(failed) != expected_failures:
+        problems.append(f"{len(failed)} failure records, expected {expected_failures}")
+    if len(deliberate) != 1:
+        problems.append(f"{len(deliberate)} records of the deliberate failure, expected 1")
+    if any(r["level"] != "ERROR" for r in records):
+        problems.append("a record below ERROR reached the error log")
+    for record in deliberate:
+        if record.get("error_type") != expected_error_type:
+            problems.append(
+                f"error_type {record.get('error_type')!r}, expected {expected_error_type!r}"
+            )
+        missing = [k for k in ("client_request_id", "duration_ms", "exception") if k not in record]
+        if missing:
+            problems.append(f"failure record missing {missing}")
+
+    print(f"\n   Read back {len(records)} JSON records from {path.name}")
+    for record in deliberate:
+        print(
+            f"   Deliberate failure: {record.get('error_type')}, "
+            f"status {record.get('status_code')}, {record.get('duration_ms')}ms"
+        )
+    for problem in problems:
+        print(f"   ❌ {problem}")
+    return not problems
+
+
+def _verify_structured_log(path: Path, expected_completed: int, expected_failures: int) -> bool:
     """Read the log back and check it holds the metrics the monitor produced."""
     records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     completed = [r for r in records if r["message"] == "Chat request completed"]
     summaries = {r["message"]: r for r in records if r["message"].endswith("summary")}
 
     problems = []
-    if len(completed) != expected_requests:
-        problems.append(f"{len(completed)} completion records, expected {expected_requests}")
+    if len(completed) != expected_completed:
+        problems.append(f"{len(completed)} completion records, expected {expected_completed}")
     for record in completed:
         missing = [k for k in ("tokens_used", "finish_reason", "duration_ms") if k not in record]
         if missing:
             problems.append(f"completion record missing {missing}")
     perf = summaries.get("Performance summary", {})
-    if perf.get("total_requests") != expected_requests:
+    if perf.get("total_requests") != expected_completed + expected_failures:
         problems.append("performance summary missing or wrong request count")
     if "total_tokens" not in summaries.get("Token usage summary", {}):
         problems.append("token usage summary missing totals")
+    if sum(summaries.get("Error summary", {}).get("errors", {}).values()) != expected_failures:
+        problems.append("error summary missing or wrong failure count")
     if len(records) != len({json.dumps(r, sort_keys=True) for r in records}):
         problems.append("duplicate records")
 
@@ -628,7 +714,13 @@ async def example_structured_logging(production_log: Path) -> bool:
         "Request completed",
         extra={
             key: last[key]
-            for key in ("request_id", "model", "duration_ms", "tokens_used", "finish_reason")
+            for key in (
+                "client_request_id",
+                "model",
+                "duration_ms",
+                "tokens_used",
+                "finish_reason",
+            )
         },
     )
 

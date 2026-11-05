@@ -30,6 +30,9 @@ from venice_ai import NoMatchingModelError, VeniceClient, detect_image_format
 from venice_ai.exceptions import VeniceError
 from venice_ai.types.api.requests import UserMessage, VeniceParameters
 
+# Plenty for the five-word chat reply this example asks for.
+CHAT_MAX_TOKENS = 64
+
 
 async def discover_models(client: VeniceClient):
     """Discover available models and categorize by type."""
@@ -122,7 +125,7 @@ async def _chat_section(client: VeniceClient) -> bool | None:
         chat_response = await client.chat.completions.create(
             model=text_model,
             messages=[UserMessage(content="Say hello in five words or fewer.")],
-            max_completion_tokens=64,
+            max_completion_tokens=CHAT_MAX_TOKENS,
             venice_parameters=VeniceParameters(include_venice_system_prompt=False),
         )
     except VeniceError as e:
@@ -133,7 +136,11 @@ async def _chat_section(client: VeniceClient) -> bool | None:
     finish_reason = chat_response.choices[0].finish_reason if chat_response.choices else None
     print(f"✅ Response received: {chat_response.text}")
     print(f"   finish_reason: {finish_reason}")
-    if finish_reason == "length" or not (chat_response.text or "").strip():
+    # Some backends report finish_reason="stop" at the token cap, so a reply that
+    # used the whole budget, or has no usage to check, counts as truncated too.
+    usage = chat_response.usage
+    capped = usage is None or usage.completion_tokens >= CHAT_MAX_TOKENS
+    if capped or finish_reason == "length" or not (chat_response.text or "").strip():
         print("❌ Chat response was truncated or empty")
         ok = False
     # Chat responses carry request and token limits.

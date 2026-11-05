@@ -19,8 +19,10 @@ Use this helper when either:
    generating.
 
 For models that truly stream and don't truncate, the helper short-circuits to
-a single ``create_speech`` call when the input fits its word budget, so it is
-safe to call whatever model you use.
+a single ``create_speech`` call when the input fits its word budget. The model
+must output MP3: the helper only supports ``response_format="mp3"``, and any
+other format raises ``NotImplementedError``. A model whose ``supported_formats``
+lacks MP3 rejects the request with HTTP 400, so check its catalog entry first.
 
 Neither demo names a model. ``venice_ai.audio_helpers.split_text_for_tts``
 applies the same per-model budget as the helper, so asking it how it would
@@ -28,7 +30,8 @@ split the poem finds a model it splits for and one it passes through. The
 candidates come from ``resolve_tts(prefer="cheapest")`` in price order, so
 each demo runs on the cheapest model that shows its behavior. Each result is
 transcribed back to confirm the whole poem, last line included, made it into
-the audio.
+the audio, so with no ASR model in the catalog the example skips before any
+speech is billed.
 
 Run::
 
@@ -145,13 +148,12 @@ async def render(
     return body, segment_log, time.monotonic() - t0
 
 
-async def verify_transcript(client: VeniceClient, output: Path) -> bool:
+async def verify_transcript(client: VeniceClient, asr_model: str, output: Path) -> bool:
     """Transcribe the stitched audio and check the whole poem is in it.
 
     Also prints the audio length the ASR model measured, so the split demo
     can be compared with the per-response cap described above.
     """
-    asr_model = await client.models.resolve_asr(prefer="cheapest")
     transcript = await client.audio.transcribe(file=output, model=asr_model, language="en")
     overall = word_overlap(LONG_POEM, transcript.text)
     ending = word_overlap(LAST_LINE, transcript.text)
@@ -168,7 +170,7 @@ async def verify_transcript(client: VeniceClient, output: Path) -> bool:
     return False
 
 
-async def split_long_text(client: VeniceClient, model: str, voice: str) -> bool:
+async def split_long_text(client: VeniceClient, asr_model: str, model: str, voice: str) -> bool:
     """Render the full poem on a model the helper splits for."""
     planned = split_text_for_tts(LONG_POEM, model=model)
     budget = MODEL_WORD_BUDGETS.get(model, DEFAULT_WORD_BUDGET)
@@ -203,7 +205,7 @@ async def split_long_text(client: VeniceClient, model: str, voice: str) -> bool:
         print(f"❌ Expected {len(planned)} completed segments")
         return False
     try:
-        ok = await verify_transcript(client, output)
+        ok = await verify_transcript(client, asr_model, output)
     except VeniceError as e:
         print(f"❌ Transcription failed: {e}")
         return False
@@ -211,7 +213,9 @@ async def split_long_text(client: VeniceClient, model: str, voice: str) -> bool:
     return ok
 
 
-async def passthrough_long_text(client: VeniceClient, model: str, voice: str) -> bool:
+async def passthrough_long_text(
+    client: VeniceClient, asr_model: str, model: str, voice: str
+) -> bool:
     """Same input on a model the poem fits: the helper makes a single call.
 
     The poem fits under this model's word budget, so the helper passes the
@@ -240,7 +244,7 @@ async def passthrough_long_text(client: VeniceClient, model: str, voice: str) ->
         print("❌ Expected a single passthrough call with no split segments")
         return False
     try:
-        ok = await verify_transcript(client, output)
+        ok = await verify_transcript(client, asr_model, output)
     except VeniceError as e:
         print(f"❌ Transcription failed: {e}")
         return False
@@ -252,13 +256,18 @@ async def main() -> int:
     """Run both demos.
 
     Returns ``0`` if every demo that ran succeeded (one may be skipped when
-    the catalog has no model of its kind), ``77`` if both were skipped, and
-    ``1`` if any demo failed.
+    the catalog has no model of its kind), ``77`` if both were skipped or the
+    catalog has no ASR model to check them with, and ``1`` if any demo failed.
     """
     print("🚀 Venice AI long-text TTS")
     print("=" * 50)
 
     async with VeniceClient() as client:
+        try:
+            asr_model = await client.models.resolve_asr(prefer="cheapest")
+        except NoMatchingModelError as e:
+            print(f"\nSKIPPED: no ASR model to check the audio with ({e})")
+            return EXIT_SKIPPED
         split, passthrough = await pick_models(client)
         results: list[tuple[str, bool | None]] = []
 
@@ -268,7 +277,7 @@ async def main() -> int:
             )
             results.append(("split_long_text", None))
         else:
-            results.append(("split_long_text", await split_long_text(client, *split)))
+            results.append(("split_long_text", await split_long_text(client, asr_model, *split)))
 
         if passthrough is None:
             print(
@@ -277,7 +286,10 @@ async def main() -> int:
             results.append(("passthrough_long_text", None))
         else:
             results.append(
-                ("passthrough_long_text", await passthrough_long_text(client, *passthrough))
+                (
+                    "passthrough_long_text",
+                    await passthrough_long_text(client, asr_model, *passthrough),
+                )
             )
 
     failed = [name for name, ok in results if ok is False]
