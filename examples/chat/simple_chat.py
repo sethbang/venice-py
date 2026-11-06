@@ -12,20 +12,31 @@ script exits non-zero instead of printing a truncated fragment as if it were
 the model's answer. ``finish_reason == "length"`` is the usual signal, but some
 models report a cut-off answer as ``"stop"``, so the completion-token count is
 compared with the cap as well.
+
+Besides the basics, this script sends the request parameters most chat APIs
+share: ``stop``, ``n``, ``top_p``, the repetition penalties, ``seed`` and
+``logprobs``. ``stop``, ``n`` and ``logprobs`` have an effect a run can check.
+``top_p``, the penalties and ``seed`` are requests to the model's sampler, so
+their effect is reported rather than asserted. ``seed`` asks for reproducible
+sampling; identical output is not promised.
+
+Cost: about a dozen short requests on the cheapest models, typically well under
+$0.001 in total. ``n=2`` bills the tokens of both choices. A reasoning model
+spends more of its cap, and the comparison section uses one.
 """
 
 import asyncio
+import math
 import sys
 import textwrap
+from typing import Any
 
-from venice_ai import NoMatchingModelError, VeniceClient
-from venice_ai.types.api import ChatCompletionResponse, SystemMessage, UserMessage
+from _helpers import completion_cap, states_number
+from pydantic import ValidationError
+
+from venice_ai import NoMatchingModelError, VeniceClient, VeniceError, model_price
+from venice_ai.types.api import ChatCompletionResponse, SystemMessage, TextModelSpec, UserMessage
 from venice_ai.types.api.requests import VeniceParameters
-
-# Room for a reasoning model to think and still answer. Small reasoning models
-# vary widely in how long they think, even on easy questions, so the cap leaves
-# several thousand tokens of headroom over a typical run.
-REASONING_CAP = 16384
 
 # After the first section, requests leave Venice's own system prompt out: these
 # prompts need no instructions beyond our own.
@@ -141,7 +152,10 @@ async def different_models_comparison(client: VeniceClient, standard_model: str)
         return None
 
     # (model, max_completion_tokens) pairs; the reasoning model gets room to think.
-    candidates = [(standard_model, 300), (reasoning_model, REASONING_CAP)]
+    candidates = [
+        (standard_model, 300),
+        (reasoning_model, await completion_cap(client, reasoning_model)),
+    ]
     print(f"📍 Comparing models: {[model for model, _ in candidates]}")
 
     ok = True
@@ -194,6 +208,185 @@ async def parameter_variations(client: VeniceClient, chat_model: str) -> bool:
     return ok
 
 
+async def stop_sequences(client: VeniceClient, chat_model: str) -> bool:
+    """End the answer at a stop string; the stop string itself is not returned."""
+    print("\n🛑 Stop Sequences")
+    print("-" * 30)
+
+    response = await client.chat.completions.create(
+        model=chat_model,
+        messages=[
+            UserMessage(content="Count from 1 to 9 in digits, separated by commas. List only.")
+        ],
+        venice_parameters=NO_VENICE_PROMPT,
+        max_completion_tokens=60,
+        temperature=0.0,
+        stop=["5"],
+    )
+    ok = report_answer(response, 60, indent="   ")
+    text = response.text or ""
+    # The model reached 4, then generation ended before it could write 5 or 6.
+    if not states_number(text, 4) or "5" in text or "6" in text:
+        print('   ❌ Expected the count to end after 4 with stop=["5"]')
+        return False
+    print('   ✅ stop=["5"] ended the answer before the 5')
+    return ok
+
+
+async def multiple_choices(client: VeniceClient, chat_model: str) -> bool:
+    """Ask for two alternative answers with ``n=2``.
+
+    ``n`` bills the generated tokens of every choice, so keep it at 1 unless you
+    need the alternatives. ``response.text`` reads only the first choice.
+    """
+    print("\n🎲 Several Choices (n=2)")
+    print("-" * 30)
+
+    cap = 30
+    response = await client.chat.completions.create(
+        model=chat_model,
+        messages=[UserMessage(content="Name one color. Reply with one word.")],
+        venice_parameters=NO_VENICE_PROMPT,
+        max_completion_tokens=cap,
+        temperature=1.0,
+        n=2,
+    )
+    for choice in response.choices:
+        print(f"   [{choice.index}] {choice.message.content!r} ({choice.finish_reason})")
+    if response.usage:
+        print(f"   📊 Completion tokens across all choices: {response.usage.completion_tokens}")
+    if not response.choices or any(
+        c.finish_reason == "length" or not c.message.content for c in response.choices
+    ):
+        print("   ❌ A choice is empty or was cut off")
+        return False
+    if len(response.choices) != 2:
+        print(f"   ℹ️ asked for 2, got {len(response.choices)}")
+        return True
+    print("   ✅ Two complete choices returned")
+    return True
+
+
+async def sampling_controls(client: VeniceClient, chat_model: str) -> bool:
+    """Send ``top_p``, the penalties and ``seed``.
+
+    These shape how the model samples. One run cannot prove their effect, so
+    the checks cover what a run can show: each request is accepted and answered
+    correctly, and an out-of-range value is rejected before anything is sent.
+    """
+    print("\n🎛️ Sampling Controls")
+    print("-" * 30)
+
+    question = [UserMessage(content="What is the capital of France? Reply with one word.")]
+    variants: list[tuple[str, dict[str, Any]]] = [
+        ("top_p=0.5", {"top_p": 0.5}),
+        (
+            "frequency_penalty=0.5, presence_penalty=0.3",
+            {"frequency_penalty": 0.5, "presence_penalty": 0.3},
+        ),
+        ("repetition_penalty=1.1", {"repetition_penalty": 1.1}),
+    ]
+    ok = True
+    for label, sampling in variants:
+        print(f"\n   {label}")
+        response = await client.chat.completions.create(
+            model=chat_model,
+            messages=question,
+            venice_parameters=NO_VENICE_PROMPT,
+            max_completion_tokens=30,
+            **sampling,
+        )
+        ok = report_answer(response, 30, indent="   ") and ok
+        if "paris" not in (response.text or "").lower():
+            print("   ❌ The answer does not name Paris")
+            ok = False
+
+    # Range checks run in the SDK, so this costs nothing.
+    try:
+        await client.chat.completions.create(
+            model=chat_model,
+            messages=question,
+            max_completion_tokens=30,
+            top_p=1.5,
+        )
+    except ValidationError as e:
+        print(f"\n   ✅ top_p=1.5 rejected before sending: {e.errors()[0]['msg']}")
+    else:
+        print("\n   ❌ top_p=1.5 was sent and accepted")
+        ok = False
+
+    print("\n   seed=12345, twice (a request for reproducible sampling, not a promise)")
+    answers: list[str] = []
+    for _ in range(2):
+        response = await client.chat.completions.create(
+            model=chat_model,
+            messages=[UserMessage(content="Invent a two-word band name. Reply with it only.")],
+            venice_parameters=NO_VENICE_PROMPT,
+            max_completion_tokens=30,
+            temperature=1.0,
+            seed=12345,
+        )
+        ok = report_answer(response, 30, indent="   ") and ok
+        answers.append((response.text or "").strip())
+    same = "identical" if answers[0] == answers[1] else "different"
+    print(f"   📏 Measured: the two answers were {same} on this run")
+    return ok
+
+
+async def cheapest_logprobs_model(client: VeniceClient) -> str | None:
+    """The cheapest direct-answer model whose catalog entry lists ``supportsLogProbs``."""
+    candidates: list[tuple[float, str]] = []
+    for model in (await client.models.list(type="text")).data:
+        spec = model.model_spec
+        if not isinstance(spec, TextModelSpec) or spec.beta or spec.offline:
+            continue
+        caps = spec.capabilities
+        if caps is None or not caps.supportsLogProbs or caps.supportsReasoning or caps.supportsE2EE:
+            continue
+        price = model_price(model.model_dump())
+        candidates.append((price if price is not None else math.inf, model.id))
+    return min(candidates)[1] if candidates else None
+
+
+async def log_probabilities(client: VeniceClient) -> bool | None:
+    """Read a token's log probability with ``logprobs=True``.
+
+    Returns ``None`` (section skipped) when no model lists ``supportsLogProbs``.
+    """
+    print("\n📈 Log Probabilities")
+    print("-" * 30)
+
+    model = await cheapest_logprobs_model(client)
+    if model is None:
+        print("Section skipped: no direct-answer model lists supportsLogProbs")
+        return None
+    print(f"📍 Using model: {model}")
+
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[UserMessage(content="Reply with the single word yes.")],
+        venice_parameters=NO_VENICE_PROMPT,
+        max_completion_tokens=16,
+        logprobs=True,
+        top_logprobs=2,
+    )
+    ok = report_answer(response, 16, indent="   ")
+    logprobs = response.choices[0].logprobs if response.choices else None
+    # ``tokens`` reads both forms a server may send: one token, or one per token.
+    tokens = logprobs.tokens if logprobs is not None else []
+    if not tokens:
+        print("   ❌ The model lists supportsLogProbs but returned no readable logprobs")
+        return False
+    first = tokens[0]
+    print(f"   token={first.token!r} logprob={first.logprob}")
+    print(f"   alternatives: {[(t.token, t.logprob) for t in first.top_logprobs or []]}")
+    if any(t.logprob > 0 for t in tokens):
+        print("   ❌ A log probability cannot be above 0")
+        return False
+    print("   ✅ Log probability returned")
+    return ok
+
+
 async def main() -> int:
     """Run all chat completion examples; return a process exit code."""
     print("🚀 Venice AI Simple Chat Examples")
@@ -219,7 +412,17 @@ async def main() -> int:
                 await different_models_comparison(client, chat_model),
             ),
             ("parameter_variations", await parameter_variations(client, chat_model)),
+            ("stop_sequences", await stop_sequences(client, chat_model)),
+            ("multiple_choices", await multiple_choices(client, chat_model)),
+            ("sampling_controls", await sampling_controls(client, chat_model)),
         ]
+        # A model may list logprobs in a shape this SDK release does not parse, so
+        # that request is kept from stopping the summary below.
+        try:
+            results.append(("log_probabilities", await log_probabilities(client)))
+        except VeniceError as e:
+            print(f"   ❌ The logprobs request failed ({type(e).__name__}): {e}")
+            results.append(("log_probabilities", False))
 
     failed = [name for name, ok in results if ok is False]
     if failed:
@@ -235,7 +438,8 @@ async def main() -> int:
     print("   - System messages for personality")
     print("   - Standard vs reasoning model selection with resolve_chat(prefer='cheapest')")
     print("     (exclude_reasoning=True vs require_reasoning=True)")
-    print("   - Parameter tuning (temperature)")
+    print("   - Parameter tuning (temperature, top_p, penalties, seed)")
+    print("   - stop sequences, n choices and logprobs")
     print("   - Checking finish_reason and token usage")
     return 0
 

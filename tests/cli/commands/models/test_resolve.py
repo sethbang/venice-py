@@ -443,6 +443,45 @@ class TestResolvePreferAndNewFilters:
         assert kwargs["require_e2ee"] is True
 
     @pytest.mark.asyncio
+    async def test_exclude_e2ee_forwarded_for_chat(self):
+        client, _ = await _run_resolve("chat", exclude_e2ee=True)
+        assert client.models.resolve.await_args.kwargs["exclude_e2ee"] is True
+
+    def test_exclude_e2ee_flag_reaches_the_sdk(self):
+        from venice_ai.cli.cli import cli
+
+        mock_client = AsyncMock()
+        mock_client.models.resolve = AsyncMock(return_value="picked")
+        with (
+            patch("venice_ai.VeniceClient") as MockClient,
+            patch("venice_ai.cli.config.ensure_api_key", return_value="test-key"),
+        ):
+            _setup_client(MockClient, mock_client)
+            result = CliRunner().invoke(
+                cli, ["models", "resolve", "--type", "chat", "--exclude-e2ee", "--json"]
+            )
+        assert result.exit_code == 0, result.output
+        assert mock_client.models.resolve.await_args.kwargs["exclude_e2ee"] is True
+
+    def test_e2ee_and_exclude_e2ee_together_exit_1(self):
+        from venice_ai.cli.cli import cli
+
+        mock_client = AsyncMock()
+        mock_client.models.resolve = AsyncMock(
+            side_effect=ValueError("require_e2ee and exclude_e2ee cannot be combined")
+        )
+        with (
+            patch("venice_ai.VeniceClient") as MockClient,
+            patch("venice_ai.cli.config.ensure_api_key", return_value="test-key"),
+        ):
+            _setup_client(MockClient, mock_client)
+            result = CliRunner().invoke(
+                cli, ["models", "resolve", "--type", "chat", "--e2ee", "--exclude-e2ee", "--json"]
+            )
+        assert result.exit_code == 1
+        assert "cannot be combined" in result.output
+
+    @pytest.mark.asyncio
     async def test_exclusion_filters_forwarded(self):
         client, _ = await _run_resolve(
             "chat", prefer="cheapest", exclude_reasoning=True, exclude_uncensored=True

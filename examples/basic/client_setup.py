@@ -23,11 +23,13 @@ first of these that is set:
 2. ``VENICE_REDIS_URL`` — a convenience name the examples also read;
 3. ``REDIS_URL`` — the conventional name many hosts set.
 
-Without one the section prints a ``Section skipped:`` line. The script still
-exits 0 when every other section passed, since Redis is optional.
+Without one, or without the ``adaptive-rate-limiter`` package that talks to it,
+the section prints a ``Section skipped:`` line. The script still exits 0 when
+every other section passed, since Redis is optional.
 """
 
 import asyncio
+import importlib.util
 import os
 import sys
 
@@ -160,9 +162,9 @@ async def production_setup() -> bool | None:
     """Production-ready client setup with shared rate-limit state in Redis.
 
     Redis is only contacted by the ADAPTIVE rate limiter, so the backend and the
-    rate limiter are configured together. Without a reachable Redis the section
-    is skipped (an infrastructure prerequisite, not a code failure) and returns
-    ``None``.
+    rate limiter are configured together. Without a reachable Redis or the
+    ``adaptive-rate-limiter`` package the section is skipped (a prerequisite, not
+    a code failure) and returns ``None``.
     """
     print("\n🏭 Production Setup")
     print("-" * 30)
@@ -172,6 +174,13 @@ async def production_setup() -> bool | None:
         print(
             "Section skipped: production_setup needs Redis; "
             f"set one of {', '.join(REDIS_URL_ENV_VARS)}"
+        )
+        return None
+    # The factory raises ImportError for the ADAPTIVE limiter without this package.
+    if importlib.util.find_spec("adaptive_rate_limiter") is None:
+        print(
+            "Section skipped: production_setup needs the adaptive-rate-limiter package; "
+            "pip install 'venice-py[adaptive]'"
         )
         return None
     if not await redis_reachable(redis_url):

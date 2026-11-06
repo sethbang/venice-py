@@ -4,9 +4,15 @@ Venice AI SDK - Augment: Text Parser
 ====================================
 
 Demonstrates ``client.augment.parse_text(file=..., response_format=...)`` —
-Venice's multipart document-parsing endpoint. The endpoint accepts PDF, DOCX,
-XLSX, and plain text files up to 25 MB; this example uploads plain text so the
-extracted text can be checked against the input exactly. For other formats,
+Venice's multipart document-parsing endpoint, for files up to 25 MB. It accepts
+PDF, EPUB, DOCX, PPTX, XLSX and XLS (not the legacy ``.doc`` or ``.ppt``); plain
+text, Markdown, CSV, JSON, YAML, TOML, XML and any ``text/*`` type; and source
+code in about 140 recognized extensions.
+
+This example uploads a plain text file by path, so the extracted text can be
+checked against the input exactly, then a small PDF as raw bytes, built by this
+script so nothing has to be downloaded, and checked for the sentence inside it. A
+PDF that does not parse fails the run and prints the reason. For other formats,
 pass the file path (or bytes plus the matching ``content_type``) the same way.
 
 Two return shapes:
@@ -18,7 +24,7 @@ Two return shapes:
 **Privacy:** Parsing runs in-memory on Venice's infrastructure with zero
 data retention — documents are processed then immediately discarded.
 
-**Pricing:** $0.01 per request.
+**Pricing:** $0.01 per request, so $0.02 per run for the two uploads here.
 
 **Note:** The Augment API is marked experimental in the Venice docs; request
 and response shapes may change without notice.
@@ -74,39 +80,72 @@ async def parse_plain_text() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 2. Raw bytes upload with the plain text response format
+# 2. A PDF as raw bytes, with the plain text response format
 # ---------------------------------------------------------------------------
 
+PDF_SENTENCE = "Venice parsed this small PDF"
 
-async def parse_with_text_response() -> bool:
-    """Upload raw bytes and use ``response_format='text'`` to get a plain ``str`` back.
+
+def build_minimal_pdf(sentence: str) -> bytes:
+    """Build a valid one-page PDF showing ``sentence``, with a correct cross-reference table.
+
+    ``sentence`` must be plain ASCII with no parentheses or backslashes.
+    """
+    stream = f"BT /F1 18 Tf 72 720 Td ({sentence}) Tj ET".encode("ascii")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+    xref_at = len(pdf)
+    pdf += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    for offset in offsets:
+        pdf += b"%010d 00000 n \n" % offset
+    pdf += b"trailer\n<< /Size %d /Root 1 0 R >>\n" % (len(objects) + 1)
+    pdf += b"startxref\n%d\n%%%%EOF\n" % xref_at
+    return bytes(pdf)
+
+
+async def parse_pdf_with_text_response() -> bool:
+    """Upload a PDF as raw bytes and use ``response_format='text'`` to get a ``str`` back.
 
     Passing bytes plus ``content_type`` and ``filename`` needs no file on disk.
     Unlike the default ``response_format='json'`` (which returns an
     ``AugmentTextParserResponse`` with ``.text``/``.tokens``), the ``"text"``
-    format returns the extracted text directly as a ``str``.
+    format returns the extracted text directly as a ``str``. Whitespace is
+    collapsed before comparing, since a PDF stores no line structure to return.
     """
-    print("\n🧾 Parse raw bytes with response_format='text'")
+    print("\n🧾 Parse a PDF from raw bytes with response_format='text'")
     print("-" * 30)
 
-    content = (
-        b"Venice AI Augment text-parser demo.\n"
-        b"This document is uploaded as raw bytes and parsed back as plain text.\n"
-    )
+    content = build_minimal_pdf(PDF_SENTENCE)
+    print(f"📎 Uploading a {len(content)}-byte PDF built by this script")
 
     async with VeniceClient() as client:
         text = await client.augment.parse_text(
             file=content,
             response_format="text",
-            content_type="text/plain",
-            filename="demo.txt",
+            content_type="application/pdf",
+            filename="demo.pdf",
         )
 
     # response_format="text" returns a plain str (no .text / .tokens).
     print(f"📝 Got {type(text).__name__} ({len(text)} chars):")
     print("-" * 30)
     print(text)
-    return isinstance(text, str) and round_trips(content.decode(), text)
+    if PDF_SENTENCE not in " ".join(text.split()):
+        print(f"❌ The extracted text does not contain {PDF_SENTENCE!r}")
+        return False
+    print("✅ The sentence inside the PDF came back")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +160,7 @@ async def main() -> int:
 
     sub_examples = [
         ("parse_plain_text", parse_plain_text),
-        ("parse_with_text_response", parse_with_text_response),
+        ("parse_pdf_with_text_response", parse_pdf_with_text_response),
     ]
 
     results: list[tuple[str, bool]] = []
@@ -146,7 +185,7 @@ async def main() -> int:
     print(f"\n✨ {passed}/{total} text-parser sub-examples completed")
     print("\n💡 Key concepts demonstrated:")
     print("   - File-path upload with JSON response")
-    print("   - Raw-bytes upload (no file on disk) with response_format='text'")
+    print("   - Raw-bytes PDF upload (no file on disk) with response_format='text'")
     return 0
 
 

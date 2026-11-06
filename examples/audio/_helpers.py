@@ -14,15 +14,22 @@ Shared helpers for Venice AI audio examples.
 - ``voice_sample`` returns a speech recording for the voice cloning and voice
   changer examples: your own (``VENICE_VOICE_SAMPLE_PATH``) or a clip it
   synthesizes with Venice TTS. ``wav_seconds`` measures a WAV file.
+- ``word_overlap`` compares a transcript with the text that was spoken.
+- ``EXIT_SKIPPED`` is the exit status of a run that skipped because a
+  prerequisite is missing.
 """
 
 import os
+import re
 import wave
 from collections.abc import Collection
 from pathlib import Path
 
 from venice_ai import VeniceClient
 from venice_ai.types.api import TtsModelSpec
+
+#: Exit status for a run that skipped because a prerequisite is missing.
+EXIT_SKIPPED = 77
 
 #: Response formats whose container this module can recognise. ``pcm`` is raw
 #: headerless samples, so there is nothing to check.
@@ -31,6 +38,13 @@ CHECKABLE_FORMATS = frozenset({"mp3", "wav", "flac", "aac", "m4a", "opus", "ogg"
 #: Set this to the path of your own recording to use it instead of a synthesized
 #: sample.
 VOICE_SAMPLE_ENV = "VENICE_VOICE_SAMPLE_PATH"
+
+#: MPEG audio bit-rate index values that name no usable bit rate (``free`` and
+#: the reserved value) and the reserved sample-rate index.
+_BAD_BITRATE_INDEXES = frozenset({0, 15})
+_RESERVED_SAMPLE_RATE_INDEX = 3
+#: The MPEG version field value that is reserved.
+_RESERVED_MPEG_VERSION = 1
 
 #: What the synthesized sample says: about 9 s of speech at a normal pace, longer
 #: than the catalog's recommended cloning minimum and short enough to fit in the
@@ -56,12 +70,32 @@ def _id3_length(data: bytes) -> int:
     return 10 + size + footer
 
 
+def _is_layer3_frame(head: bytes) -> bool:
+    """Whether ``head`` opens with a valid MPEG audio Layer III frame header.
+
+    A sync word alone is common in arbitrary bytes, so the version, layer,
+    bit-rate and sample-rate fields are checked too.
+    """
+    if len(head) < 4 or head[0] != 0xFF or head[1] & 0xE0 != 0xE0:
+        return False
+    version = (head[1] >> 3) & 0x03
+    layer = (head[1] >> 1) & 0x03
+    bitrate_index = head[2] >> 4
+    sample_rate_index = (head[2] >> 2) & 0x03
+    return (
+        version != _RESERVED_MPEG_VERSION
+        and layer == 0b01
+        and bitrate_index not in _BAD_BITRATE_INDEXES
+        and sample_rate_index != _RESERVED_SAMPLE_RATE_INDEX
+    )
+
+
 def detect_audio_format(data: bytes) -> str | None:
     """Return the audio container ``data`` starts with, or ``None`` if unknown.
 
     MPEG frames and AAC ADTS frames share the 0xFFF sync word. The two layer
-    bits after it tell them apart: ``00`` is ADTS, anything else is an MPEG
-    audio layer (MP3 is layer III).
+    bits after it tell them apart: ``00`` is ADTS, ``01`` is MPEG audio Layer
+    III (MP3). Other layers and invalid frame headers are not recognised.
     """
     tag = _id3_length(data)
     head = data[tag:]
@@ -73,9 +107,9 @@ def detect_audio_format(data: bytes) -> str | None:
         return "ogg"
     if head[4:8] == b"ftyp":
         return "m4a"
-    if len(head) > 1 and head[0] == 0xFF and head[1] & 0xF0 == 0xF0 and head[1] & 0x06 == 0:
+    if len(head) > 1 and head[0] == 0xFF and head[1] & 0xF6 == 0xF0:
         return "aac"
-    if len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0 and head[1] & 0x06:
+    if _is_layer3_frame(head):
         return "mp3"
     return None
 
@@ -94,6 +128,17 @@ def matches_format(data: bytes, fmt: str) -> bool:
     found = detect_audio_format(data)
     accepted = {"opus": {"ogg"}, "aac": {"aac", "m4a"}}.get(fmt, {fmt})
     return found in accepted
+
+
+def word_overlap(expected: str, actual: str) -> float:
+    """Fraction of the expected words that appear in ``actual``, from 0 to 1.
+
+    ``\\w+`` keeps accented letters and other scripts inside a word, so this
+    works on the non-English sample text too.
+    """
+    want = re.findall(r"\w+", expected.lower())
+    got = set(re.findall(r"\w+", actual.lower()))
+    return sum(w in got for w in want) / len(want) if want else 0.0
 
 
 def tts_spec(spec: object, model_id: str) -> TtsModelSpec:

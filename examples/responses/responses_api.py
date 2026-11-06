@@ -29,10 +29,10 @@ This example demonstrates:
 ``"completed"`` means the model finished its answer.
 
 The endpoint is tagged **beta** by Venice; request/response shapes may change
-without notice, and some accounts may not be entitled. A demo the account
-cannot access (HTTP 403), or one whose kind of model the catalog lacks, prints
-a ``Section skipped:`` line. The basic call is the core of the example: when it
-cannot run, the script prints ``SKIPPED:`` and exits 77, otherwise it exits 0
+without notice. A demo the API refuses this key (HTTP 403), or one whose kind of
+model the catalog lacks, prints a ``Section skipped:`` line. The basic call is the
+core of the example: when it cannot run, the script prints ``SKIPPED:`` and exits
+77, otherwise it exits 0
 only if every demo that ran passed.
 
 Cost: about $0.015 per run. The ``web_search`` demo accounts for most of that:
@@ -264,8 +264,8 @@ async def structured_input_responses(client: VeniceClient, model: str) -> bool:
 async def reasoning_output_blocks(client: VeniceClient) -> bool | None:
     """Read the ``reasoning`` block a reasoning model returns before its answer.
 
-    The model comes from the resolver's default ranking for reasoning models,
-    which follows Venice's own recommendations. Not every backend returns a
+    The model comes from the resolver's default ranking: Venice traits, then
+    catalog order, with price not considered. Not every backend returns a
     ``reasoning`` block on ``/responses`` even when it bills reasoning tokens;
     the check below tells that case apart from a model that did not reason.
 
@@ -726,13 +726,13 @@ async def main() -> int:
             try:
                 outcome = await section()
             except PermissionDeniedError as e:
-                # The Responses API is beta; a model or account may still
-                # reject it. That is an access condition, not a failure.
+                # The Responses API is beta, and a 403 can come from the account,
+                # the model or the key. That is an access condition, not a failure.
                 if name == "basic_responses_create":
                     # The other demos would be billed attempts at the same endpoint.
-                    print(f"\nSKIPPED: this account has no access to the Responses API (beta): {e}")
+                    print(f"\nSKIPPED: the API refused this key the Responses API (beta): {e}")
                     return EXIT_SKIPPED
-                print(f"\nSection skipped: {name} is not available on this account: {e}")
+                print(f"\nSection skipped: the API refused this key {name}: {e}")
                 skipped.append(name)
                 continue
             except VeniceError as e:

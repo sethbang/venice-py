@@ -42,6 +42,33 @@ client = VeniceClient(config=config, api_key="your-key")
 > `create_production_config()` and the other presets in `venice_ai.presets` set a
 > sensible `RateLimiterConfig` for you.
 
+**Which timeout applies:** a client's timeout bounds a whole request, a stream
+included. `VeniceClient` uses `timeout=` if given, then a timeout the config set
+(by keyword, by assignment or by `VENICE_HTTP_CLIENT__TIMEOUT`), then its own
+120-second default. `VeniceClientFactory` uses the config's value even when unset,
+which is 30 seconds.
+
+Every preset sets a timeout, so `VeniceClient(config=preset)` uses it:
+
+| Preset | Timeout |
+| --- | --- |
+| `create_production_config` | 30 seconds |
+| `create_production_config_high_throughput` | 45 seconds |
+| `create_production_config_conservative` | 60 seconds |
+| `create_development_config` | 60 seconds |
+| `create_testing_config` | 10 seconds |
+
+A long reasoning stream can outlast these and the factory's 30 seconds. Pass
+`timeout=` for a longer limit:
+
+```python
+client = VeniceClient(config=create_production_config(redis_url=url), timeout=300)
+```
+
+A config you dump and reload has every field set, the timeout included, so a config
+that never set one comes back with 30 seconds rather than the client's 120. Dump with
+`config.model_dump(exclude_unset=True)` to keep it unset.
+
 **Where the API key comes from:** every entry point (`VeniceClient`,
 `SyncVeniceClient`, `VeniceClientFactory`) resolves it in one order: an explicit
 `api_key=`, then `config.api_key`, then the `VENICE_API_KEY` environment

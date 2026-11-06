@@ -287,7 +287,7 @@ shape `calculate_completion_cost` / `calculate_embedding_cost` expect. Image, vi
 and music specs carry their own pricing shapes.
 
 To price a whole catalog at once, `CostTracker.from_client(client)` builds the
-`{model_id: pricing}` map in a single `models.list()` call.
+`{model_id: pricing}` map for chat and embedding models, with one `models.list()` call for each.
 
 ---
 

@@ -1,14 +1,17 @@
 """Unit tests for the examples swallow-to-exit-0 checker.
 
 The checker (``tools/examples/check_no_swallow.py``) must catch the
-swallow-to-exit-0 anti-pattern the live audit found, while staying zero
-false-positive on the remediated tree. Three high-precision rules:
+swallow-to-exit-0 anti-pattern the live audit found, with no hard findings on the
+remediated tree. Four rules:
 
 - A: a *broad* except (``Exception`` / ``BaseException`` / bare) returning a
   truthy literal — returning success from an error handler.
 - B: a broad except whose body is pure print/log + fall-through (no ``raise``,
   ``sys.exit``, assignment, or value-returning ``return``).
 - C: if ``main`` is annotated ``-> int``, its result must reach ``sys.exit``.
+- D: a literal swallow: exiting 0 or ``return 0`` from ``main`` in a broad except,
+  an empty broad except, a report-only one in the main guard, or
+  ``suppress(Exception)``.
 
 Narrow typed excepts (``except ValueError`` / ``except (VeniceError, APIError)``)
 are intentional error-demos and are never flagged.
@@ -17,6 +20,7 @@ are intentional error-demos and are never flagged.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -390,3 +394,448 @@ def test_real_tree_discovery_matches_tracked_examples():
     tracked_paths = {REPO_ROOT / line for line in tracked.stdout.splitlines()}
     missing = tracked_paths - set(found)
     assert not missing, f"tracked examples not discovered: {sorted(missing)}"
+
+
+# ---- literal swallow forms ----
+
+
+@pytest.mark.parametrize(
+    "exit_form",
+    [
+        "sys.exit(0)",
+        "sys.exit()",
+        "sys.exit(None)",
+        "sys.exit(False)",
+        "exit(0)",
+        "exit()",
+        "quit(0)",
+        "os._exit(0)",
+        "raise SystemExit",
+        "raise SystemExit(0)",
+        "raise SystemExit()",
+    ],
+)
+def test_broad_handler_exiting_0_is_hard(exit_form: str) -> None:
+    source = f"""
+        def work():
+            try:
+                thing()
+            except Exception as e:
+                print(e)
+                {exit_form}
+        """
+    assert _rules(source) == {"D"}
+
+
+@pytest.mark.parametrize(
+    "exit_form",
+    [
+        "sys.exit(1)",
+        "sys.exit(77)",
+        "exit(1)",
+        "os._exit(2)",
+        "raise SystemExit(1)",
+        "sys.exit(rc)",
+    ],
+)
+def test_broad_handler_exiting_nonzero_is_clean(exit_form: str) -> None:
+    source = f"""
+        def work():
+            try:
+                thing()
+            except Exception as e:
+                print(e)
+                {exit_form}
+        """
+    assert _rules(source) == set()
+
+
+@pytest.mark.parametrize("handler", ["except Exception:", "except BaseException:", "except:"])
+def test_return_0_in_a_broad_handler_of_main_is_hard(handler: str) -> None:
+    source = f"""
+        async def main() -> int:
+            try:
+                await thing()
+            {handler}
+                print("failed")
+                return 0
+            return 0
+        """
+    assert _rules(source) == {"D"}
+
+
+def test_return_0_in_a_broad_handler_of_a_helper_is_not_rule_d() -> None:
+    source = """
+        def count() -> int:
+            try:
+                return len(thing())
+            except Exception:
+                return 0
+        """
+    assert _rules(source) == set()
+
+
+def test_return_0_from_a_function_nested_in_main_belongs_to_that_function() -> None:
+    source = """
+        def main() -> int:
+            def count() -> int:
+                try:
+                    return len(thing())
+                except Exception:
+                    return 0
+            return count()
+        """
+    assert _rules(source) == set()
+
+
+def test_return_0_from_a_typed_handler_of_main_is_clean() -> None:
+    source = """
+        def main() -> int:
+            try:
+                thing()
+            except ValueError:
+                return 0
+            return 1
+        """
+    assert _rules(source) == set()
+
+
+@pytest.mark.parametrize("value", ["1", "2", "77", "-1"])
+def test_nonzero_return_from_main_is_a_failure_not_a_mask(value: str) -> None:
+    source = f"""
+        def main() -> int:
+            try:
+                thing()
+            except Exception as e:
+                print(e)
+                return {value}
+            return 0
+        """
+    assert _rules(source) == set()
+
+
+def test_nonzero_return_from_a_helper_is_still_rule_a() -> None:
+    source = """
+        def helper() -> int:
+            try:
+                thing()
+            except Exception:
+                return 1
+        """
+    assert _rules(source) == {"A"}
+
+
+@pytest.mark.parametrize("body", ["pass", "...", "continue", "pass\n                    pass"])
+def test_broad_handler_with_an_empty_body_is_hard(body: str) -> None:
+    source = f"""
+        def work():
+            for item in items:
+                try:
+                    thing(item)
+                except Exception:
+                    {body}
+        """
+    assert _rules(source) == {"D"}
+
+
+def test_typed_handler_with_an_empty_body_is_clean() -> None:
+    source = """
+        try:
+            thing()
+        except KeyError:
+            pass
+        """
+    assert _rules(source) == set()
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "contextlib.suppress(Exception)",
+        "suppress(Exception)",
+        "contextlib.suppress(BaseException)",
+        "suppress(KeyError, Exception)",
+    ],
+)
+def test_suppressing_broad_exceptions_is_hard(opener: str) -> None:
+    source = f"""
+        with {opener}:
+            thing()
+        """
+    assert _rules(source) == {"D"}
+
+
+def test_suppressing_broad_exceptions_in_async_with_is_hard() -> None:
+    source = """
+        async def work():
+            async with limiter, suppress(Exception):
+                await thing()
+        """
+    assert _rules(source) == {"D"}
+
+
+def test_suppressing_a_typed_exception_is_clean() -> None:
+    source = """
+        with suppress(asyncio.CancelledError, KeyError):
+            thing()
+        """
+    assert _rules(source) == set()
+
+
+def test_main_guard_swallowing_a_run_is_hard() -> None:
+    source = """
+        if __name__ == "__main__":
+            try:
+                asyncio.run(main())
+            except Exception as e:
+                print(f"failed: {e}")
+        """
+    assert _rules(source) == {"D"}
+
+
+def test_main_guard_exiting_nonzero_is_clean() -> None:
+    source = """
+        if __name__ == "__main__":
+            try:
+                asyncio.run(main())
+            except Exception as e:
+                print(f"failed: {e}")
+                sys.exit(1)
+        """
+    assert _rules(source) == set()
+
+
+@pytest.mark.parametrize(
+    "literal",
+    ["True, str(e)", "[True]", '{"ok": True}', '{"success": True, "error": str(e)}', 'f"ok {e}"'],
+)
+def test_broad_handler_returning_a_success_literal_is_rule_a(literal: str) -> None:
+    source = f"""
+        def work():
+            try:
+                thing()
+            except Exception as e:
+                return {literal}
+        """
+    assert _rules(source) == {"A"}
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        "False, str(e)",
+        "[False, e]",
+        '{"ok": False, "error": str(e)}',
+        '{"error": str(e)}',
+        "(None, e)",
+    ],
+)
+def test_broad_handler_returning_a_failure_literal_is_clean(literal: str) -> None:
+    source = f"""
+        def work():
+            try:
+                thing()
+            except Exception as e:
+                return {literal}
+        """
+    assert _rules(source) == set()
+
+
+# ---- the command itself ----
+
+
+PLANTED = {
+    "return 0 in main": """
+import asyncio
+import sys
+
+
+async def main() -> int:
+    try:
+        await asyncio.sleep(0)
+    except Exception as e:
+        print(e)
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
+""",
+    "sys.exit(0)": """
+import sys
+
+try:
+    print("work")
+except Exception as e:
+    print(e)
+    sys.exit(0)
+""",
+    "pass": """
+try:
+    print("work")
+except Exception:
+    pass
+""",
+    "suppress": """
+import contextlib
+
+with contextlib.suppress(Exception):
+    print("work")
+""",
+}
+
+
+@pytest.mark.parametrize("name", PLANTED)
+@pytest.mark.parametrize("strict", [False, True], ids=["default", "strict"])
+def test_command_fails_on_a_planted_file_outside_examples(
+    tmp_path: Path, name: str, strict: bool
+) -> None:
+    planted = tmp_path / "planted.py"
+    planted.write_text(PLANTED[name], encoding="utf-8")
+
+    command = [sys.executable, str(TOOL_PATH), str(planted), *(["--strict"] if strict else [])]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+
+    assert result.returncode == 1, result.stdout
+    assert "[D]" in result.stdout
+
+
+def test_command_passes_a_clean_file_outside_examples(tmp_path: Path) -> None:
+    clean = tmp_path / "clean.py"
+    clean.write_text(
+        'import sys\n\ntry:\n    print("work")\nexcept Exception as e:\n'
+        "    print(e)\n    sys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(TOOL_PATH), "--strict", str(clean)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout
+
+
+# ---------------------------------------------------------------------------
+# What Rule D means by status 0, and where the main guard ends
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["False", "0.0"], ids=["false", "float"])
+def test_falsy_non_int_from_main_is_not_return_0(value: str) -> None:
+    src = f"""
+    import sys
+
+    def main():
+        try:
+            run()
+        except Exception as e:
+            print(e)
+            return {value}
+        return True
+
+    sys.exit(0 if main() else 1)
+    """
+    assert "D" not in _rules(src)
+
+
+@pytest.mark.parametrize("value", ["0, str(e)", "(0, 'failed')", "[0, str(e)]"])
+def test_a_result_led_by_0_from_main_is_return_0(value: str) -> None:
+    src = f"""
+    def main():
+        try:
+            run()
+        except Exception as e:
+            return {value}
+    """
+    assert "D" in _rules(src)
+
+
+def test_a_result_led_by_false_from_main_reports_the_failure() -> None:
+    src = """
+    def main():
+        try:
+            run()
+        except Exception as e:
+            return False, str(e)
+    """
+    assert _rules(src) == set()
+
+
+@pytest.mark.parametrize("call", ["self.exit()", "parser.exit(2)", "app.exit()"])
+def test_exit_method_of_another_object_is_not_a_process_exit_0(call: str) -> None:
+    src = f"""
+    def handle(self):
+        try:
+            run()
+        except Exception as e:
+            {call}
+    """
+    assert "D" not in _rules(src)
+
+
+def test_sys_exit_ex_ok_is_status_0() -> None:
+    src = """
+    import os
+    import sys
+
+    try:
+        run()
+    except Exception:
+        sys.exit(os.EX_OK)
+    """
+    assert "D" in _rules(src)
+
+
+def test_sys_exit_float_is_not_status_0() -> None:
+    src = """
+    import sys
+
+    try:
+        run()
+    except Exception:
+        sys.exit(0.0)
+    """
+    assert "D" not in _rules(src)
+
+
+def test_builtins_exception_is_broad() -> None:
+    src = """
+    import builtins
+
+    try:
+        run()
+    except builtins.Exception:
+        pass
+    """
+    assert "D" in _rules(src)
+
+
+def test_else_branch_of_the_main_guard_is_not_the_guard() -> None:
+    src = """
+    if __name__ == "__main__":
+        pass
+    else:
+        try:
+            run()
+        except Exception as e:
+            print(e)
+    """
+    assert "D" not in _rules(src)
+    assert "B" in _rules(src)
+
+
+def test_body_of_the_main_guard_still_is_the_guard() -> None:
+    src = """
+    if __name__ == "__main__":
+        try:
+            run()
+        except Exception as e:
+            print(e)
+    else:
+        pass
+    """
+    assert "D" in _rules(src)

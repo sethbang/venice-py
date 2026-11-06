@@ -7,7 +7,9 @@ This example demonstrates how to discover and work with AI characters in the Ven
 - Walking the whole character catalog with ``characters.iter_all()`` (``list()``
   returns a single page)
 - Analyzing tags and popularity statistics across the catalog
-- Filtering server-side with ``search``, ``tags`` and ``sort_by``
+- Filtering server-side with ``search``, ``tags``, ``model_id``, ``categories``,
+  ``is_pro``, ``sort_by`` and ``sort_order``, and paging with ``offset``
+- Bounding a walk with ``iter_all(page_size=..., max_items=...)``
 - Choosing the chat model to pair with a character
 
 Characters are user-created, and most carry no content tags at all, so the
@@ -169,28 +171,103 @@ def character_selection_guide(characters: list[Character]) -> None:
             print("   ℹ️ No characters carry these tags today.")
 
 
-async def server_side_filtering(client: VeniceClient) -> bool:
-    """Let the server filter and sort instead of downloading everything."""
+def _show_page(label: str, page: list[Character]) -> None:
+    """Print a result count and the first few non-adult results."""
+    print(f"\n   characters.list({label}) → {len(page)} results (server order):")
+    for c in [c for c in page if not is_adult(c)][:3]:
+        print(f"   • {c.name}  [{', '.join(c.tags[:4])}]")
+
+
+async def server_side_filtering(client: VeniceClient, characters: list[Character]) -> bool | None:
+    """Let the server filter and sort instead of downloading everything.
+
+    Each filter is checked only as far as its result shows it worked:
+    ``tags`` and ``model_id`` against the returned characters, ``offset`` by
+    pages that do not overlap, and ``max_items`` by the count. ``search``,
+    ``sort_order``, ``is_pro`` and ``categories`` cannot be checked that way
+    (a character lists no category and no pro flag), so their results are
+    printed for reading and decide nothing.
+
+    Returns ``None`` (section skipped) when no checkable filter returned any
+    characters, since an empty page proves nothing.
+    """
     print("\n🔎 Server-side Filtering")
     print("-" * 40)
 
-    queries = [
-        (
-            "search='teacher', sort_by='highlyRated'",
-            {"search": "teacher", "sort_by": "highlyRated"},
-        ),
-        ("tags=['Philosophy'], sort_by='imports'", {"tags": ["Philosophy"], "sort_by": "imports"}),
-    ]
-    for label, kwargs in queries:
-        try:
-            page = await client.characters.list(limit=10, is_adult=False, **kwargs)  # type: ignore[arg-type]
-        except VeniceError as e:
-            print(f"❌ {label}: {e}")
-            return False
-        shown = [c for c in page.data if not is_adult(c)][:3]
-        print(f"\n   characters.list({label}) → {len(page.data)} results (server order):")
-        for c in shown:
-            print(f"   • {c.name}  [{', '.join(c.tags[:4])}]")
+    list_characters = client.characters.list
+    problems: list[str] = []
+    checked = 0
+    try:
+        # Printed for reading: the result does not show why each one matched.
+        page = await list_characters(
+            search="teacher", sort_by="highlyRated", limit=10, is_adult=False
+        )
+        _show_page("search='teacher', sort_by='highlyRated'", page.data)
+        page = await list_characters(sort_by="imports", sort_order="asc", limit=10, is_adult=False)
+        _show_page("sort_by='imports', sort_order='asc'", page.data)
+        page = await list_characters(is_pro=True, limit=10, is_adult=False)
+        _show_page("is_pro=True", page.data)
+        page = await list_characters(categories=["Philosophy"], limit=10, is_adult=False)
+        _show_page("categories=['Philosophy']", page.data)
+
+        page = await list_characters(tags=["Philosophy"], limit=10, is_adult=False)
+        _show_page("tags=['Philosophy']", page.data)
+        if not page.data:
+            print("   ℹ️ Not checked: tags=['Philosophy'] returned no characters")
+        else:
+            checked += 1
+            if any("philosophy" not in {normalize_tag(t) for t in c.tags} for c in page.data):
+                problems.append("tags=['Philosophy'] returned a character without that tag")
+
+        counts = Counter(c.modelId for c in characters)
+        if counts:
+            model_id = counts.most_common(1)[0][0]
+            page = await list_characters(model_id=[model_id], limit=10, is_adult=False)
+            _show_page(f"model_id=[{model_id!r}]", page.data)
+            if not page.data:
+                print(f"   ℹ️ Not checked: model_id=[{model_id!r}] returned no characters")
+            else:
+                checked += 1
+                if any(c.modelId != model_id for c in page.data):
+                    problems.append(f"model_id=[{model_id!r}] returned another model's character")
+
+        first = await list_characters(
+            sort_by="mostRecent", sort_order="asc", limit=5, offset=0, is_adult=False
+        )
+        second = await list_characters(
+            sort_by="mostRecent", sort_order="asc", limit=5, offset=5, is_adult=False
+        )
+        print(f"\n   offset=0 → {len(first.data)} results, offset=5 → {len(second.data)} results")
+        if not first.data or not second.data:
+            print("   ℹ️ Not checked: offset paging needs two non-empty pages")
+        else:
+            checked += 1
+            if {c.slug for c in first.data} & {c.slug for c in second.data}:
+                problems.append("offset=0 and offset=5 returned the same character")
+
+        walked = [c async for c in client.characters.iter_all(page_size=5, max_items=7)]
+        print(f"\n   iter_all(page_size=5, max_items=7) → {len(walked)} characters")
+        if not walked:
+            print("   ℹ️ Not checked: iter_all returned no characters")
+        else:
+            checked += 1
+            # Seven from pages of five means the walk crossed a page boundary.
+            if len(walked) != 7 or len({c.slug for c in walked}) != len(walked):
+                problems.append(
+                    f"iter_all(max_items=7) yielded {len(walked)}, "
+                    f"{len({c.slug for c in walked})} distinct"
+                )
+    except VeniceError as e:
+        print(f"❌ Server-side filtering failed: {type(e).__name__}: {e}")
+        return False
+
+    for problem in problems:
+        print(f"   ❌ {problem}")
+    if problems:
+        return False
+    if not checked:
+        print("Section skipped: no checkable filter returned any characters")
+        return None
     return True
 
 
@@ -207,8 +284,9 @@ async def demonstrate_character_integration(
 
     try:
         listing = await client.models.list(type="text")
-        # Listed is not enough: a deprecated model is routed to its replacement
-        # and an offline one is not served, so only routable models count.
+        # Listed is not enough: a deprecated model may be remapped to its
+        # replacement (only with deprecation.autoRemap) and is removed later, and
+        # an offline one is not served, so only current, online models count.
         text_models = {
             m.id
             for m in listing.data
@@ -255,11 +333,15 @@ async def demonstrate_character_integration(
     print("   model = await client.models.resolve_chat(prefer='cheapest', exclude_reasoning=True)")
     print("   if char.modelId in routable:")
     print("       # A character can name any model, so price the request first.")
-    print("       estimate = await client.chat.completions.estimate_cost(")
-    print("           model=char.modelId, messages=messages, expected_completion_tokens=1500")
-    print("       )")
-    print("       if estimate.total_cost_usd <= MAX_REQUEST_USD:")
-    print("           model = char.modelId")
+    print("       try:")
+    print("           estimate = await client.chat.completions.estimate_cost(")
+    print("               model=char.modelId, messages=messages, expected_completion_tokens=1500")
+    print("           )")
+    print("       except ValueError:")
+    print("           pass  # the catalog lists no token price for it, so keep the cheap model")
+    print("       else:")
+    print("           if estimate.total_cost_usd <= MAX_REQUEST_USD:")
+    print("               model = char.modelId")
     print("   response = await client.chat.completions.create(")
     print("       model=model,")
     print("       venice_parameters={'character_slug': char.slug},")
@@ -291,7 +373,7 @@ async def main() -> int:
         ]
         character_selection_guide(characters)
         results += [
-            ("server_side_filtering", await server_side_filtering(client)),
+            ("server_side_filtering", await server_side_filtering(client, characters)),
             (
                 "demonstrate_character_integration",
                 await demonstrate_character_integration(client, characters, showcase),
@@ -312,7 +394,8 @@ async def main() -> int:
     print("   - Walking the whole catalog with characters.iter_all()")
     print("   - Merging tag spelling variants before counting")
     print("   - Ranking by rating only with enough ratings behind it")
-    print("   - Server-side search, tag filters and sorting")
+    print("   - Server-side search, filters, sorting and offset paging")
+    print("   - Bounding a walk with iter_all(max_items=...)")
     print("   - Pairing a character with a model the API serves")
     print("\n⚠️ Important Notes:")
     print("   - Characters API is currently in Preview")

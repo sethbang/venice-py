@@ -13,17 +13,23 @@ Each test mocks the underlying ``list``/``reviews``/``transactions``/
 iterator yields the right items and terminates correctly.
 """
 
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+from typing import Any, TypeVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from venice_ai._pagination import Paginator
+from venice_ai._pagination import MAX_IDLE_PAGES, Paginator, _PageResult
 from venice_ai.resources.api_keys import ApiKeys
 from venice_ai.resources.billing import Billing
 from venice_ai.resources.characters import Characters
 from venice_ai.resources.x402 import X402
 from venice_ai.types.api import ApiKey
+from venice_ai.types.api.billing import BillingUsageHistoryCsvPage
 from venice_ai.types.api.characters import (
+    CharacterReview,
     CharacterReviewsResponse,
     CharactersListResponse,
 )
@@ -32,6 +38,34 @@ from venice_ai.types.api.x402 import X402TransactionsResponse
 # ---------------------------------------------------------------------------
 # Helpers — fabricate response shapes for each endpoint
 # ---------------------------------------------------------------------------
+
+
+T = TypeVar("T")
+
+# A walk past this many items has stopped terminating.
+RUNAWAY = 50
+
+
+async def _capped(walk: AsyncIterator[T] | Paginator[T]) -> AsyncIterator[T]:
+    """Fail a walk that does not end, rather than hang the test run."""
+    count = 0
+    async for item in walk:
+        count += 1
+        if count > RUNAWAY:
+            pytest.fail("the walk did not terminate")
+        yield item
+
+
+def _review(review_id: str, rating: int) -> CharacterReview:
+    return CharacterReview.model_validate(
+        {
+            "id": review_id,
+            "characterId": "ch-1",
+            "rating": rating,
+            "message": f"r{rating}",
+            "createdAt": "2025-01-01T00:00:00Z",
+        }
+    )
 
 
 def _make_api_key(idx: int) -> ApiKey:
@@ -53,7 +87,8 @@ def _make_api_key(idx: int) -> ApiKey:
 
 
 # ---------------------------------------------------------------------------
-# api_keys.iter_all — page-based, no envelope, terminate on short page
+# api_keys.iter_all: the endpoint does not page (loopback coverage in
+# test_api_keys_iter_all_loopback.py)
 # ---------------------------------------------------------------------------
 
 
@@ -73,30 +108,25 @@ class TestApiKeysIterAll:
         assert isinstance(resource.iter_all(), Paginator)
 
     @pytest.mark.asyncio
-    async def test_exhausts_three_pages(self, resource: ApiKeys, mock_client: MagicMock) -> None:
-        # Three full pages of 2, then a short page → done
-        mock_client.get.side_effect = [
-            [
-                _make_api_key(1).model_dump(by_alias=True),
-                _make_api_key(2).model_dump(by_alias=True),
-            ],
-            [
-                _make_api_key(3).model_dump(by_alias=True),
-                _make_api_key(4).model_dump(by_alias=True),
-            ],
-            [_make_api_key(5).model_dump(by_alias=True)],  # short page → terminate
+    async def test_bare_list_response_is_one_walk(
+        self, resource: ApiKeys, mock_client: MagicMock
+    ) -> None:
+        mock_client.get.return_value = [
+            _make_api_key(1).model_dump(by_alias=True),
+            _make_api_key(2).model_dump(by_alias=True),
         ]
         ids = [k.id async for k in resource.iter_all(page_size=2)]
-        assert ids == ["key_1", "key_2", "key_3", "key_4", "key_5"]
+        assert ids == ["key_1", "key_2"]
+        assert mock_client.get.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_advances_one_based_page(self, resource: ApiKeys, mock_client: MagicMock) -> None:
-        mock_client.get.side_effect = [[], []]  # immediate empty page
+    async def test_sends_no_paging_parameters(
+        self, resource: ApiKeys, mock_client: MagicMock
+    ) -> None:
+        mock_client.get.return_value = []
         async for _ in resource.iter_all(page_size=10):
             pass
-        # First call: page=1 (1-based), limit=10
-        first_call = mock_client.get.call_args_list[0]
-        assert first_call.kwargs["params"] == {"page": 1, "limit": 10}
+        assert mock_client.get.call_args.kwargs.get("params") is None
 
     @pytest.mark.asyncio
     async def test_max_items_caps_iteration(
@@ -198,6 +228,28 @@ class TestCharactersIterAll:
         assert params["isWebEnabled"] == "true"
         assert params["search"] == "ai"
 
+    @pytest.mark.asyncio
+    async def test_server_ignoring_offset_ends_the_walk(
+        self, resource: Characters, mock_client: MagicMock
+    ) -> None:
+        mock_client.get.return_value = self._page(["a", "b"])
+        slugs = [c.slug async for c in _capped(resource.iter_all(page_size=2))]
+        assert slugs == ["a", "b"]
+        # The first page, then the bound on pages that add nothing.
+        assert mock_client.get.call_count == 1 + MAX_IDLE_PAGES
+
+    @pytest.mark.asyncio
+    async def test_repeat_across_a_page_boundary_is_yielded_once(
+        self, resource: Characters, mock_client: MagicMock
+    ) -> None:
+        mock_client.get.side_effect = [
+            self._page(["a", "b"]),
+            self._page(["b", "c"]),
+            self._page([]),
+        ]
+        slugs = [c.slug async for c in resource.iter_all(page_size=2)]
+        assert slugs == ["a", "b", "c"]
+
 
 # ---------------------------------------------------------------------------
 # characters.iter_reviews — page-based, totalPages envelope termination
@@ -221,7 +273,7 @@ class TestCharactersIterReviews:
                 "object": "list",
                 "data": [
                     {
-                        "id": f"rev-{i}",
+                        "id": f"rev-{page}-{i}",
                         "characterId": "ch-1",
                         "rating": r,
                         "message": f"r{r}",
@@ -266,6 +318,31 @@ class TestCharactersIterReviews:
         params = mock_client.get.call_args_list[0].kwargs["params"]
         assert params["pageSize"] == 7  # camelCase on the wire
         assert params["page"] == 1
+
+    @pytest.mark.asyncio
+    async def test_server_ignoring_page_ends_the_walk(
+        self, resource: Characters, mock_client: MagicMock
+    ) -> None:
+        # Echoing page 1 of 2 every time must not keep the walk alive.
+        mock_client.get.return_value = self._page([5, 4], page=1, total_pages=2)
+        ratings = [r.rating async for r in _capped(resource.iter_reviews("slug", page_size=2))]
+        assert ratings == [5, 4]
+        assert mock_client.get.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_echoed_page_does_not_extend_the_walk(
+        self, resource: Characters, mock_client: MagicMock
+    ) -> None:
+        # The server's echo says page 1 of 2 on the second request: two were promised.
+        mock_client.get.side_effect = [
+            self._page([5], page=1, total_pages=2),
+            self._page([3], page=1, total_pages=2).model_copy(
+                update={"data": [_review("rev-other", 3)]}
+            ),
+        ]
+        ratings = [r.rating async for r in _capped(resource.iter_reviews("slug", page_size=1))]
+        assert ratings == [5, 3]
+        assert mock_client.get.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +411,30 @@ class TestX402IterTransactions:
         ids = [t.id async for t in resource.iter_transactions(auth=fake_auth, page_size=2)]
         assert ids == ["t1", "t2", "t3", "t4", "t5"]
         assert mock_client.get.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_server_ignoring_offset_ends_the_walk(
+        self,
+        resource: X402,
+        mock_client: MagicMock,
+        fake_auth: MagicMock,
+    ) -> None:
+        mock_client.get.return_value = self._page(["t1", "t2"], has_more=True)
+        ids = [t.id async for t in _capped(resource.iter_transactions(auth=fake_auth, page_size=2))]
+        assert ids == ["t1", "t2"]
+        assert mock_client.get.call_count == 1 + MAX_IDLE_PAGES
+
+    @pytest.mark.asyncio
+    async def test_empty_page_claiming_more_ends_the_walk(
+        self,
+        resource: X402,
+        mock_client: MagicMock,
+        fake_auth: MagicMock,
+    ) -> None:
+        mock_client.get.return_value = self._page([], has_more=True)
+        ids = [t.id async for t in _capped(resource.iter_transactions(auth=fake_auth, page_size=2))]
+        assert ids == []
+        assert mock_client.get.call_count == MAX_IDLE_PAGES
 
 
 # ---------------------------------------------------------------------------
@@ -413,3 +514,170 @@ class TestBillingIterUsageHistory:
         # Continuation carries ONLY the cursor.
         second_params = mock_client._request.call_args_list[1].kwargs["params"]
         assert second_params == {"cursor": "CURSOR_2"}
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_cursor_ends_the_walk(
+        self, resource: Billing, mock_client: MagicMock
+    ) -> None:
+        mock_client._request.side_effect = [
+            self._page([0.10], next_cursor="CURSOR_2"),
+            self._page([0.20], next_cursor="CURSOR_2"),
+            self._page([0.30], next_cursor="CURSOR_2"),
+        ]
+        amounts = [e.amount async for e in _capped(resource.iter_usage_history(page_size=10))]
+        assert amounts == [0.10, 0.20]
+        assert mock_client._request.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_cursor_cycle_ends_the_walk(
+        self, resource: Billing, mock_client: MagicMock
+    ) -> None:
+        mock_client._request.side_effect = [
+            self._page([0.10], next_cursor="A"),
+            self._page([0.20], next_cursor="B"),
+            self._page([0.30], next_cursor="A"),
+            self._page([0.40], next_cursor="B"),
+        ]
+        amounts = [e.amount async for e in _capped(resource.iter_usage_history(page_size=10))]
+        assert amounts == [0.10, 0.20, 0.30]
+
+    @pytest.mark.asyncio
+    async def test_csv_walk_stops_on_a_repeated_cursor(
+        self, resource: Billing, mock_client: MagicMock
+    ) -> None:
+        page = BillingUsageHistoryCsvPage(content=b"a,b\n", nextCursor="CURSOR_2")
+        resource.get_usage_history = AsyncMock(return_value=page)  # type: ignore[method-assign]
+        pages = [p async for p in _capped(resource.iter_usage_history_csv())]
+        assert len(pages) == 2
+        assert resource.get_usage_history.await_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Paginator
+# ---------------------------------------------------------------------------
+
+
+class TestPaginatorKey:
+    @staticmethod
+    def _fetcher(pages: list[list[int]], has_more: bool = True) -> AsyncMock:
+        async def fetch(index: int) -> _PageResult[int]:
+            return _PageResult(items=pages[min(index, len(pages) - 1)], has_more=has_more)
+
+        return AsyncMock(side_effect=fetch)
+
+    @pytest.mark.asyncio
+    async def test_keyed_walk_does_not_count_repeats_against_max_items(self) -> None:
+        fetch = self._fetcher([[1, 2], [2, 3], [3, 4]])
+        paginator = Paginator(fetch, key=lambda n: n, max_items=3)
+        assert [n async for n in paginator] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_keyed_walk_stops_on_a_page_with_nothing_new(self) -> None:
+        fetch = self._fetcher([[1, 2]])
+        paginator = Paginator(fetch, key=lambda n: n)
+        assert [n async for n in _capped(paginator)] == [1, 2]
+        assert fetch.await_count == 1 + MAX_IDLE_PAGES
+
+    @pytest.mark.asyncio
+    async def test_second_walk_starts_with_nothing_seen(self) -> None:
+        fetch = self._fetcher([[1, 2]], has_more=False)
+        paginator = Paginator(fetch, key=lambda n: n)
+        assert [n async for n in paginator] == [1, 2]
+        assert [n async for n in paginator] == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_unkeyed_walk_yields_repeats_and_keeps_going(self) -> None:
+        pages = [[1], [1], [2]]
+
+        async def fetch(index: int) -> _PageResult[int]:
+            return _PageResult(items=pages[index], has_more=index < 2)
+
+        assert [n async for n in Paginator(fetch)] == [1, 1, 2]
+
+
+# ---------------------------------------------------------------------------
+# Paginator: pages that add nothing
+# ---------------------------------------------------------------------------
+
+
+def _walk(pages: list[list[int]], *, keyed: bool = True, last_says_more: bool = False) -> Any:
+    """A paginator over *pages*; a page past the end repeats the last one."""
+    fetched: list[int] = []
+
+    async def fetch(index: int) -> _PageResult[int]:
+        fetched.append(index)
+        items = pages[min(index, len(pages) - 1)]
+        return _PageResult(items=items, has_more=last_says_more or index < len(pages) - 1)
+
+    walk = Paginator(fetch, key=(lambda item: item) if keyed else None)
+    return walk, fetched
+
+
+class TestPagesThatAddNothing:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("keyed", [True, False], ids=["keyed", "unkeyed"])
+    async def test_a_leading_empty_page_does_not_end_the_walk(self, keyed: bool) -> None:
+        walk, _ = _walk([[], [1]], keyed=keyed)
+        assert [item async for item in walk] == [1]
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_page_does_not_lose_what_follows_it(self) -> None:
+        walk, _ = _walk([[1, 2], [1, 2], [3]])
+        assert [item async for item in walk] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_empty_pages_mixed_with_repeats_lose_nothing_within_the_bound(self) -> None:
+        walk, _ = _walk([[1], [], [1], [2]])
+        assert [item async for item in walk] == [1, 2]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("keyed", [True, False], ids=["keyed", "unkeyed"])
+    async def test_endless_empty_pages_end_the_walk(self, keyed: bool) -> None:
+        walk, fetched = _walk([[]], keyed=keyed, last_says_more=True)
+        assert [item async for item in walk] == []
+        assert len(fetched) == MAX_IDLE_PAGES
+
+    @pytest.mark.asyncio
+    async def test_an_endlessly_repeated_page_ends_the_walk(self) -> None:
+        walk, fetched = _walk([[1, 2]], last_says_more=True)
+        assert [item async for item in walk] == [1, 2]
+        assert len(fetched) == 1 + MAX_IDLE_PAGES
+
+    @pytest.mark.asyncio
+    async def test_empty_and_repeated_pages_in_turn_end_the_walk(self) -> None:
+        pages = [[1], []]
+        fetched: list[int] = []
+
+        async def fetch(index: int) -> _PageResult[int]:
+            fetched.append(index)
+            return _PageResult(items=pages[index % 2], has_more=True)
+
+        assert [item async for item in Paginator(fetch, key=lambda item: item)] == [1]
+        assert len(fetched) == 1 + MAX_IDLE_PAGES
+
+    @pytest.mark.asyncio
+    async def test_a_page_that_adds_something_resets_the_bound(self) -> None:
+        idle = [[]] * (MAX_IDLE_PAGES - 1)
+        walk, _ = _walk([[1], *idle, [2], *idle, [3]])
+        assert [item async for item in walk] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_stopping_early_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        walk, _ = _walk([[]], last_says_more=True)
+        with caplog.at_level(logging.WARNING, logger="venice_ai._pagination"):
+            assert [item async for item in walk] == []
+        assert "more" in caplog.text
+
+
+def test_every_paginator_in_these_tests_is_bounded() -> None:
+    """A walk that never ends must fail on the guard in conftest.py, not hang."""
+
+    async def endless(_index: int) -> _PageResult[int]:
+        return _PageResult(items=[1], has_more=True)
+
+    async def walk_it() -> None:
+        async for _item in Paginator(endless):
+            pass
+
+    with pytest.raises(pytest.fail.Exception, match="did not terminate"):
+        asyncio.run(walk_it())

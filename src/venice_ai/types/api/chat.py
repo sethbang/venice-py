@@ -9,7 +9,17 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Final, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+)
 
 from ...core.models.common import (
     KNOWN_WEB_SEARCH_MODES,
@@ -255,6 +265,63 @@ class LogProbToken(BaseModel):
     )
 
 
+class ChatChoiceLogprobs(BaseModel):
+    """Log probabilities of a completion choice, in whichever form the server sent.
+
+    The API's specification describes one flat token (``token``, ``logprob``,
+    ``bytes``, ``top_logprobs``). OpenAI-compatible servers send
+    ``{"content": [...]}``, one entry per token. :attr:`tokens` reads either.
+
+    A value :attr:`tokens` cannot read does not fail the response: :attr:`tokens`
+    is empty and :attr:`raw` holds what was sent, including a mapping of other keys
+    such as the legacy ``{"tokens": [...], "token_logprobs": [...]}``. The
+    :attr:`tokens` property hides a server's own ``tokens`` key: read that through
+    :attr:`raw`, or through ``model_extra["tokens"]`` when it came beside a form
+    :attr:`tokens` can read.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    token: str | None = Field(default=None, description="The token string (flat form)")
+    logprob: float | None = Field(
+        default=None, description="The log probability of this token (flat form)"
+    )
+    bytes: list[int] | None = Field(default=None, description="Raw bytes of the token (flat form)")
+    top_logprobs: list[LogProbToken] | None = Field(
+        default=None, description="Top tokens considered at this position (flat form)"
+    )
+    content: list[LogProbToken] | None = Field(
+        default=None, description="One entry per token (OpenAI-compatible form)"
+    )
+
+    _raw: Any = PrivateAttr(default=None)
+
+    @property
+    def tokens(self) -> list[LogProbToken]:
+        """Every token this holds, in order, from either form."""
+        if self.content is not None:
+            return self.content
+        if self.token is None or self.logprob is None:
+            return []
+        return [
+            LogProbToken(
+                token=self.token,
+                logprob=self.logprob,
+                bytes=self.bytes,
+                top_logprobs=self.top_logprobs,
+            )
+        ]
+
+    @property
+    def raw(self) -> Any:
+        """The value sent, when :attr:`tokens` cannot read it; otherwise ``None``."""
+        return self._raw
+
+    @model_serializer(mode="wrap")
+    def _serialize_as_received(self, handler: SerializerFunctionWrapHandler) -> Any:
+        return handler(self) if self._raw is None else self._raw
+
+
 KNOWN_FINISH_REASONS: Final[tuple[str, ...]] = (
     "stop",
     "length",
@@ -290,15 +357,31 @@ class ChatChoice(BaseModel):
             "KNOWN_FINISH_REASONS."
         ),
     )
-    logprobs: LogProbToken | None = None
+    logprobs: ChatChoiceLogprobs | None = None
     """Log probability information for tokens in this completion.
 
     Only present if ``logprobs`` parameter was set to ``True`` in the
     request. Contains probability information for understanding model
-    confidence in token selections.
+    confidence in token selections. Read ``logprobs.tokens``, which works for
+    both forms a server may send.
     """
 
     stop_reason: str | None = Field(default=None, description="The reason the completion stopped")
+
+    @field_validator("logprobs", mode="wrap")
+    @classmethod
+    def _keep_unexpected_logprobs(cls, v: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+        if isinstance(v, LogProbToken):
+            v = v.model_dump()
+        try:
+            parsed = handler(v)
+        except ValidationError:
+            unparsed = ChatChoiceLogprobs()
+            unparsed._raw = v
+            return unparsed
+        if v and isinstance(v, dict) and parsed.content is None and not parsed.tokens:
+            parsed._raw = v
+        return parsed
 
     @field_validator("stop_reason", mode="before")
     @classmethod
@@ -714,6 +797,7 @@ __all__ = [
     "ChatMessageImageContent",
     "ChatMessageImageUrl",
     "ChatMessageTextContent",
+    "ChatChoiceLogprobs",
     "LogProbToken",
     "ChatChoice",
     "ChatUsage",

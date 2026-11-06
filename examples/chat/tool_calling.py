@@ -8,21 +8,28 @@ by driving the tool-call round trip by hand. (``agent_loop.py`` shows the
 batteries-included ``run_with_tools`` helper that automates the same loop.)
 It showcases:
 
-- Basic function/tool definition and calling
+- Defining a tool from a Pydantic model (``tool_from_model``) and validating
+  the model's arguments with ``call.function.parse_as``
 - Processing function call results: executing the tool, returning a
   ``ToolMessage`` and getting a final answer grounded in the tool output
 - Multiple tools with different schemas, called in parallel
+- A tool defined from a plain function (``tool_from_function``)
 - Tool choice control (none, specific function; auto is the default)
 - Error handling for function calls: a tool that raises, reported back to the
   model so it can respond gracefully
+
+Cost: about eight short requests on the cheapest model with function calling
+that can switch reasoning off, typically under $0.002 in total.
 """
 
 import asyncio
 import json
 import sys
 import textwrap
-from pathlib import Path
 from typing import Any, Literal
+
+from _helpers import completion_cap, states_number, states_reading
+from pydantic import BaseModel, Field, ValidationError
 
 from venice_ai import (
     AssistantMessage,
@@ -34,23 +41,15 @@ from venice_ai import (
     VeniceClient,
     VeniceError,
     tool_from_function,
+    tool_from_model,
 )
 from venice_ai.types.api.chat import ChatCompletionResponse
 from venice_ai.types.api.requests import VeniceParameters
 from venice_ai.types.api.requests.common import Tool, ToolFunction
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import states_number, states_reading  # noqa: E402
-
-# The cheapest function-calling model is often a reasoning model, which spends
-# part of the completion budget thinking before it emits a tool call or an
-# answer. Small reasoning models vary widely in how long they think, so the cap
-# leaves several thousand tokens of headroom over any answer here.
-MAX_COMPLETION_TOKENS = 16384
-
 # The tool definitions and the user message are all the context these requests
 # need, so Venice's own system prompt is left out.
-PARAMS = VeniceParameters(include_venice_system_prompt=False)
+NO_VENICE_PROMPT = VeniceParameters(include_venice_system_prompt=False)
 
 # Canned data so the example is deterministic: (temperature °C, conditions).
 _WEATHER_TABLE = {
@@ -59,13 +58,16 @@ _WEATHER_TABLE = {
 }
 
 
-def get_weather(
-    location: str,
-    unit: Literal["celsius", "fahrenheit"] = "fahrenheit",
-) -> str:
+class GetWeather(BaseModel):
     """Get the current weather for a specific location."""
-    # Stand-in for a real weather API call. The docstring above is what the
-    # model sees as the tool description.
+
+    location: str = Field(description="City name, for example Paris")
+    unit: Literal["celsius", "fahrenheit"] = "fahrenheit"
+
+
+def get_weather(args: GetWeather) -> str:
+    """Stand-in for a real weather API call, taking validated arguments."""
+    location, unit = args.location, args.unit
     temp_c, sky = _WEATHER_TABLE.get(location.lower(), (18, "partly cloudy"))
     temp = temp_c if unit == "celsius" else round(temp_c * 9 / 5 + 32)
     symbol = "°C" if unit == "celsius" else "°F"
@@ -86,22 +88,21 @@ def _print_answer(label: str, text: str) -> None:
     print(textwrap.indent(text.strip() or "(empty)", "      "))
 
 
-def _cut_off(response: ChatCompletionResponse) -> str | None:
+def _cut_off(response: ChatCompletionResponse, cap: int) -> str | None:
     """Say why an answer may be truncated, or return ``None`` if it finished.
 
-    Some models report an answer cut off at the cap as ``finish_reason="stop"``,
-    so the completion-token count is checked against the cap as well.
+    ``cap`` is the request's ``max_completion_tokens``. Some models report an
+    answer cut off at the cap as ``finish_reason="stop"``, so the completion-token
+    count is checked against the cap as well.
     """
     finish_reason = response.choices[0].finish_reason if response.choices else None
     used = response.usage.completion_tokens if response.usage else None
-    if finish_reason == "length" or used is None or used >= MAX_COMPLETION_TOKENS:
-        return (
-            f"finish_reason={finish_reason!r}, completion tokens {used} of {MAX_COMPLETION_TOKENS}"
-        )
+    if finish_reason == "length" or used is None or used >= cap:
+        return f"finish_reason={finish_reason!r}, completion tokens {used} of {cap}"
     return None
 
 
-async def basic_function_calling(client: VeniceClient, model_id: str) -> bool:
+async def basic_function_calling(client: VeniceClient, model_id: str, cap: int) -> bool:
     """Complete one full tool round trip with a weather tool.
 
     1. The model asks for ``get_weather``.
@@ -114,12 +115,12 @@ async def basic_function_calling(client: VeniceClient, model_id: str) -> bool:
     print("🔧 Basic Function Calling (full round trip)")
     print("-" * 40)
 
-    # ``tool_from_function`` introspects type hints + docstring to build the
-    # JSON schema the model sees.
-    weather_tool = tool_from_function(get_weather)
-    assert weather_tool.function is not None  # tool_from_function always sets .function
+    # ``tool_from_model`` builds the JSON schema the model sees from a Pydantic
+    # model: its fields become the parameters, its docstring the description.
+    weather_tool = tool_from_model(GetWeather, name="get_weather")
+    assert weather_tool.function is not None  # tool_from_model always sets .function
 
-    print("🛠️ Tool Definition (built by tool_from_function):")
+    print("🛠️ Tool Definition (built by tool_from_model):")
     print(f"   Function: {weather_tool.function.name}")
     print(f"   Description: {weather_tool.function.description}")
 
@@ -134,8 +135,8 @@ async def basic_function_calling(client: VeniceClient, model_id: str) -> bool:
             messages=messages,
             tools=[weather_tool],
             tool_choice="auto",
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
-            venice_parameters=PARAMS,
+            max_completion_tokens=cap,
+            venice_parameters=NO_VENICE_PROMPT,
         )
         choice = _first_choice(first)
         print(f"\n1️⃣ Model turn finish reason: {choice.finish_reason}")
@@ -154,12 +155,18 @@ async def basic_function_calling(client: VeniceClient, model_id: str) -> bool:
             if call.function is None:
                 print(f"❌ Unexpected {call.type!r} tool call: {call.model_extra}")
                 return False
-            args = call.function.arguments_dict
-            print(f"   🔧 {call.function.name}({args})  id={call.id}")
+            print(f"   🔧 {call.function.name}({call.function.arguments})  id={call.id}")
             if call.function.name != "get_weather":
                 print(f"❌ Unexpected tool requested: {call.function.name}")
                 return False
-            result = get_weather(**args)
+            # Model output is untrusted input: parse_as validates it against the
+            # same model the schema came from before any tool code runs.
+            try:
+                args = call.function.parse_as(GetWeather)
+            except ValidationError as e:
+                print(f"❌ The model sent arguments get_weather does not accept:\n{e}")
+                return False
+            result = get_weather(args)
             print(f"   📦 Tool result: {result}")
             tool_outputs.append(result)
             messages.append(ToolMessage(tool_call_id=call.id, content=result))
@@ -169,8 +176,8 @@ async def basic_function_calling(client: VeniceClient, model_id: str) -> bool:
             model=model_id,
             messages=messages,
             tools=[weather_tool],
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
-            venice_parameters=PARAMS,
+            max_completion_tokens=cap,
+            venice_parameters=NO_VENICE_PROMPT,
         )
     except VeniceError as e:
         print(f"❌ Request failed ({type(e).__name__}): {e}")
@@ -181,7 +188,7 @@ async def basic_function_calling(client: VeniceClient, model_id: str) -> bool:
     print(f"\n2️⃣ Final turn finish reason: {final_choice.finish_reason}")
     _print_answer("Final answer", answer)
 
-    truncated = _cut_off(final)
+    truncated = _cut_off(final, cap)
     if final_choice.finish_reason != "stop" or truncated:
         print(f"❌ Expected a finished answer ({truncated or final_choice.finish_reason!r})")
         return False
@@ -192,7 +199,7 @@ async def basic_function_calling(client: VeniceClient, model_id: str) -> bool:
     return True
 
 
-async def multiple_tools_example(client: VeniceClient, model_id: str) -> bool:
+async def multiple_tools_example(client: VeniceClient, model_id: str, cap: int) -> bool:
     """Request two independent tools in one turn (parallel function calling).
 
     Returns ``True`` only if the model called both tools with valid arguments.
@@ -271,8 +278,8 @@ async def multiple_tools_example(client: VeniceClient, model_id: str) -> bool:
             tools=tools,
             tool_choice="auto",
             parallel_tool_calls=True,
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
-            venice_parameters=PARAMS,
+            max_completion_tokens=cap,
+            venice_parameters=NO_VENICE_PROMPT,
         )
     except VeniceError as e:
         print(f"❌ Request failed ({type(e).__name__}): {e}")
@@ -283,7 +290,7 @@ async def multiple_tools_example(client: VeniceClient, model_id: str) -> bool:
     print(f"\n🏁 Finish reason: {choice.finish_reason}")
     print(f"✉️ {len(tool_calls)} tool call(s) made:")
     for i, tool_call in enumerate(tool_calls, 1):
-        print(f"   {i}. {tool_call.function.name}({tool_call.function.arguments_dict})")
+        print(f"   {i}. {tool_call.function.name}({tool_call.function.arguments})")
 
     names = {call.function.name for call in tool_calls}
     missing = {"calculate_area", "get_random_fact"} - names
@@ -293,9 +300,14 @@ async def multiple_tools_example(client: VeniceClient, model_id: str) -> bool:
         return False
 
     for call in tool_calls:
-        args = call.function.arguments_dict
+        try:
+            args = call.function.arguments_dict
+        except (TypeError, ValueError) as e:
+            print(f"❌ {call.function.name} received unreadable arguments: {e}")
+            return False
         if call.function.name == "calculate_area":
-            if sorted([args.get("width"), args.get("height")]) != [3, 5]:
+            # The pair compares unsorted both ways: a missing dimension reads None.
+            if (args.get("width"), args.get("height")) not in ((5, 3), (3, 5)):
                 print(f"❌ calculate_area received the wrong dimensions: {args}")
                 return False
         elif call.function.name == "get_random_fact":
@@ -315,7 +327,7 @@ async def multiple_tools_example(client: VeniceClient, model_id: str) -> bool:
     return True
 
 
-async def tool_choice_control(client: VeniceClient, model_id: str) -> bool:
+async def tool_choice_control(client: VeniceClient, model_id: str, cap: int) -> bool:
     """Show how ``tool_choice`` changes whether the model calls a tool.
 
     - ``"auto"`` (the default, used in the sections above): the model decides.
@@ -371,8 +383,8 @@ async def tool_choice_control(client: VeniceClient, model_id: str) -> bool:
                 # A reasoning model barred from its tools can deliberate until
                 # it runs out of tokens; this one-step question needs no reasoning.
                 reasoning_effort="none",
-                max_completion_tokens=MAX_COMPLETION_TOKENS,
-                venice_parameters=PARAMS,
+                max_completion_tokens=cap,
+                venice_parameters=NO_VENICE_PROMPT,
             )
         except VeniceError as e:
             print(f"   ❌ Request failed ({type(e).__name__}): {e}")
@@ -384,14 +396,14 @@ async def tool_choice_control(client: VeniceClient, model_id: str) -> bool:
         print(f"   🏁 Finish reason: {choice.finish_reason}")
         if tool_calls:
             call = tool_calls[0]
-            print(f"   🔧 Tool called: {call.function.name}({call.function.arguments_dict})")
+            print(f"   🔧 Tool called: {call.function.name}({call.function.arguments})")
             outcome = "tool"
         else:
             content = (response.text or "").strip()
             shown = content if len(content) <= 100 else content[:100] + "..."
             print(f"   💬 Direct response: {shown}")
             outcome = "text"
-            truncated = _cut_off(response)
+            truncated = _cut_off(response, cap)
             if truncated:
                 print(f"   ❌ The direct answer may be cut off ({truncated})")
                 ok = False
@@ -436,7 +448,7 @@ def calculate(
     raise ToolExecutionError(f"unsupported operation {operation!r}")
 
 
-async def tool_error_handling(client: VeniceClient, model_id: str) -> bool:
+async def tool_error_handling(client: VeniceClient, model_id: str, cap: int) -> bool:
     """Report a failing tool back to the model instead of crashing.
 
     We force a call to ``calculate`` with a question whose arguments make the
@@ -449,6 +461,7 @@ async def tool_error_handling(client: VeniceClient, model_id: str) -> bool:
     print("\n🧯 Error Handling for Function Calls")
     print("-" * 40)
 
+    # ``tool_from_function`` builds the schema from type hints and the docstring.
     calc_tool = tool_from_function(calculate)
     messages: list[Any] = [
         SystemMessage(content="Reply in plain text. Do not use LaTeX or Markdown math."),
@@ -461,8 +474,8 @@ async def tool_error_handling(client: VeniceClient, model_id: str) -> bool:
             messages=messages,
             tools=[calc_tool],
             tool_choice=ToolChoice.function("calculate"),
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
-            venice_parameters=PARAMS,
+            max_completion_tokens=cap,
+            venice_parameters=NO_VENICE_PROMPT,
         )
         tool_calls = _first_choice(first).message.tool_calls or []
         if not tool_calls:
@@ -473,17 +486,17 @@ async def tool_error_handling(client: VeniceClient, model_id: str) -> bool:
         tool_errors = 0
         argument_errors = 0
         for call in tool_calls:
-            args = call.function.arguments_dict
-            print(f"   🔧 {call.function.name}({args})")
+            print(f"   🔧 {call.function.name}({call.function.arguments})")
             try:
-                content = str(calculate(**args))
+                content = str(calculate(**call.function.arguments_dict))
             except ToolExecutionError as e:
                 # Tell the model what went wrong so it can respond sensibly.
                 tool_errors += 1
                 content = f"Error: {e}"
-            except TypeError as e:
-                # Arguments that don't match the function signature are also
-                # reported back, but they are not the failure this section shows.
+            except (TypeError, ValueError) as e:
+                # Arguments that are not JSON or don't match the function signature
+                # are also reported back, but they are not the failure this section
+                # shows.
                 argument_errors += 1
                 content = f"Error: invalid arguments ({e})"
             print(f"   📦 Tool result sent back: {content}")
@@ -502,8 +515,8 @@ async def tool_error_handling(client: VeniceClient, model_id: str) -> bool:
             messages=messages,
             tools=[calc_tool],
             tool_choice="none",
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
-            venice_parameters=PARAMS,
+            max_completion_tokens=cap,
+            venice_parameters=NO_VENICE_PROMPT,
         )
     except VeniceError as e:
         print(f"❌ Request failed ({type(e).__name__}): {e}")
@@ -513,7 +526,7 @@ async def tool_error_handling(client: VeniceClient, model_id: str) -> bool:
     answer = final.text or ""
     print(f"\n🏁 Finish reason: {final_choice.finish_reason}")
     _print_answer("Model's reply after the tool error", answer)
-    truncated = _cut_off(final)
+    truncated = _cut_off(final, cap)
     if final_choice.finish_reason != "stop" or truncated or not answer.strip():
         print("❌ The model did not produce a complete reply after the tool error")
         if truncated:
@@ -574,12 +587,15 @@ async def main() -> int:
             print(f"SKIPPED: no function-calling model accepts reasoning_effort='none' ({e})")
             return 77
         print(f"🤖 Using model: {model_id}\n")
+        # The cheapest function-calling model is often a reasoning model, which
+        # spends part of the budget thinking before it emits a tool call.
+        cap = await completion_cap(client, model_id)
 
         results: list[tuple[str, bool]] = [
-            ("basic_function_calling", await basic_function_calling(client, model_id)),
-            ("multiple_tools_example", await multiple_tools_example(client, model_id)),
-            ("tool_choice_control", await tool_choice_control(client, model_id)),
-            ("tool_error_handling", await tool_error_handling(client, model_id)),
+            ("basic_function_calling", await basic_function_calling(client, model_id, cap)),
+            ("multiple_tools_example", await multiple_tools_example(client, model_id, cap)),
+            ("tool_choice_control", await tool_choice_control(client, model_id, cap)),
+            ("tool_error_handling", await tool_error_handling(client, model_id, cap)),
         ]
 
     function_calling_best_practices()
@@ -591,7 +607,8 @@ async def main() -> int:
 
     print("\n✨ Function calling examples completed!")
     print("\n💡 Key concepts demonstrated:")
-    print("   - Tool definitions via tool_from_function and explicit Tool schemas")
+    print("   - Tool definitions via tool_from_model, tool_from_function and explicit Tool")
+    print("   - Validating arguments with call.function.parse_as")
     print("   - The full round trip: tool_calls → ToolMessage → final answer")
     print("   - Parallel function calling")
     print("   - Tool choice control strategies")
@@ -606,9 +623,5 @@ if __name__ == "__main__":
         print("\n👋 Goodbye!")
         sys.exit(130)
     except Exception as e:
-        print(f"\n❌ Error: {e}", file=sys.stderr)
-        print(
-            "Check that your API key is valid and you have a model that supports function calling.",
-            file=sys.stderr,
-        )
+        print(f"\n❌ Error: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

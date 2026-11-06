@@ -4,29 +4,34 @@ Venice AI SDK - Speech-to-Text Transcription
 =============================================
 
 This example demonstrates how to transcribe audio to text using the Venice AI SDK.
-Learn how to convert speech audio into text with word-level timestamps, different
-input methods, and model discovery.
+Learn how to convert speech audio into text with timestamps (word, segment and
+character timings, which vary by model), different input methods, and model
+discovery.
 
 The demo is self-contained: it first generates a short TTS audio clip, then
 transcribes it back to text — a complete round-trip without external audio files.
 Each transcript is compared with the text that was spoken, so a wrong or empty
 transcription fails the run. With no TTS model to make the clips or no ASR model
 to transcribe them, the example skips and exits 77.
+
+Cost: four short TTS clips and about ten transcriptions, about half a cent at the
+cheapest listed prices. The timestamp and plain-text demos can try several ASR
+models, each billed, until one returns what they need.
 """
 
 import asyncio
 import io
-import re
 import sys
 import wave
+from collections.abc import Sequence
 from pathlib import Path
+
+from _helpers import EXIT_SKIPPED, tts_default_format, tts_formats, tts_spec, word_overlap
 
 from venice_ai import NoMatchingModelError, VeniceClient
 from venice_ai.exceptions import AuthenticationError, PaymentRequiredError, VeniceError
 from venice_ai.types.api import ASRModelPricing
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import tts_default_format, tts_formats, tts_spec  # noqa: E402
+from venice_ai.types.api.audio import TranscriptionChar, TranscriptionSegment
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/audio/).
@@ -36,22 +41,8 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 #: Minimum share of the spoken words a transcript must contain.
 MIN_OVERLAP = 0.8
 
-#: Exit status for a run that skipped because a prerequisite is missing.
-EXIT_SKIPPED = 77
-
 #: Paths written by this run, listed at the end on success.
 WRITTEN: list[Path] = []
-
-
-def _words(text: str) -> list[str]:
-    return re.findall(r"\w+", text.lower())
-
-
-def word_overlap(expected: str, actual: str) -> float:
-    """Fraction of the expected words that appear in the transcript."""
-    want = _words(expected)
-    got = set(_words(actual))
-    return sum(w in got for w in want) / len(want) if want else 0.0
 
 
 def check_transcript(expected: str, actual: str, indent: str = "") -> bool:
@@ -136,15 +127,40 @@ async def basic_transcription(client: VeniceClient, clips: ClipMaker, asr_model:
         print(f"❌ Error: {e}")
         return False
 
-    print(f"✅ Transcription: {result.text}")
+    print(f"📝 Transcription: {result.text}")
     return check_transcript(sample_text, result.text)
 
 
+def check_timing_spans(
+    label: str,
+    spans: Sequence[TranscriptionSegment] | Sequence[TranscriptionChar],
+    limit: float,
+) -> bool:
+    """Check optional segment or character timings, when the model returned any.
+
+    ``result.timestamps`` holds ``word``, ``segment`` and ``char`` lists, and
+    which of them a model fills varies. An absent list is not a failure. A list
+    that is present must be in order and end within the clip.
+    """
+    if not spans:
+        print(f"ℹ️ No {label} timings from this model")
+        return True
+    starts = [s.start for s in spans if s.start is not None]
+    ends = [s.end for s in spans if s.end is not None]
+    print(f"⏱️ {len(spans)} {label} timings; first {spans[0].start} → {spans[0].end}")
+    if not starts or not ends or starts != sorted(starts) or max(ends) > limit:
+        print(f"❌ {label} timings are missing, out of order, or run past the end of the clip")
+        return False
+    return True
+
+
 async def transcription_with_timestamps(client: VeniceClient, clips: ClipMaker) -> bool:
-    """Use timestamps=True to get word-level timing data.
+    """Use timestamps=True to get word, segment and character timing data.
 
     The catalog does not say which ASR models return word timings, so this
     asks each model in turn, cheapest first, and uses the first one that does.
+    Support varies by model: segment and character timings are read from
+    ``result.timestamps`` when that model returns them.
     """
     print("\n⏱️ Transcription with Word-Level Timestamps")
     print("-" * 40)
@@ -174,7 +190,7 @@ async def transcription_with_timestamps(client: VeniceClient, clips: ClipMaker) 
             continue
 
         print(f"🎤 Word timings from: {asr_model}")
-        print(f"✅ Full text: {result.text}")
+        print(f"📝 Full text: {result.text}")
         print(f"\n⏱️ Word-level timestamps ({len(result.words)} words):")
         for word_info in result.words:
             start = f"{word_info.start:.2f}s" if word_info.start is not None else "N/A"
@@ -188,7 +204,12 @@ async def transcription_with_timestamps(client: VeniceClient, clips: ClipMaker) 
             print("❌ Timings are missing, out of order, or run past the end of the clip")
             return False
         print(f"📐 Timings are in order and end within the clip ({max(ends):.2f}s)")
-        return check_transcript(sample_text, result.text)
+        timestamps = result.timestamps
+        segments = (timestamps.segment if timestamps else None) or []
+        chars = (timestamps.char if timestamps else None) or []
+        spans_ok = check_timing_spans("segment", segments, limit)
+        spans_ok = check_timing_spans("character", chars, limit) and spans_ok
+        return check_transcript(sample_text, result.text) and spans_ok
 
     print(f"❌ None of the {len(candidates)} ASR models returned word timings")
     return False
@@ -207,18 +228,18 @@ async def different_input_methods(client: VeniceClient, clips: ClipMaker, asr_mo
 
         print("\n1️⃣ Input method: file path (str)")
         result = await client.audio.transcribe(file=str(audio_path), model=asr_model)
-        print(f"   ✅ Result: {result.text}")
+        print(f"   📝 Result: {result.text}")
         ok = check_transcript(sample_text, result.text, "   ") and ok
 
         print("\n2️⃣ Input method: bytes")
         result = await client.audio.transcribe(file=audio_path.read_bytes(), model=asr_model)
-        print(f"   ✅ Result: {result.text}")
+        print(f"   📝 Result: {result.text}")
         ok = check_transcript(sample_text, result.text, "   ") and ok
 
         print("\n3️⃣ Input method: BinaryIO (open file)")
         with open(audio_path, "rb") as f:
             result = await client.audio.transcribe(file=f, model=asr_model)
-        print(f"   ✅ Result: {result.text}")
+        print(f"   📝 Result: {result.text}")
         ok = check_transcript(sample_text, result.text, "   ") and ok
     except VeniceError as e:
         print(f"❌ Error: {e}")
@@ -271,8 +292,8 @@ async def response_format_options(client: VeniceClient, clips: ClipMaker, asr_mo
         result = await client.audio.transcribe(
             file=str(audio_path), model=asr_model, response_format="json"
         )
-        print(f"   ✅ type: {type(result).__name__}")
-        print(f"   ✅ text: {result.text}")
+        print(f"   📝 type: {type(result).__name__}")
+        print(f"   📝 text: {result.text}")
         if result.duration is not None:
             print(f"   📏 duration: {result.duration:.2f}s")
         ok = check_transcript(sample_text, result.text, "   ") and ok
@@ -300,8 +321,8 @@ async def response_format_options(client: VeniceClient, clips: ClipMaker, asr_mo
                 break
             if text.strip():
                 print(f"   🎤 model: {model_id}")
-                print(f"   ✅ type: {type(text).__name__}")
-                print(f"   ✅ text: {text.strip()}")
+                print(f"   📝 type: {type(text).__name__}")
+                print(f"   📝 text: {text.strip()}")
                 ok = check_transcript(sample_text, text, "   ") and ok
                 break
             print(f"   ℹ️ {model_id}: empty plain-text body")
@@ -311,7 +332,7 @@ async def response_format_options(client: VeniceClient, clips: ClipMaker, asr_mo
 
         print("\n3️⃣ With language hint (en):")
         result = await client.audio.transcribe(file=str(audio_path), model=asr_model, language="en")
-        print(f"   ✅ text: {result.text}")
+        print(f"   📝 text: {result.text}")
         ok = check_transcript(sample_text, result.text, "   ") and ok
     except VeniceError as e:
         print(f"❌ Error: {e}")
@@ -356,7 +377,7 @@ async def main() -> int:
     print("\n✨ Speech-to-text examples completed!")
     print("\n💡 Key concepts demonstrated:")
     print("   - Basic audio-to-text transcription")
-    print("   - Word-level timestamps with timing data")
+    print("   - Word timings, plus segment and character timings where the model returns them")
     print("   - Multiple input methods (file path, bytes, BinaryIO)")
     print("   - ASR model discovery and selection")
     print("   - JSON vs plain-text response formats, and language hints")

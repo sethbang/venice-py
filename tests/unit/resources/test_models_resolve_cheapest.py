@@ -942,6 +942,24 @@ class TestCheapestVideoParams:
         params = cheapest_video_params(typed, audio=None)
         assert params == {"duration_seconds": "5s", "resolution": "768P", "aspect_ratio": "16:9"}
 
+    def test_given_ratio_is_omitted_when_the_model_lists_none(self) -> None:
+        from venice_ai.models.selection import cheapest_video_params
+
+        constraints = {"durations": ["5s"], "resolutions": ["720p"], "aspect_ratios": []}
+        params = cheapest_video_params(constraints, aspect_ratio="9:16")
+        assert params == {"duration_seconds": "5s", "resolution": "720p"}
+
+        typed = {"durations": ["5s"], "aspect_ratios": None}
+        assert "aspect_ratio" not in cheapest_video_params(typed, aspect_ratio="9:16")
+
+    def test_given_ratio_is_sent_when_listed_and_rejected_when_not(self) -> None:
+        from venice_ai.models.selection import cheapest_video_params
+
+        constraints = {"durations": ["5s"], "aspect_ratios": ["16:9", "9:16"]}
+        assert cheapest_video_params(constraints, aspect_ratio="9:16")["aspect_ratio"] == "9:16"
+        with pytest.raises(ValueError, match="aspect ratio"):
+            cheapest_video_params(constraints, aspect_ratio="1:1")
+
     def test_audio_only_sent_when_configurable(self) -> None:
         from venice_ai.models.selection import cheapest_video_params
 

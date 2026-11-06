@@ -144,6 +144,8 @@ async with await client.chat.completions.stream(
 
 For the assembled response: `response = await stream.collect()`.
 
+`text_deltas()` gives text only, with no finish state or usage, so a cut-off answer looks finished. Use `collect_with_deltas()` when that matters.
+
 [-> `examples/chat/streaming_chat.py`](https://github.com/sethbang/venice-py/blob/main/examples/chat/streaming_chat.py)
 
 ### Synchronous Usage
@@ -592,7 +594,7 @@ Rate limiting, distributed state, monitoring, observability, and performance tun
 | `embeddings` | Text embeddings | `create()` | [basic_embeddings.py](https://github.com/sethbang/venice-py/blob/main/examples/embeddings/basic_embeddings.py) |
 | `models` | Model discovery | `list()`, `get()` | [list_models.py](https://github.com/sethbang/venice-py/blob/main/examples/models/list_models.py) |
 | `billing` | Usage analytics | `get_balance()`, `get_usage_history()`, `get_usage_analytics()` | [usage_analytics.py](https://github.com/sethbang/venice-py/blob/main/examples/billing/usage_analytics.py) |
-| `api_keys` | Key management | `list()`, `get_rate_limits()` | [key_management.py](https://github.com/sethbang/venice-py/blob/main/examples/api_keys/key_management.py) |
+| `api_keys` | Key management | `list()`, `iter_all()`, `get_rate_limits()`, `update()`, `get_web3_token()`, `create_web3_key()` | [key_management.py](https://github.com/sethbang/venice-py/blob/main/examples/api_keys/key_management.py) |
 | `characters` | Character discovery & reviews | `list()`, `get()`, `reviews()` | [character_details.py](https://github.com/sethbang/venice-py/blob/main/examples/characters/character_details.py) |
 | `augment` | Web scrape / search / text-parser | `scrape()`, `search()`, `parse_text()` | [scrape.py](https://github.com/sethbang/venice-py/blob/main/examples/augment/scrape.py) |
 | `x402` | Wallet-billing (SIWE auth; `[x402]` extra) | `balance()`, `transactions()`, `top_up()` | [balance.py](https://github.com/sethbang/venice-py/blob/main/examples/x402/balance.py) |

@@ -19,6 +19,8 @@ dedicated test wallet when experimenting.
 
 No API key is needed: ``VeniceClient(api_key="", auth=auth)`` authenticates with
 the wallet alone.
+
+Cost: free. Reading the ledger spends nothing and settles nothing.
 """
 
 import asyncio
@@ -34,6 +36,8 @@ SHOW_ENTRIES = 10
 # A small page size so the full walk below really crosses page boundaries;
 # in production use the default (100, the server maximum).
 WALK_PAGE_SIZE = 5
+# Stop there, so a long ledger does not take hundreds of small requests.
+WALK_MAX_ITEMS = 50
 
 # Exit codes: 0 = ledger read and verified, 1 = a failure, 77 = skipped
 # because the x402 extra or a wallet key is missing.
@@ -85,11 +89,12 @@ async def list_transactions() -> bool | None:
         try:
             # One page, to show the response shape and its pagination block.
             result = await client.x402.transactions(auth=auth, limit=WALK_PAGE_SIZE)
-            # Every page: iter_transactions follows pagination.hasMore for you.
+            # Up to WALK_MAX_ITEMS entries: iter_transactions follows
+            # pagination.hasMore for you and stops at max_items.
             entries = [
                 entry
                 async for entry in client.x402.iter_transactions(
-                    auth=auth, page_size=WALK_PAGE_SIZE
+                    auth=auth, page_size=WALK_PAGE_SIZE, max_items=WALK_MAX_ITEMS
                 )
             ]
         except VeniceError as e:
@@ -104,7 +109,10 @@ async def list_transactions() -> bool | None:
         f"   First page:       {len(data.transactions)} entries (limit={data.pagination.limit}, "
         f"offset={data.pagination.offset}, hasMore={data.pagination.hasMore})"
     )
-    print(f"   Full walk:        {len(entries)} entries (page_size={WALK_PAGE_SIZE})")
+    print(
+        f"   Walk:             {len(entries)} entries "
+        f"(page_size={WALK_PAGE_SIZE}, max_items={WALK_MAX_ITEMS})"
+    )
 
     if not entries:
         print("\n   (no entries yet — try top_up.py first)")
@@ -118,18 +126,26 @@ async def list_transactions() -> bool | None:
 
     # Sort explicitly rather than rely on the server's ordering.
     newest_first = sorted(entries, key=lambda e: datetime.fromisoformat(e.createdAt), reverse=True)
-    if abs(newest_first[0].balanceAfter - data.currentBalance) > 1e-6:
+    if len(entries) >= WALK_MAX_ITEMS:
+        # The server's order is undocumented, so a capped walk may have gaps or
+        # miss the newest entry, and these checks would fail on a healthy ledger.
         print(
-            f"❌ The newest entry's balance after (${newest_first[0].balanceAfter:,.4f}) does not "
-            f"match the current balance (${data.currentBalance:,.4f})"
+            f"   ℹ️ The walk stopped at max_items={WALK_MAX_ITEMS}, so the balance checks "
+            "did not run; raise it to check a longer ledger"
         )
-        ok = False
-    # Each entry's balance after should be the previous one plus its amount.
-    oldest_first = newest_first[::-1]
-    for before, entry in zip(oldest_first, oldest_first[1:], strict=False):
-        if abs(before.balanceAfter + entry.amount - entry.balanceAfter) > 1e-6:
-            print(f"❌ Entry {entry.id} does not follow from the one before it")
+    else:
+        if abs(newest_first[0].balanceAfter - data.currentBalance) > 1e-6:
+            print(
+                f"❌ The newest entry's balance after (${newest_first[0].balanceAfter:,.4f}) does "
+                f"not match the current balance (${data.currentBalance:,.4f})"
+            )
             ok = False
+        # Each entry's balance after should be the previous one plus its amount.
+        oldest_first = newest_first[::-1]
+        for before, entry in zip(oldest_first, oldest_first[1:], strict=False):
+            if abs(before.balanceAfter + entry.amount - entry.balanceAfter) > 1e-6:
+                print(f"❌ Entry {entry.id} does not follow from the one before it")
+                ok = False
 
     shown = newest_first[:SHOW_ENTRIES]
     print(f"\n   Recent entries (newest first, showing {len(shown)} of {len(entries)}):")

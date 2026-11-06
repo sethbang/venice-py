@@ -24,6 +24,9 @@ from venice_ai.types.api.video import (
     VideoQueueResponse,
 )
 
+#: The opening of an MP4: a box length, then ``ftyp``.
+VIDEO_FILE = b"\x00\x00\x00\x18ftypmp42VIDEO"
+
 
 @pytest.fixture
 def queue_response():
@@ -36,7 +39,7 @@ def mock_client():
     client.video = Mock()
     client.video.retrieve = AsyncMock()
     client.video.cancel = AsyncMock(return_value=VideoCompleteResponse(success=True))
-    client.fetch_external = AsyncMock(return_value=b"VIDEO_BYTES")
+    client.fetch_external = AsyncMock(return_value=VIDEO_FILE)
     return client
 
 
@@ -210,7 +213,7 @@ async def test_download_falls_back_to_queue_download_url(mock_client, tmp_path, 
     target = tmp_path / "out.mp4"
     result = await job.download(target, completed)
     assert result == target
-    assert target.read_bytes() == b"VIDEO_BYTES"
+    assert target.read_bytes() == VIDEO_FILE
     mock_client.fetch_external.assert_awaited_once_with("https://cdn.example.com/queued.mp4")
 
 
@@ -227,8 +230,72 @@ async def test_download_url_uses_client_fetch_external(job, mock_client, tmp_pat
     target = tmp_path / "out.mp4"
     result = await job.download(target, completed)
     assert result == target
-    assert target.read_bytes() == b"VIDEO_BYTES"
+    assert target.read_bytes() == VIDEO_FILE
     mock_client.fetch_external.assert_awaited_once_with("https://cdn.example.com/v.mp4")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [b"<html>gateway maintenance</html>", b"", b'{"status": "ok"}'],
+    ids=["html", "empty", "json"],
+)
+@pytest.mark.parametrize("source", ["status_url", "queue_download_url"])
+async def test_download_of_something_not_a_video_raises_and_writes_nothing(
+    mock_client, tmp_path, body, source
+):
+    mock_client.fetch_external = AsyncMock(return_value=body)
+    link = "https://cdn.example.com/SECRET.mp4"
+    job = VideoJob(
+        mock_client,
+        VideoQueueResponse(
+            model="m", queue_id="q", download_url=link if source != "status_url" else None
+        ),
+    )
+    completed = VideoCompletedStatus(
+        status="COMPLETED", url=link if source == "status_url" else None, expires_at=None
+    )
+    target = tmp_path / "out.mp4"
+
+    with pytest.raises(VideoGenerationError) as excinfo:
+        await job.download(target, completed)
+
+    assert not target.exists()
+    text = str(excinfo.value)
+    assert "q" in text
+    assert "SECRET" not in text
+    assert "gateway" not in text and '"ok"' not in text
+    assert excinfo.value.__cause__ is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "opening",
+    [b"\x00\x00\x00\x18ftypmp42", b"\x00\x00\x00\x08moov", b"\x1a\x45\xdf\xa3webm"],
+    ids=["mp4", "mp4-moov-first", "webm"],
+)
+async def test_download_accepts_each_video_container(mock_client, job, tmp_path, opening):
+    mock_client.fetch_external = AsyncMock(return_value=opening + b"rest")
+    completed = VideoCompletedStatus(status="COMPLETED", url="https://x/v", expires_at=None)
+
+    saved = await job.download(tmp_path / "out.mp4", completed)
+
+    assert saved.read_bytes() == opening + b"rest"
+
+
+@pytest.mark.asyncio
+async def test_context_keeps_the_media_when_the_link_serves_no_video(mock_client, tmp_path, caplog):
+    mock_client.fetch_external = AsyncMock(return_value=b"<html>gateway</html>")
+    job = VideoJob(mock_client, VideoQueueResponse(model="m", queue_id="q"))
+    completed = VideoCompletedStatus(status="COMPLETED", url="https://x/v", expires_at=None)
+    job._status = completed
+
+    with caplog.at_level(logging.WARNING), pytest.raises(VideoGenerationError):
+        async with job:
+            await job.download(tmp_path / "out.mp4", completed)
+
+    mock_client.video.cancel.assert_not_awaited()
+    assert "not released" in caplog.text
 
 
 # ---------------------------------------------------------------------------

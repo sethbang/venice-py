@@ -48,7 +48,7 @@ from ..types.api.requests.music import (
 )
 from ..utils.errors import forget_parsed_text, parse_json, read_body, validate_hiding_input
 from ..validation.validators import validate_model_id
-from ._inline_audio import read_inline_audio
+from ._inline_audio import read_inline_audio, sniff_audio_format
 from .video import _is_unknown_request_id
 
 if TYPE_CHECKING:
@@ -462,7 +462,11 @@ class MusicJob:
 
         Raises:
             MusicGenerationError: If the status carries neither inline data
-                nor a ``url``; nothing is written in that case.
+                nor a ``url``, or if what the URL served is not a known audio
+                format, such as a gateway's HTML page or an empty body. Nothing
+                is written in either case and the error holds none of the body.
+                Raised through an ``async with`` block, it leaves the stored
+                audio in place.
             APITimeoutError: If the URL fetch times out.
             APIConnectionError: If the connection fails during the URL fetch.
             aiohttp.ClientResponseError: If the URL answers with an error
@@ -481,6 +485,12 @@ class MusicJob:
             await asyncio.to_thread(path.write_bytes, status.data)
         elif status.url:
             data = await self._client.fetch_external(status.url)
+            if sniff_audio_format(data) is None:
+                raise MusicGenerationError(
+                    f"Music job {self.queue_id}: the download link answered with {len(data)} "
+                    "bytes that are not audio. Nothing was written, and the stored audio "
+                    "is untouched."
+                )
             await asyncio.to_thread(path.write_bytes, data)
         return path
 

@@ -22,6 +22,9 @@ Both sections prove the model actually read the attachment: the inline note
 holds a fact that exists nowhere else, and the public document must raise the
 prompt-token count by thousands of tokens (the extracted text) and yield
 details from the document itself.
+
+Cost: two short requests plus the extracted text of one short document as input
+tokens on the cheapest capable model, typically under $0.001.
 """
 
 import asyncio
@@ -57,7 +60,7 @@ MAX_COMPLETION_TOKENS = 1024
 
 # Leaving Venice's own system prompt out keeps the prompt down to the attachment
 # and the question, so the token growth below is the extracted text alone.
-PARAMS = VeniceParameters(include_venice_system_prompt=False)
+NO_VENICE_PROMPT = VeniceParameters(include_venice_system_prompt=False)
 
 
 def _markdown_data_url(markdown: str) -> str:
@@ -66,9 +69,8 @@ def _markdown_data_url(markdown: str) -> str:
     return f"data:text/markdown;base64,{b64}"
 
 
-def _prompt_tokens(response: object) -> int:
-    usage = getattr(response, "usage", None)
-    return usage.prompt_tokens if usage is not None else 0
+def _prompt_tokens(response: ChatCompletionResponse) -> int:
+    return response.usage.prompt_tokens if response.usage else 0
 
 
 def _cut_off(response: ChatCompletionResponse) -> bool:
@@ -107,7 +109,7 @@ async def file_from_data_url(client: VeniceClient, model: str) -> int | None:
                 SystemMessage(content="Answer using only the attached document."),
                 user_message,
             ],
-            venice_parameters=PARAMS,
+            venice_parameters=NO_VENICE_PROMPT,
             max_completion_tokens=MAX_COMPLETION_TOKENS,
             temperature=0.0,
         )
@@ -155,7 +157,7 @@ async def file_from_public_url(
         response = await client.chat.completions.create(
             model=model,
             messages=[user_message],
-            venice_parameters=PARAMS,
+            venice_parameters=NO_VENICE_PROMPT,
             max_completion_tokens=MAX_COMPLETION_TOKENS,
             temperature=0.0,
         )

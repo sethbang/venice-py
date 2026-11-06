@@ -38,8 +38,8 @@ tokens each tier used as a measurement rather than asserting an order.
 Answers and reasoning traces are reported separately. A truncated answer or an
 empty one fails its section, and the script exits 1 if any section failed. Some
 backends report ``finish_reason="stop"`` at the token cap, so a reply counts as
-truncated if it reports ``"length"``, used the whole ``MAX_TOKENS`` budget or
-carries no usage to check.
+truncated if it reports ``"length"``, used its whole token budget (16384, or the
+model's own ``maxCompletionTokens`` if lower) or carries no usage to check.
 """
 
 import asyncio
@@ -55,25 +55,32 @@ from venice_ai import (
     ReasoningEffortLevel,
     ReasoningSummary,
     VeniceClient,
+    extract_thinking_blocks,
     model_price,
 )
 from venice_ai.types.api import (
     ChatCompletionResponse,
     TextModelSpec,
     UserMessage,
-    VeniceParameters,
 )
+from venice_ai.types.api.requests import VeniceParameters
 
 # Room for the hidden reasoning plus the answer. Reasoning models spend most of
 # their budget thinking (several thousand tokens on the puzzle below, at the
 # lowest tier as well as the highest), and a smaller cap cuts the answer off.
-MAX_TOKENS = 16384
+# A model's maxCompletionTokens may be lower, in which case that is the cap.
+WANTED_TOKENS = 16384
+
+# The SDK's default 120s timeout can be too short for a high tier: a slow model
+# writing thousands of reasoning tokens has run past it. The SDK does not resend a
+# paid request after a timeout, so a longer one is set here for every request.
+REQUEST_TIMEOUT_S = 300.0
 
 # Exit code for "a prerequisite is missing" (here: no suitable reasoning model).
 EXIT_SKIPPED = 77
 
 # Bill only the prompt shown here, not Venice's own system prompt.
-OWN_PROMPT_ONLY = VeniceParameters(include_venice_system_prompt=False)
+NO_VENICE_PROMPT = VeniceParameters(include_venice_system_prompt=False)
 
 # A puzzle with one right answer ($0.05) and a tempting wrong one ($0.10).
 PUZZLE = (
@@ -81,7 +88,12 @@ PUZZLE = (
     "How much does the ball cost? Reply in at most two sentences and end with "
     "'Answer: $X.XX'."
 )
-PUZZLE_ANSWER = re.compile(r"answer:\s*\$?\s*0?\.05\b", re.IGNORECASE)
+_PUZZLE_ANSWER = re.compile(r"answer:\s*\$?\s*0?\.05\b", re.IGNORECASE)
+
+
+def states_puzzle_answer(answer: str) -> bool:
+    """True if the answer ends as asked with $0.05, with or without Markdown emphasis."""
+    return _PUZZLE_ANSWER.search(re.sub(r"[*_]", "", answer)) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +127,6 @@ class Outcome:
     completion_tokens: int
     reasoning_tokens: int | None
     capped: bool
-    has_trace: bool
 
     @property
     def ok(self) -> bool:
@@ -127,21 +138,30 @@ class Outcome:
         return bool(self.reasoning_tokens) or bool(self.reasoning)
 
 
-def outcome(label: str, response: ChatCompletionResponse, elapsed: float) -> Outcome:
-    """Collect the parts of a response this example reports on."""
-    message = response.choices[0].message
+def tokens_text(tokens: int | None) -> str:
+    """A reported token count; a model that reports none is not the same as zero."""
+    return "n/a" if tokens is None else str(tokens)
+
+
+def outcome(label: str, response: ChatCompletionResponse, elapsed: float, cap: int) -> Outcome:
+    """Collect the parts of a response this example reports on.
+
+    A reply with no choices comes back as empty, so ``show`` fails it. The trace
+    comes from ``thinking_blocks``, which reads both server shapes, and an inline
+    ``<think>`` block is removed from the answer, so a check on the answer never
+    reads the model's working.
+    """
     usage = response.usage
     details = usage.completion_tokens_details if usage else None
     return Outcome(
         label=label,
         elapsed=elapsed,
-        finish_reason=response.choices[0].finish_reason,
-        answer=str(response.text or ""),
-        reasoning=str(message.reasoning_content or ""),
+        finish_reason=response.choices[0].finish_reason if response.choices else None,
+        answer=extract_thinking_blocks(response.text or "")[1],
+        reasoning="\n".join(response.thinking_blocks),
         completion_tokens=usage.completion_tokens if usage else 0,
         reasoning_tokens=getattr(details, "reasoning_tokens", None),
-        capped=usage is None or usage.completion_tokens >= MAX_TOKENS,
-        has_trace=bool(response.thinking_blocks),
+        capped=usage is None or usage.completion_tokens >= cap,
     )
 
 
@@ -166,7 +186,8 @@ async def ask(
     prompt: str,
     label: str,
     *,
-    venice_parameters: VeniceParameters = OWN_PROMPT_ONLY,
+    cap: int,
+    venice_parameters: VeniceParameters = NO_VENICE_PROMPT,
     **kwargs: Any,
 ) -> Outcome:
     """Send one prompt with the given reasoning settings and time it."""
@@ -174,15 +195,17 @@ async def ask(
     response = await client.chat.completions.create(
         model=model,
         messages=[UserMessage(content=prompt)],
-        max_completion_tokens=MAX_TOKENS,
+        max_completion_tokens=cap,
         venice_parameters=venice_parameters,
         **kwargs,
     )
-    return outcome(label, response, time.perf_counter() - start)
+    return outcome(label, response, time.perf_counter() - start, cap)
 
 
-async def select_model(client: VeniceClient) -> tuple[str, list[ReasoningEffortLevel]] | None:
-    """Pick a model that accepts reasoning_effort, with its advertised tiers.
+async def select_model(
+    client: VeniceClient,
+) -> tuple[str, list[ReasoningEffortLevel], int] | None:
+    """Pick a model that accepts reasoning_effort, with its tiers and its token cap.
 
     The cheapest reasoning model is used when it supports ``reasoning_effort``
     with at least two thinking tiers; otherwise the cheapest catalog model that
@@ -213,7 +236,9 @@ async def select_model(client: VeniceClient) -> tuple[str, list[ReasoningEffortL
     for model in candidates:
         tiers = effort_tiers(model.model_spec)
         if len([t for t in tiers if t != "none"]) >= 2:
-            return model.id, tiers
+            spec = model.model_spec
+            limit = spec.maxCompletionTokens if isinstance(spec, TextModelSpec) else None
+            return model.id, tiers, min(WANTED_TOKENS, int(limit)) if limit else WANTED_TOKENS
     log("SKIPPED: no model in the catalog advertises two or more reasoning_effort tiers")
     return None
 
@@ -224,7 +249,7 @@ async def select_model(client: VeniceClient) -> tuple[str, list[ReasoningEffortL
 
 
 async def basic_reasoning_effort(
-    client: VeniceClient, model: str, tiers: list[ReasoningEffortLevel]
+    client: VeniceClient, model: str, tiers: list[ReasoningEffortLevel], cap: int
 ) -> bool:
     """Run the same prompt at every tier the model advertises.
 
@@ -241,7 +266,7 @@ async def basic_reasoning_effort(
     results: list[Outcome] = []
     for level in tiers:
         log(f'\n   ⚙️  reasoning_effort = "{level}"')
-        result = await ask(client, model, prompt, level, reasoning_effort=level)
+        result = await ask(client, model, prompt, level, cap=cap, reasoning_effort=level)
         ok = show(result) and ok
         if level == "none" and result.thought:
             log(f"   ❌ [none] still reasoned ({result.reasoning_tokens} reasoning tokens)")
@@ -255,12 +280,18 @@ async def basic_reasoning_effort(
     for r in results:
         log(
             f"   {r.label:<8} {r.elapsed:>7.2f}s {r.completion_tokens:>8} "
-            f"{r.reasoning_tokens or 0:>10} {r.finish_reason or '-':>8}"
+            f"{tokens_text(r.reasoning_tokens):>10} {r.finish_reason or '-':>8}"
         )
     thinking = [r for r in results if r.label != "none" and r.reasoning_tokens is not None]
     if len(thinking) >= 2:
         counts = [r.reasoning_tokens or 0 for r in thinking]
-        order = "rose with every step up" if counts == sorted(counts) else "did not rise steadily"
+        steps = list(zip(counts, counts[1:], strict=False))
+        if all(lower < higher for lower, higher in steps):
+            order = "rose with every step up"
+        elif all(lower == higher for lower, higher in steps):
+            order = "stayed flat"
+        else:
+            order = "did not rise steadily"
         log(
             f"\n📏 Measured: reasoning tokens {order} across "
             f"{', '.join(f'{r.label} {r.reasoning_tokens}' for r in thinking)}."
@@ -271,7 +302,7 @@ async def basic_reasoning_effort(
 
 
 async def lowest_vs_highest_tier(
-    client: VeniceClient, model: str, tiers: list[ReasoningEffortLevel]
+    client: VeniceClient, model: str, tiers: list[ReasoningEffortLevel], cap: int
 ) -> bool:
     """Run the lowest and the highest thinking tier on a puzzle with one answer.
 
@@ -293,9 +324,9 @@ async def lowest_vs_highest_tier(
     results: list[Outcome] = []
     for level in (low, high):
         log(f'\n   ⚙️  reasoning_effort = "{level}"')
-        result = await ask(client, model, PUZZLE, level, reasoning_effort=level)
+        result = await ask(client, model, PUZZLE, level, cap=cap, reasoning_effort=level)
         ok = show(result) and ok
-        if not PUZZLE_ANSWER.search(result.answer):
+        if not states_puzzle_answer(result.answer):
             log(f"   ❌ [{level}] the answer does not end with the right amount ($0.05)")
             ok = False
         if not result.thought:
@@ -305,10 +336,10 @@ async def lowest_vs_highest_tier(
 
     log(f"\n   {'Level':<8} {'Time':>8} {'Tokens':>8} {'Reasoning':>10} {'Correct':>8}")
     for r in results:
-        correct = "yes" if PUZZLE_ANSWER.search(r.answer) else "no"
+        correct = "yes" if states_puzzle_answer(r.answer) else "no"
         log(
             f"   {r.label:<8} {r.elapsed:>7.2f}s {r.completion_tokens:>8} "
-            f"{r.reasoning_tokens or 0:>10} {correct:>8}"
+            f"{tokens_text(r.reasoning_tokens):>10} {correct:>8}"
         )
     low_r, high_r = results
     log("\n📏 Measured on this run:")
@@ -337,7 +368,7 @@ async def lowest_vs_highest_tier(
 
 
 async def disabling_reasoning(
-    client: VeniceClient, model: str, tiers: list[ReasoningEffortLevel]
+    client: VeniceClient, model: str, tiers: list[ReasoningEffortLevel], cap: int
 ) -> bool:
     """Turn reasoning off with ``ReasoningConfig(enabled=False)``.
 
@@ -355,6 +386,7 @@ async def disabling_reasoning(
         model,
         "Name the capital of France in one word.",
         "disabled",
+        cap=cap,
         reasoning=ReasoningConfig(enabled=False),
     )
     ok = show(result)
@@ -376,7 +408,7 @@ async def disabling_reasoning(
 
 
 async def combining_with_venice_parameters(
-    client: VeniceClient, model: str, tiers: list[ReasoningEffortLevel]
+    client: VeniceClient, model: str, tiers: list[ReasoningEffortLevel], cap: int
 ) -> bool:
     """Show reasoning_effort alongside venice_parameters.strip_thinking_response."""
     log("\n\n🔗 Combining reasoning_effort with Venice Parameters")
@@ -388,7 +420,9 @@ async def combining_with_venice_parameters(
     prompt = "Explain the halting problem in simple terms, in three sentences."
 
     log(f'\n   🧠 reasoning_effort="{level}", thinking visible (default)')
-    visible = await ask(client, model, prompt, f"{level} + visible", reasoning_effort=level)
+    visible = await ask(
+        client, model, prompt, f"{level} + visible", cap=cap, reasoning_effort=level
+    )
     ok = show(visible)
 
     log(f'\n   🧠 reasoning_effort="{level}", strip_thinking_response=True')
@@ -397,6 +431,7 @@ async def combining_with_venice_parameters(
         model,
         prompt,
         f"{level} + stripped",
+        cap=cap,
         reasoning_effort=level,
         venice_parameters=VeniceParameters(
             include_venice_system_prompt=False,
@@ -417,12 +452,10 @@ async def combining_with_venice_parameters(
             f"   The stripped request still reported {stripped.reasoning_tokens} reasoning "
             "tokens: the model still thinks, only the returned trace is removed."
         )
-    if "<think>" in visible.answer or "<think>" in stripped.answer:
-        log("   A <think> block appeared inside an answer.")
 
     # The API documents only the removal of <think> blocks from the text. This
     # check is stricter: a model that still returns reasoning_content fails too.
-    if stripped.has_trace:
+    if stripped.reasoning:
         log("   ❌ A reasoning trace is still present despite strip_thinking_response=True")
         ok = False
     else:
@@ -435,7 +468,7 @@ async def combining_with_venice_parameters(
 
 
 async def nested_reasoning_object(
-    client: VeniceClient, model: str, tiers: list[ReasoningEffortLevel]
+    client: VeniceClient, model: str, tiers: list[ReasoningEffortLevel], cap: int
 ) -> bool:
     """Send the nested ``reasoning`` object: an ``effort`` and a ``summary``.
 
@@ -462,7 +495,12 @@ async def nested_reasoning_object(
     for summary in summaries:
         log(f"\n   🧾 reasoning=ReasoningConfig(effort={level!r}, summary={summary!r})")
         result = await ask(
-            client, model, prompt, summary, reasoning=ReasoningConfig(effort=level, summary=summary)
+            client,
+            model,
+            prompt,
+            summary,
+            cap=cap,
+            reasoning=ReasoningConfig(effort=level, summary=summary),
         )
         ok = show(result) and ok
         if not result.thought:
@@ -473,7 +511,7 @@ async def nested_reasoning_object(
     if "none" in tiers:
         log("\n   🧾 reasoning=ReasoningConfig(effort='none')")
         off = await ask(
-            client, model, prompt, "effort none", reasoning=ReasoningConfig(effort="none")
+            client, model, prompt, "effort none", cap=cap, reasoning=ReasoningConfig(effort="none")
         )
         ok = show(off) and ok
         if off.thought:
@@ -508,23 +546,23 @@ async def main() -> int:
     log("🚀 Venice AI Reasoning Effort Examples")
     log("=" * 60)
 
-    async with VeniceClient() as client:
+    async with VeniceClient(timeout=REQUEST_TIMEOUT_S) as client:
         selected = await select_model(client)
         if selected is None:
             return EXIT_SKIPPED
-        model, tiers = selected
-        log(f"🤖 Model: {model}")
+        model, tiers, cap = selected
+        log(f"🤖 Model: {model} (token cap {cap})")
         log(f"   reasoning_effort tiers it accepts: {', '.join(tiers)}\n")
 
         results = [
-            ("basic_reasoning_effort", await basic_reasoning_effort(client, model, tiers)),
-            ("lowest_vs_highest_tier", await lowest_vs_highest_tier(client, model, tiers)),
-            ("disabling_reasoning", await disabling_reasoning(client, model, tiers)),
+            ("basic_reasoning_effort", await basic_reasoning_effort(client, model, tiers, cap)),
+            ("lowest_vs_highest_tier", await lowest_vs_highest_tier(client, model, tiers, cap)),
+            ("disabling_reasoning", await disabling_reasoning(client, model, tiers, cap)),
             (
                 "combining_with_venice_parameters",
-                await combining_with_venice_parameters(client, model, tiers),
+                await combining_with_venice_parameters(client, model, tiers, cap),
             ),
-            ("nested_reasoning_object", await nested_reasoning_object(client, model, tiers)),
+            ("nested_reasoning_object", await nested_reasoning_object(client, model, tiers, cap)),
         ]
 
     failed = [name for name, ok in results if not ok]

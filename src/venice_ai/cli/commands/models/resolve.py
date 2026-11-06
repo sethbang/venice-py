@@ -59,6 +59,12 @@ _TYPE_CHOICES = [
 @click.option("--multiple-images", is_flag=True, help="Require several images per request (chat).")
 @click.option("--e2ee", is_flag=True, help="Require end-to-end encryption (chat).")
 @click.option(
+    "--exclude-e2ee",
+    is_flag=True,
+    help="Skip end-to-end encrypted models, for endpoints that reject them such as "
+    "/responses (chat); cannot be combined with --e2ee.",
+)
+@click.option(
     "--exclude-reasoning",
     is_flag=True,
     help="Only models that never reason (chat); cannot be combined with --reasoning.",
@@ -175,6 +181,7 @@ def resolve(
     prompt_caching: bool,
     multiple_images: bool,
     e2ee: bool,
+    exclude_e2ee: bool,
     exclude_reasoning: bool,
     exclude_uncensored: bool,
     custom_size: bool,
@@ -205,6 +212,7 @@ def resolve(
       venice-py models resolve --type chat --function-calling --vision
       venice-py models resolve --type embedding --prefer cheapest
       venice-py models resolve --type chat --function-calling --prefer cheapest
+      venice-py models resolve --type chat --exclude-e2ee
       venice-py models resolve --type video --audio --min-resolution 720p
       venice-py models resolve --type image --transparent-background
       venice-py models resolve --type cheapest-video --video-type text-to-video
@@ -226,6 +234,7 @@ def resolve(
             prompt_caching=prompt_caching,
             multiple_images=multiple_images,
             e2ee=e2ee,
+            exclude_e2ee=exclude_e2ee,
             exclude_reasoning=exclude_reasoning,
             exclude_uncensored=exclude_uncensored,
             custom_size=custom_size,
@@ -277,6 +286,7 @@ async def _resolve_async(
     prompt_caching: bool = False,
     multiple_images: bool = False,
     e2ee: bool = False,
+    exclude_e2ee: bool = False,
     exclude_reasoning: bool = False,
     exclude_uncensored: bool = False,
     custom_size: bool = False,
@@ -353,6 +363,7 @@ async def _resolve_async(
                 require_prompt_caching=prompt_caching,
                 require_multiple_images=multiple_images,
                 require_e2ee=e2ee,
+                exclude_e2ee=exclude_e2ee,
                 exclude_reasoning=exclude_reasoning,
                 exclude_uncensored=exclude_uncensored,
             )

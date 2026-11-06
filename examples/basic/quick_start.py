@@ -42,7 +42,7 @@ async def main() -> int:
 
     # Create a Venice AI client (reads VENICE_API_KEY from environment)
     async with VeniceClient() as client:
-        print("✅ Client created successfully")
+        print("🔌 Client created; no request has been sent yet")
 
         # Pick the cheapest chat model in the live catalog that answers
         # directly. Without exclude_reasoning=True the cheapest pick can be a

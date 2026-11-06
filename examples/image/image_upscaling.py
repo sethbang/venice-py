@@ -26,16 +26,15 @@ import asyncio
 import sys
 from pathlib import Path
 
-from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import (  # noqa: E402
+from _helpers import (
     SKIPPED,
     catalog_price_usd,
     generate_base_image,
     image_dimensions,
     save_image,
 )
+
+from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).

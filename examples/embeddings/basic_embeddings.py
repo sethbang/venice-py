@@ -4,17 +4,39 @@ Venice AI SDK - Basic Text Embeddings
 =====================================
 
 This example demonstrates how to generate text embeddings using the Venice AI SDK.
-Learn how to convert text into vector representations for semantic analysis.
+Learn how to convert text into vector representations for semantic analysis, and
+how to ask for shorter vectors (``dimensions``) or a compact ``base64`` encoding
+(``encoding_format``).
+
+Cost: a few hundred embedded tokens at about $0.0125 per million on the cheapest
+models, under $0.0001 per run. The ``dimensions`` section picks the cheapest model
+whose catalog entry sets ``supportsCustomDimensions``.
+
+Exit status: ``0`` when every section that ran passed, ``1`` when any failed, ``77``
+(with a ``SKIPPED:`` line) when the catalog has no embedding model. Without a model
+that supports custom dimensions, that one section prints ``Section skipped:``.
 """
 
 import asyncio
+import base64
+import struct
 import sys
+from collections.abc import Awaitable, Callable
 
 from venice_ai import NoMatchingModelError, VeniceClient, cosine_similarity
-from venice_ai.types.api import EmbeddingsResponse
+from venice_ai.exceptions import VeniceError
+from venice_ai.types.api import EmbeddingModelSpec, EmbeddingsResponse
 
 #: Exit code for "skipped": a prerequisite is missing, not a failure.
 EXIT_SKIPPED = 77
+
+#: The vector size the dimensions section asks for.
+REQUESTED_DIMENSIONS = 64
+
+#: Same text, same model: a float vector and its base64 form should agree this closely.
+#: They come from two requests, which can differ slightly (0.998 has been measured).
+#: Bytes read in the wrong layout decode to an unrelated vector, far below this.
+SAME_VECTOR_SIMILARITY = 0.99
 
 
 def float_vectors(response: EmbeddingsResponse) -> list[list[float]]:
@@ -42,19 +64,20 @@ async def basic_embedding_generation(client: VeniceClient, model: str) -> bool:
     """Generate an embedding for a single text and check it against the catalog.
 
     The model's catalog entry declares its native vector size
-    (``embeddingDimensions``) and per-input limit (``maxInputTokens``).
-    ``model_dump()`` keeps these embedding-specific spec fields, so the dumped
-    entry is a complete record to log or cache.
+    (``embeddingDimensions``) and per-input limit (``maxInputTokens``), typed on
+    :class:`EmbeddingModelSpec`.
     """
     print("🔢 Basic Embedding Generation")
     print("-" * 30)
 
-    entry = await client.models.get(model)
-    spec = entry.model_dump()["model_spec"]
-    declared_dims = spec.get("embeddingDimensions")
+    spec = (await client.models.get(model)).model_spec
+    if not isinstance(spec, EmbeddingModelSpec):
+        print(f"❌ {model} is not listed as an embedding model")
+        return False
+    declared_dims = spec.embeddingDimensions
     print(
         f"📚 Catalog: {declared_dims or 'unspecified'} dimensions, "
-        f"{spec.get('maxInputTokens') or 'unspecified'} max input tokens per text"
+        f"{spec.maxInputTokens or 'unspecified'} max input tokens per text"
     )
 
     response = await client.embeddings.create(
@@ -62,7 +85,6 @@ async def basic_embedding_generation(client: VeniceClient, model: str) -> bool:
     )
     (embedding,) = float_vectors(response)
 
-    print("✅ Generated embedding")
     print(f"📏 Embedding dimensions: {len(embedding)}")
     print(f"🔢 First 5 values: {[round(v, 4) for v in embedding[:5]]}")
     print(f"📊 Usage: {response.usage.total_tokens} tokens")
@@ -96,7 +118,7 @@ async def batch_embedding_generation(client: VeniceClient, model: str) -> bool:
     response = await client.embeddings.create(model=model, input=texts)
     vectors = float_vectors(response)
 
-    print(f"✅ Generated {len(vectors)} embeddings for {len(texts)} texts")
+    print(f"Received {len(vectors)} embeddings for {len(texts)} texts")
     print(f"📏 Each embedding has {len(vectors[0])} dimensions")
     print(f"📊 Total tokens used: {response.usage.total_tokens}")
 
@@ -195,6 +217,95 @@ async def embedding_search_example(client: VeniceClient, model: str) -> bool:
     return True
 
 
+def decode_base64_vector(encoded: str) -> list[float]:
+    """Decode a base64 embedding as little-endian 32-bit floats.
+
+    That is the layout OpenAI's API uses. Venice's spec names the ``base64`` format
+    without stating a layout, so :func:`tuned_embeddings` checks the result against
+    the float form of the same vector instead of trusting this decoding.
+
+    :raises ValueError: If the text is not base64, or the bytes are not whole floats.
+    """
+    raw = base64.b64decode(encoded, validate=True)
+    if len(raw) % 4:
+        raise ValueError(f"{len(raw)} bytes do not divide into 4-byte floats")
+    return list(struct.unpack(f"<{len(raw) // 4}f", raw))
+
+
+async def tuned_embeddings(client: VeniceClient) -> bool | None:
+    """Ask for shorter vectors with ``dimensions`` and base64 with ``encoding_format``.
+
+    Only a model whose catalog entry sets ``supportsCustomDimensions`` takes
+    ``dimensions``, so the list of models without it is passed to the resolver as
+    ``exclude_models``. The section fails if the vector has the wrong size, or if the
+    base64 form does not decode to the same vector as the float form.
+
+    Returns ``None`` (section skipped) when no model in the catalog supports it.
+    """
+    print("\n🎚️ Tuning: dimensions and encoding_format")
+    print("-" * 30)
+
+    catalog = (await client.models.list(type="embedding")).data
+    fixed_size = [
+        m.id
+        for m in catalog
+        if not (
+            isinstance(m.model_spec, EmbeddingModelSpec) and m.model_spec.supportsCustomDimensions
+        )
+    ]
+    try:
+        model = await client.models.resolve_embedding(prefer="cheapest", exclude_models=fixed_size)
+    except NoMatchingModelError as e:
+        print(f"Section skipped: no embedding model supports custom dimensions ({e})")
+        return None
+    print(f"📍 Model with custom dimensions: {model}")
+
+    text = "The quick brown fox jumps over the lazy dog."
+    as_floats = await client.embeddings.create(
+        model=model, input=text, dimensions=REQUESTED_DIMENSIONS
+    )
+    (vector,) = float_vectors(as_floats)
+    print(f"📏 dimensions={REQUESTED_DIMENSIONS}: got {len(vector)} floats")
+    if len(vector) != REQUESTED_DIMENSIONS:
+        print(f"❌ Expected {REQUESTED_DIMENSIONS} dimensions, got {len(vector)}")
+        return False
+
+    as_base64 = await client.embeddings.create(
+        model=model, input=text, dimensions=REQUESTED_DIMENSIONS, encoding_format="base64"
+    )
+    # The byte layout of the base64 form is not documented, so a layout other than
+    # little-endian 32-bit floats says nothing about the size check above.
+    encoded = as_base64.data[0].embedding
+    if not isinstance(encoded, str):
+        print(
+            f"Section skipped: encoding_format='base64' returned {type(encoded).__name__}, "
+            "not a string"
+        )
+        return None
+    try:
+        decoded = decode_base64_vector(encoded)
+    except ValueError as e:
+        print(f"Section skipped: the base64 form is in another layout ({e})")
+        return None
+    print(f"📦 encoding_format='base64': {len(encoded)} characters, {len(decoded)} floats")
+    if len(decoded) != REQUESTED_DIMENSIONS:
+        print(
+            f"Section skipped: the base64 form is in another layout: {len(decoded)} floats, "
+            f"not {REQUESTED_DIMENSIONS}"
+        )
+        return None
+    similarity = cosine_similarity(vector, decoded)
+    print(f"🔍 Cosine similarity with the float form: {similarity:.4f}")
+    if similarity < SAME_VECTOR_SIMILARITY:
+        print(
+            "Section skipped: the base64 form is in another layout: it decodes to a different "
+            "vector"
+        )
+        return None
+    print("✅ Both forms carry the same vector, as little-endian 32-bit floats")
+    return True
+
+
 async def main() -> int:
     """Run all embedding examples.
 
@@ -214,14 +325,24 @@ async def main() -> int:
             return EXIT_SKIPPED
         print(f"📍 Using embedding model: {model}\n")
 
-        results = [
-            ("basic_embedding_generation", await basic_embedding_generation(client, model)),
-            ("batch_embedding_generation", await batch_embedding_generation(client, model)),
-            ("semantic_similarity_analysis", await semantic_similarity_analysis(client, model)),
-            ("embedding_search_example", await embedding_search_example(client, model)),
+        sections: list[tuple[str, Callable[[], Awaitable[bool | None]]]] = [
+            ("basic_embedding_generation", lambda: basic_embedding_generation(client, model)),
+            ("batch_embedding_generation", lambda: batch_embedding_generation(client, model)),
+            ("semantic_similarity_analysis", lambda: semantic_similarity_analysis(client, model)),
+            ("embedding_search_example", lambda: embedding_search_example(client, model)),
+            ("tuned_embeddings", lambda: tuned_embeddings(client)),
         ]
+        # Each section returns True (passed), False (failed) or None (skipped), and
+        # one section's failed request fails that section; the others still run.
+        results: list[tuple[str, bool | None]] = []
+        for name, section in sections:
+            try:
+                results.append((name, await section()))
+            except VeniceError as e:
+                print(f"\n❌ {name}: {type(e).__name__}: {e}")
+                results.append((name, False))
 
-    failed = [name for name, ok in results if not ok]
+    failed = [name for name, ok in results if ok is False]
     if failed:
         print(f"\n❌ {len(failed)} of {len(results)} sections failed: {', '.join(failed)}")
         return 1
@@ -232,6 +353,7 @@ async def main() -> int:
     print("   - Reading a model's embeddingDimensions from the catalog")
     print("   - Ranking text pairs by cosine similarity")
     print("   - Simple semantic search")
+    print("   - Shorter vectors with dimensions, base64 with encoding_format")
     return 0
 
 

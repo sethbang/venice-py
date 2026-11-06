@@ -246,7 +246,7 @@ class InpaintModelConstraints(BaseModel):
     focusing on prompt limits and image combination capabilities.
 
     ``extra='allow'`` preserves live keys not yet modeled (e.g. ``aspectRatios``
-    / ``singleImageAspectRatio`` / ``maxInputImages``) on ``model_extra``.
+    / ``singleImageAspectRatio``) on ``model_extra``.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -254,6 +254,13 @@ class InpaintModelConstraints(BaseModel):
     promptCharacterLimit: float = Field(..., description="The maximum supported prompt length")
     combineImages: bool = Field(
         default=False, description="Whether the model can combine multiple images"
+    )
+    maxInputImages: int | None = Field(
+        default=None,
+        description=(
+            "Maximum number of input images accepted by ``/image/multi-edit``. "
+            "Absent means the API's default of 3, or 1 when ``combineImages`` is false."
+        ),
     )
     resolutions: list[str] | None = Field(
         default=None,
@@ -353,17 +360,18 @@ class PricingTier(BaseModel):
     rewriting the lookup.
 
     ``extra="allow"`` keeps a future server-side currency on ``model_extra``
-    rather than dropping it, matching every enclosing pricing model.
+    rather than dropping it, matching every enclosing pricing model. ``diem`` is
+    ``None`` when the server sends a USD price only.
     """
 
     model_config = ConfigDict(extra="allow")
 
     usd: float = Field(..., description="USD cost")
-    diem: float = Field(..., description="Diem cost")
+    diem: float | None = Field(default=None, description="Diem cost, when published")
 
-    def __getitem__(self, key: str) -> float:
+    def __getitem__(self, key: str) -> float | None:
         try:
-            value: float = getattr(self, key)
+            value: float | None = getattr(self, key)
         except AttributeError as exc:
             raise KeyError(key) from exc
         return value
@@ -487,13 +495,10 @@ class VideoResolutionPricing(BaseModel):
     silently dropping them when the undiscriminated pricing union matches
     here on the required ``resolutions`` key alone.
 
-    Note: because :data:`ModelPricing` is an
-    *undiscriminated* union, any pricing payload carrying a ``resolutions``
-    key — including inpaint models that surface one — resolves to this class
-    rather than a more specific sibling. This isinstance-mislabel is an
-    accepted low-severity tradeoff (converting the union to a discriminated
-    union is out of scope); ``extra="allow"`` on every sibling means no keys
-    are lost regardless of which member the union picks.
+    :data:`ModelPricing` is an undiscriminated union, which picks the member
+    setting the most declared fields, so a payload reaches this class only when
+    ``resolutions`` is the one key any member declares. Inpaint models that list
+    resolutions parse as :class:`InpaintModelPricing`.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -506,16 +511,31 @@ class VideoResolutionPricing(BaseModel):
 class InpaintModelPricing(BaseModel):
     """Pricing for inpaint models.
 
-    Inpaint operations have flat per-operation pricing.
+    ``inpaint`` is the per-operation price. Some models also list what it varies
+    by: ``resolutions``, ``quality`` per resolution, and ``inputImages``, which
+    prices images beyond the number included.
 
     ``extra="allow"`` keeps unknown live pricing keys on
     :attr:`pydantic.BaseModel.model_extra` (and in ``model_dump``) rather than
-    silently dropping them.
+    silently dropping them. These three fields accept any value too: an ``inpaint``
+    price is what makes this the model's pricing, and a shape the catalog has not
+    used before stays here as sent rather than moving the whole price to another
+    pricing model. ``resolutions`` parses to :class:`PricingTier` values when it fits.
     """
 
     model_config = ConfigDict(extra="allow")
 
     inpaint: PricingTier = Field(..., description="Per inpaint operation pricing")
+    resolutions: dict[str, PricingTier] | Any = Field(
+        default=None, description="Per-operation pricing by resolution tier (e.g., '1K', '2K')"
+    )
+    quality: dict[str, Any] | Any = Field(
+        default=None, description="Pricing by resolution tier, then quality (e.g., 'low')"
+    )
+    inputImages: dict[str, Any] | Any = Field(
+        default=None,
+        description="``included`` input images, and the ``additional`` price of each beyond them",
+    )
 
 
 class ASRModelPricing(BaseModel):

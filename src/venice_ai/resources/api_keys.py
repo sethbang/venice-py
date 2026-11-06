@@ -46,6 +46,22 @@ if TYPE_CHECKING:
     from .._client import VeniceClient  # noqa: F401
 
 
+def _envelope_has_more(response_data: Any, page_number: int) -> bool:
+    """Whether a response's ``pagination`` object says a page follows ``page_number``.
+
+    The two shapes are those Venice's paged endpoints use: ``hasMore`` on x402
+    transactions, ``totalPages`` on character reviews. A response without either
+    has no further page to ask for.
+    """
+    pagination = response_data.get("pagination") if isinstance(response_data, dict) else None
+    if not isinstance(pagination, dict):
+        return False
+    if pagination.get("hasMore") is True:
+        return True
+    total_pages = pagination.get("totalPages")
+    return isinstance(total_pages, int) and page_number < total_pages
+
+
 class ApiKeys(APIResource["VeniceClient"]):
     """
     Asynchronous resource for comprehensive API key management operations.
@@ -59,7 +75,7 @@ class ApiKeys(APIResource["VeniceClient"]):
 
     Key Features:
         - Create and manage API keys with custom configurations
-        - List and retrieve existing keys with pagination support
+        - List and retrieve existing keys
         - Delete keys with proper cleanup
         - Monitor rate limits and usage patterns
         - Web3 authentication and blockchain-based key generation
@@ -80,7 +96,7 @@ class ApiKeys(APIResource["VeniceClient"]):
             async def manage_api_keys():
                 async with VeniceClient() as client:
                     # List existing keys
-                    keys = await client.api_keys.list(limit=10)
+                    keys = await client.api_keys.list()
 
                     # Create a new key
                     request = CreateApiKeyRequest(
@@ -175,15 +191,20 @@ class ApiKeys(APIResource["VeniceClient"]):
 
     async def list(self, *, page: int | None = None, limit: int | None = None) -> list[ApiKey]:
         """
-        Retrieve a paginated list of API keys for the authenticated account.
+        Retrieve the API keys of the authenticated account.
 
         Returns metadata for all API keys associated with the current account, including
         both active and inactive keys. The actual secret key values are excluded from
         responses for security purposes.
 
+        ``GET /api_keys`` declares no query parameters and ignores ``page`` and
+        ``limit``: every request answers with every key, so do not page by hand
+        with these arguments. :meth:`iter_all` walks the keys safely.
+
         Args:
-            page: Page number for pagination (1-based). Defaults to first page.
-            limit: Maximum number of keys per page. Uses server default if not specified.
+            page: Sent as given. The endpoint ignores it.
+            limit: Sent as given. The endpoint ignores it, so more keys than
+                ``limit`` can come back.
 
         Returns:
             List of API key objects containing metadata including ID, description,
@@ -197,12 +218,8 @@ class ApiKeys(APIResource["VeniceClient"]):
         Example:
             .. code-block:: python
 
-                # List all keys
                 keys = await client.api_keys.list()
-
-                # Paginated listing
-                page_keys = await client.api_keys.list(page=1, limit=10)
-                for key in page_keys:
+                for key in keys:
                     print(f"Key: {key.id} - {key.description}")
         """
         params: dict[str, Any] = {}
@@ -222,13 +239,18 @@ class ApiKeys(APIResource["VeniceClient"]):
         page_size: int = DEFAULT_PAGE_SIZE,
         max_items: int | None = None,
     ) -> Paginator[ApiKey]:
-        """Lazily iterate every API key, paging through the server as needed.
+        """Lazily iterate every API key, yielding each one once.
 
-        Wraps :meth:`list` for unbounded enumeration. Termination: there's
-        no pagination envelope on this endpoint, so the iterator stops on
-        the first short page (``len(items) < page_size``).
+        ``GET /api_keys`` declares no query parameters and answers every request
+        with every key, so a normal walk is one request carrying no parameters.
+        Further pages are requested only when a response carries a ``pagination``
+        object saying there are more (``hasMore`` or ``totalPages``), by ``page``
+        number. Such a walk ends on the first page that adds no new key, so a
+        response that keeps claiming more cannot make it loop.
 
-        :param page_size: Server page size (default 100).
+        :param page_size: Has no effect on the requests sent, because the
+            endpoint has no page size. Accepted for parity with the other
+            ``iter_*`` methods.
         :param max_items: Optional cap on total items yielded.
 
         Example::
@@ -238,11 +260,17 @@ class ApiKeys(APIResource["VeniceClient"]):
         """
 
         async def _fetch_page(page_index: int) -> _PageResult[ApiKey]:
-            # API uses 1-based pages; convert from zero-based iteration index.
-            items = await self.list(page=page_index + 1, limit=page_size)
-            return _PageResult(items=items, has_more=len(items) == page_size)
+            page_number = page_index + 1  # the API counts pages from 1
+            params = {"page": page_number} if page_index else None
+            response_data = await self._client.get("api_keys", params=params)
+            return _PageResult(
+                items=self._validate_list_response(response_data, "list API keys"),
+                has_more=_envelope_has_more(response_data, page_number),
+            )
 
-        return Paginator(_fetch_page, page_size=page_size, max_items=max_items)
+        return Paginator(
+            _fetch_page, page_size=page_size, max_items=max_items, key=lambda api_key: api_key.id
+        )
 
     async def create(self, *, api_key_request: CreateApiKeyRequest) -> CreatedApiKey:
         """

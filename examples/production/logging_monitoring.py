@@ -19,6 +19,10 @@ Requirements:
     pip install venice-py
     export VENICE_API_KEY="your-api-key"
 
+Application records go to their own logger (``APP_LOGGER_NAME``) and the SDK's to
+``venice_ai``, so either can be filtered. Handlers are added to both, and only the
+ones this example added are ever removed.
+
 Cost: three short chat requests on the cheapest model that answers directly,
 well under $0.001 in total. The deliberate failure is free.
 
@@ -54,6 +58,13 @@ RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
 # A name that is not in the model catalog, so a request for it fails unbilled.
 UNKNOWN_MODEL = "no-such-model-logging-demo"
+
+# The application's own records go here, not to the SDK's "venice_ai" logger.
+APP_LOGGER_NAME = "app.venice_requests"
+SDK_LOGGER_NAME = "venice_ai"
+
+# Every handler this example attached, so it can remove those and no others.
+_ATTACHED: list[tuple[logging.Logger, logging.Handler]] = []
 
 
 # =============================================================================
@@ -118,11 +129,30 @@ class ColoredFormatter(logging.Formatter):
 # =============================================================================
 
 
-def _reset_handlers(logger: logging.Logger) -> None:
-    """Remove and close existing handlers so repeated setup never stacks them."""
-    for handler in list(logger.handlers):
+def _attach(logger: logging.Logger, handler: logging.Handler) -> None:
+    """Add ``handler`` to ``logger`` and remember it for :func:`_remove_attached_handlers`."""
+    logger.addHandler(handler)
+    _ATTACHED.append((logger, handler))
+
+
+def _remove_attached_handlers() -> None:
+    """Remove and close the handlers this example attached, so setup never stacks them.
+
+    A handler your application put on these loggers stays where it is.
+    """
+    for logger, handler in _ATTACHED:
         logger.removeHandler(handler)
         handler.close()
+    _ATTACHED.clear()
+
+
+def _app_and_sdk_loggers(level: int) -> tuple[logging.Logger, logging.Logger]:
+    """Return the application logger and the SDK logger, both set to ``level``."""
+    app_logger = logging.getLogger(APP_LOGGER_NAME)
+    sdk_logger = logging.getLogger(SDK_LOGGER_NAME)
+    app_logger.setLevel(level)
+    sdk_logger.setLevel(level)
+    return app_logger, sdk_logger
 
 
 def setup_development_logging() -> logging.Logger:
@@ -133,10 +163,11 @@ def setup_development_logging() -> logging.Logger:
     - Colored output for terminal
     - DEBUG level logging
     - Detailed formatting
+
+    Returns the application logger.
     """
-    logger = logging.getLogger("venice_ai")
-    _reset_handlers(logger)
-    logger.setLevel(logging.DEBUG)
+    _remove_attached_handlers()
+    app_logger, sdk_logger = _app_and_sdk_loggers(logging.DEBUG)
 
     # Console handler with colors
     console_handler = logging.StreamHandler(sys.stdout)
@@ -148,9 +179,10 @@ def setup_development_logging() -> logging.Logger:
     )
     console_handler.setFormatter(formatter)
 
-    logger.addHandler(console_handler)
+    _attach(app_logger, console_handler)
+    _attach(sdk_logger, console_handler)
 
-    return logger
+    return app_logger
 
 
 def setup_production_logging(log_file: str | None = None) -> logging.Logger:
@@ -166,14 +198,15 @@ def setup_production_logging(log_file: str | None = None) -> logging.Logger:
     Args:
         log_file: Path to main log file. Defaults to ``examples/results/venice_ai.log``
             so the example never writes into the caller's current directory.
+
+    Returns the application logger.
     """
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     main_path = Path(log_file) if log_file is not None else RESULTS_DIR / "venice_ai.log"
     error_path = RESULTS_DIR / "venice_ai_errors.log"
 
-    logger = logging.getLogger("venice_ai")
-    _reset_handlers(logger)
-    logger.setLevel(logging.INFO)
+    _remove_attached_handlers()
+    app_logger, sdk_logger = _app_and_sdk_loggers(logging.INFO)
 
     # Main log file handler (all logs). mode="w" starts a fresh file per run so
     # the log only holds this run's records; production would use a rotating
@@ -192,11 +225,12 @@ def setup_production_logging(log_file: str | None = None) -> logging.Logger:
     console_handler.setLevel(logging.ERROR)
     console_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 
-    logger.addHandler(file_handler)
-    logger.addHandler(error_handler)
-    logger.addHandler(console_handler)
+    # Both loggers share the handlers, so one file holds the whole story in order.
+    for logger in (app_logger, sdk_logger):
+        for handler in (file_handler, error_handler, console_handler):
+            _attach(logger, handler)
 
-    return logger
+    return app_logger
 
 
 class RecordCollector(logging.Handler):
@@ -291,7 +325,9 @@ class RequestLogger:
                     "request_id": response.request_id,
                     "model": model,
                     "duration_ms": duration_ms,
-                    "finish_reason": response.choices[0].finish_reason,
+                    "finish_reason": (
+                        response.choices[0].finish_reason if response.choices else None
+                    ),
                     "tokens_used": (response.usage.total_tokens if response.usage else None),
                     "balance_diem": balance.diem if balance else None,
                     "balance_usd": balance.usd if balance else None,
@@ -475,11 +511,12 @@ async def example_development_logging() -> bool:
 
     # The SDK logs through the standard ``venice_ai`` logger hierarchy, so a
     # DEBUG-level handler on that logger is all it takes to see SDK internals
-    # (model selection, request routing, header redaction).
+    # (request routing and redacted request headers, for instance).
     logger = setup_development_logging()
-    # A second handler that keeps the records, to check SDK output arrived.
+    # A second handler that keeps the SDK's records, to check they arrived.
+    sdk_logger = logging.getLogger(SDK_LOGGER_NAME)
     collector = RecordCollector()
-    logger.addHandler(collector)
+    sdk_logger.addHandler(collector)
 
     try:
         async with VeniceClient() as client:
@@ -494,7 +531,7 @@ async def example_development_logging() -> bool:
                 venice_parameters=OWN_PROMPT_ONLY,
             )
     finally:
-        logger.removeHandler(collector)
+        sdk_logger.removeHandler(collector)
 
     finish_reason = response.choices[0].finish_reason if response.choices else None
     print(f"\n   Response: {response.text}")
@@ -503,7 +540,7 @@ async def example_development_logging() -> bool:
         print("❌ Response was truncated or empty")
         return False
 
-    # RequestLogger logs at INFO, so every DEBUG record came from the SDK itself.
+    # RequestLogger writes to the application logger, so these all came from the SDK.
     sdk_debug = [r for r in collector.records if r.levelno == logging.DEBUG]
     sources = sorted({r.name for r in sdk_debug})
     print(f"   SDK DEBUG records: {len(sdk_debug)} from {', '.join(sources) or 'no logger'}")
@@ -600,7 +637,7 @@ async def example_production_logging() -> bool:
 
     # Close the file handlers so the logs are flushed and later SDK activity in
     # this process stays out of them.
-    _reset_handlers(logger)
+    _remove_attached_handlers()
 
     print("\n   Logs written to:")
     print(f"   - {main_log} (all logs)")
@@ -619,7 +656,7 @@ async def example_production_logging() -> bool:
 def _verify_error_log(path: Path, expected_error_type: str, expected_failures: int) -> bool:
     """Read the error log back and check each failure was written exactly once."""
     records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    # The SDK logs to the same logger, so count this application's own records.
+    # The SDK's records share this file, so count this application's own records.
     failed = [r for r in records if r["message"].startswith("Chat request failed")]
     deliberate = [r for r in failed if r.get("model") == UNKNOWN_MODEL]
 
@@ -694,16 +731,16 @@ async def example_structured_logging(production_log: Path) -> bool:
     print("Structured Logging Example")
     print("=" * 60)
 
-    # A dedicated logger for application events. propagate=False keeps these
-    # records out of the ``venice_ai`` handlers (and the production log file).
+    # A dedicated logger for this one line. propagate=False keeps it from reaching
+    # any handler above it.
     logger = logging.getLogger("app.structured")
-    _reset_handlers(logger)
+    _remove_attached_handlers()
     logger.propagate = False
     logger.setLevel(logging.INFO)
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(StructuredFormatter())
-    logger.addHandler(handler)
+    _attach(logger, handler)
 
     records = [json.loads(line) for line in production_log.read_text().splitlines() if line]
     completed = [r for r in records if r.get("message") == "Chat request completed"]
@@ -727,6 +764,7 @@ async def example_structured_logging(production_log: Path) -> bool:
         },
     )
 
+    _remove_attached_handlers()
     print("\n💡 Each line is one JSON object, so ELK, Splunk or CloudWatch Logs")
     print("   Insights can index every field without a custom parser.")
     return True

@@ -22,6 +22,7 @@ Example usage:
 from .api.base import UsageData
 from .api.chat import (
     ChatChoice,
+    ChatChoiceLogprobs,
     ChatCompletionResponse,
     ChatMessage,
     ChatMessageContentPart,
@@ -56,6 +57,7 @@ __all__ = [
     "ChatMessageImageContent",
     "ChatMessageImageUrl",
     "ChatMessageTextContent",
+    "ChatChoiceLogprobs",
     "LogProbToken",
     "ChatChoice",
     "ChatUsage",

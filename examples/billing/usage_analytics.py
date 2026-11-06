@@ -13,6 +13,11 @@ This example demonstrates how to retrieve and analyze billing data using the Ven
 - Understanding billing entries and inference details
 - Working with cursor pagination by hand (client.billing.get_usage_history)
 - Exporting a ledger window as CSV pages (client.billing.iter_usage_history_csv)
+- Asking analytics for explicit dates, and reading its daily breakdowns
+- Filtering the ledger by currency and capping a walk with max_items
+
+Every call here is a free read, and the only thing written is the CSV export under
+examples/results/.
 
 Requires an ADMIN key in VENICE_API_KEY. Billing endpoints are admin-only, so with
 any other valid key the example prints ``SKIPPED:`` and exits 77.
@@ -769,6 +774,109 @@ async def show_usage_analytics(
     return reconcile_analytics(analytics, ledger, ledger_start, ledger_end, fetched_at)
 
 
+async def show_date_range_analytics(end: datetime) -> bool | None:
+    """Ask analytics for explicit dates and read its daily breakdowns.
+
+    ``startDate`` and ``endDate`` replace ``lookback`` (the API refuses both
+    together). ``byModelDailyUsd`` and ``byKeyDailyUsd`` hold one chart-ready row
+    per day, with a column per name in ``topModels`` and ``topKeyNames``; they have
+    no fixed fields, so they are printed rather than checked. Returns ``None``
+    (section skipped) when the beta endpoint is not available to this account.
+    """
+    print("\n🗓️ Usage Analytics for Explicit Dates (Beta)")
+    print("-" * 40)
+
+    stop = end.date()
+    start = stop - timedelta(days=6)
+    async with VeniceClient() as client:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=FutureWarning)
+                analytics = await client.billing.get_usage_analytics(
+                    startDate=start.isoformat(), endDate=stop.isoformat()
+                )
+        except (NotFoundError, PermissionDeniedError) as e:
+            print(f"Section skipped: usage analytics is not available on this account ({e})")
+            return None
+        except VeniceError as e:
+            print(f"❌ Error retrieving analytics for {start} to {stop}: {e}")
+            return False
+    assert isinstance(analytics, UsageAnalyticsResponse)
+
+    print(f"   📅 Asked for {start} to {stop}; {len(analytics.byDate)} day(s) returned")
+    print(f"   🤖 Top models: {', '.join(analytics.topModels[:5]) or '(none)'}")
+    print(f"   🔑 Top keys:   {', '.join(analytics.topKeyNames[:5]) or '(none)'}")
+    for label, rows in (
+        ("byModelDailyUsd", analytics.byModelDailyUsd),
+        ("byKeyDailyUsd", analytics.byKeyDailyUsd),
+    ):
+        print(f"   📈 {label}: {len(rows)} row(s); latest: {rows[-1] if rows else '(none)'}")
+
+    outside = [
+        d.date for d in analytics.byDate if not start.isoformat() <= d.date <= stop.isoformat()
+    ]
+    if outside:
+        print(f"   ❌ Days outside the requested range: {', '.join(outside)}")
+        return False
+    print("   ✅ Every day returned is inside the requested range")
+    return True
+
+
+async def show_currency_filter(last_7_days: list[BillingUsageEntry], end: datetime) -> bool | None:
+    """Filter the ledger by currency, and cap a walk with ``max_items``.
+
+    The currency comes from the ledger already walked, because the endpoint can
+    hang on a filter that matches nothing. Returns ``None`` (section skipped) when
+    the window holds no entries to filter.
+    """
+    print("\n🪙 Ledger Filtered by Currency")
+    print("-" * 40)
+
+    counts = Counter(e.currency for e in last_7_days)
+    if not counts:
+        print("Section skipped: no ledger entries in the last 7 days to filter")
+        return None
+    currency, expected = counts.most_common(1)[0]
+
+    start, stop = _window(7, end)
+    async with VeniceClient() as client:
+        try:
+            filtered = [
+                entry
+                async for entry in client.billing.iter_usage_history(
+                    page_size=WALK_PAGE_SIZE,
+                    currency=currency,
+                    startTimestamp=start,
+                    endTimestamp=stop,
+                )
+            ]
+            capped = [
+                entry
+                async for entry in client.billing.iter_usage_history(
+                    page_size=10, max_items=5, startTimestamp=start, endTimestamp=stop
+                )
+            ]
+        except VeniceError as e:
+            print(f"❌ Error filtering the ledger by {currency}: {e}")
+            return False
+
+    print(f"   currency={currency!r}: {len(filtered):,} entries ({expected:,} in the earlier walk)")
+    print(f"   max_items=5: {len(capped)} entries")
+    ok = True
+    other = {e.currency for e in filtered} - {currency}
+    if other:
+        print(f"   ❌ The filter also returned: {', '.join(sorted(other))}")
+        ok = False
+    # The ledger only grows, so the filtered walk can hold more but never fewer.
+    if len(filtered) < expected:
+        print(f"   ❌ Expected at least {expected:,} {currency} entries")
+        ok = False
+    if len(capped) != min(5, len(last_7_days)):
+        print(f"   ❌ max_items=5 yielded {len(capped)} entries")
+        ok = False
+    return ok
+
+
 async def main() -> int:
     """Run all billing analytics examples.
 
@@ -824,7 +932,12 @@ async def main() -> int:
             "show_usage_analytics",
             await show_usage_analytics(ledger, now - timedelta(days=30), now),
         ),
+        ("show_date_range_analytics", await show_date_range_analytics(now)),
     ]
+    if ledger is not None:
+        results.append(
+            ("show_currency_filter", await show_currency_filter(_since(ledger, 7, now), now))
+        )
 
     failed = [name for name, ok in results if ok is False]
     skipped = [name for name, ok in results if ok is None]
@@ -848,6 +961,8 @@ async def main() -> int:
         ("demonstrate_pagination", "Manual cursor pagination with get_usage_history"),
         ("export_to_csv", "Exporting the ledger window as CSV pages"),
         ("show_usage_analytics", "Gross usage analytics by date/model/key (Beta) vs the ledger"),
+        ("show_date_range_analytics", "Analytics for explicit dates, with daily breakdowns"),
+        ("show_currency_filter", "Filtering the ledger by currency; capping with max_items"),
     ]
     print("\n💡 Key concepts demonstrated:")
     for name, concept in concepts:

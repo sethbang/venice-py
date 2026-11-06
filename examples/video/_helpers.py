@@ -16,6 +16,7 @@ Shared helpers for Venice AI video examples.
   instead of looking like a model kind the catalog lacks.
   ``duration_seconds`` reads a duration tier (``"5s"`` -> ``5``).
 - ``print_progress`` renders ``VideoJob.wait`` progress updates.
+- ``wait_and_check`` waits for a job, saves its video and checks the clip.
 - ``download_video`` saves a finished video, retrying a dropped transfer, and
   ``print_recovery`` says how to reach a job that was not released.
 - ``read_playable_video`` raises ``UnplayableVideoError`` for a saved file that
@@ -23,6 +24,14 @@ Shared helpers for Venice AI video examples.
   block, so that a bad delivery keeps the stored video instead of releasing it.
 - ``report_uncertain_queue`` tells a queue call the server may have accepted
   from one it refused or never received, and says what that means for the bill.
+- ``resolution_height`` sorts resolution tiers, ``video_constraints`` reads a
+  model's catalog constraints, and ``report_error`` prints a video API failure.
+- ``url_serves`` is a free pre-flight: it confirms a media URL still answers with
+  the expected kind of content, before a paid job depends on it.
+- ``display_url`` gives a URL in a form safe to print: a signed link's query can
+  grant access on its own.
+- ``spending_ceiling`` reads the most one job may quote, and ``ceiling_refusal``
+  turns a quote above it into a skip.
 - ``SKIPPED`` is the exit code an example returns when an optional
   prerequisite is missing (paid generation not enabled, no matching model);
   it prints a line starting with ``SKIPPED:`` first.
@@ -34,7 +43,10 @@ Shared helpers for Venice AI video examples.
 """
 
 import asyncio
+import os
 import struct
+import urllib.parse
+import urllib.request
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,13 +54,26 @@ from typing import Any
 
 import aiohttp
 
-from venice_ai.exceptions import APIConnectionError, APIError, APITimeoutError, VeniceError
+from venice_ai import ModelQuotesUnavailableError, VeniceClient, VideoGenerationError
+from venice_ai.exceptions import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AuthenticationError,
+    PermissionDeniedError,
+    VeniceError,
+)
 from venice_ai.resources.video import VideoJob
 from venice_ai.types.api.models import ModelResponse, VideoModelConstraints, VideoModelSpec
 from venice_ai.types.api.video import VideoCompletedStatus, VideoProcessingStatus
 
 #: Exit code for "skipped": a missing optional prerequisite, not a failure.
 SKIPPED = 77
+
+#: The most one paid job may quote before it is refused, in USD.
+VIDEO_CEILING_USD = 0.50
+#: Set this to spend more than the ceiling on one generation.
+VIDEO_CEILING_ENV_VAR = "VENICE_VIDEO_MAX_USD"
 
 #: A section's result: ``True`` passed, ``False`` failed, a string is the
 #: reason it was skipped.
@@ -145,6 +170,104 @@ def _tier_height(value: str) -> int | None:
         return {2: 1440, 4: 2160, 8: 4320}.get(int(tier[:-1]))
     digits = tier.removesuffix("p")
     return int(digits) if digits.isdigit() else None
+
+
+def resolution_height(value: str) -> int:
+    """Sort key for resolution tiers: ``"720p"`` -> 720, ``"4k"`` -> 2160."""
+    return _tier_height(value) or 0
+
+
+async def video_constraints(client: VeniceClient, model: str) -> VideoModelConstraints:
+    """Return the video constraints the catalog lists for ``model``."""
+    entry = await client.models.get(model)
+    spec = entry.model_spec
+    if not isinstance(spec, VideoModelSpec) or spec.constraints is None:
+        raise ValueError(f"{model} has no video constraints in the catalog")
+    return spec.constraints
+
+
+def report_error(e: Exception) -> None:
+    """Print a failed video API call, with a hint where one helps."""
+    if isinstance(e, ModelQuotesUnavailableError):
+        # Models matched but none could be priced: an outage, a rate limit or
+        # a request Venice rejects. Each model's own error says which.
+        print(f"❌ No usable quote: {len(e.failures)} quotes failed")
+        for model_id, error in list(e.failures.items())[:3]:
+            print(f"   {model_id}: {type(error).__name__}: {error}")
+        return
+    print(f"❌ Error: {e}")
+    if isinstance(e, (AuthenticationError, PermissionDeniedError)):
+        print("💡 Check VENICE_API_KEY: video generation needs a valid key with API access")
+
+
+def url_serves(url: str, expected_prefix: str) -> bool:
+    """Free pre-flight: whether ``url`` still answers with ``expected_prefix`` content.
+
+    ``expected_prefix`` is the start of the media type, such as ``"image/"`` or
+    ``"video/"``. The server fetches a media URL only after the job is queued, so
+    a dead link would otherwise surface as a failed paid job. A ``data:`` URI
+    carries its own content and is not fetched. Only the headers are read.
+    """
+    if url.startswith("data:"):
+        return True
+    request = urllib.request.Request(url, headers={"User-Agent": "venice-py-example"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as resp:  # noqa: S310 - fixed or user-set URL
+            content_type = resp.headers.get("Content-Type", "")
+    except OSError as e:
+        print(f"❌ {display_url(url)} is unreachable: {e}")
+        return False
+    if not content_type.startswith(expected_prefix):
+        print(f"❌ {display_url(url)} returned {content_type!r}, not {expected_prefix}*")
+        return False
+    return True
+
+
+def display_url(url: str) -> str:
+    """A URL in a form safe to print, without its query or fragment.
+
+    A signed link's query can grant access on its own, and a ``data:`` URI is the
+    whole file.
+    """
+    if url.startswith("data:"):
+        return "a data: URI"
+    parts = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
+def spending_ceiling(env_var: str = VIDEO_CEILING_ENV_VAR) -> float:
+    """The most one job may quote: *env_var*, or ``VIDEO_CEILING_USD``.
+
+    Raises:
+        ValueError: If the variable is set to something other than a number.
+    """
+    raw = os.environ.get(env_var)
+    return float(raw) if raw else VIDEO_CEILING_USD
+
+
+def ceiling_refusal(quote_usd: float, env_var: str = VIDEO_CEILING_ENV_VAR) -> Outcome | None:
+    """Refuse a job quoted above the spending ceiling.
+
+    A quote leaves out reference images, audio, elements and keyframes, so a job
+    using them can cost more than its quote and more than the ceiling.
+
+    Returns:
+        ``None`` if the job may go ahead, the reason to skip it if its quote is over
+        the ceiling, or ``False`` if the variable is not a number.
+    """
+    try:
+        ceiling = spending_ceiling(env_var)
+    except ValueError as e:
+        print(f"❌ {env_var} is not a number: {e}")
+        return False
+    if quote_usd <= ceiling:
+        return None
+    reason = (
+        f"the ${quote_usd:.4f} quote is over the ${ceiling:.2f} ceiling; "
+        f"set {env_var} to spend more"
+    )
+    print(f"⏭️  Not queued: {reason}.")
+    return reason
 
 
 def duration_seconds(value: Any) -> int | None:
@@ -373,6 +496,62 @@ async def download_video(job: VideoJob, output_path: Path, status: VideoComplete
             print(f"⚠️  Download attempt {attempt} of {DOWNLOAD_ATTEMPTS} failed: {e}")
             await asyncio.sleep(2 * attempt)
     return await job.download(output_path, status)
+
+
+async def wait_and_check(
+    job: VideoJob,
+    output_path: Path,
+    request: Mapping[str, Any],
+    written: list[Path],
+    *,
+    expect_audio: bool | None = None,
+) -> bool:
+    """Wait for a job, save its video and check the clip against ``request``.
+
+    Each saved file is added to ``written``. The handlers sit outside the block:
+    leaving it cleanly releases a finished job's stored video, so a failed
+    download has to raise through it. Any failure prints its reason and returns
+    ``False``.
+    """
+    print(f"⏳ Polling for completion (queue_id={job.queue_id}) ...")
+    try:
+        async with job:
+            status = await job.wait(on_progress=print_progress)
+            saved = await download_video(job, output_path, status)
+            data = read_playable_video(saved)
+    except UnplayableVideoError as e:
+        written.append(output_path)
+        print(f"❌ {output_path} is not a usable video: {e} (queue_id={job.queue_id})")
+        print_recovery(job)
+        return False
+    except VideoGenerationError as e:
+        code = f" (code={e.error_code})" if e.error_code else ""
+        print(f"❌ Generation failed: {e}{code}")
+        return False
+    except TimeoutError as e:
+        # wait() ran out of polls; the job is still queued or running.
+        print(f"❌ {e} (queue_id={job.queue_id})")
+        print_recovery(job)
+        return False
+    except aiohttp.ClientResponseError as e:
+        # The error shows the storage host at most, never the link.
+        print(f"❌ The download answered HTTP {e.status} (queue_id={job.queue_id})")
+        print_recovery(job)
+        return False
+    except VeniceError as e:
+        # A status request failed, or every download attempt did. That does not
+        # cancel the job: it may still finish, and it is billed either way.
+        print(f"❌ Video request failed (queue_id={job.queue_id}): {e}")
+        print_recovery(job)
+        return False
+
+    written.append(saved)
+    print(f"💾 Saved to {saved} ({len(data):,} bytes)")
+    if not check_video(data, request, expect_audio=expect_audio):
+        print("❌ The clip does not match the request")
+        return False
+    print("✅ Video ready and matches the request")
+    return True
 
 
 def queue_outcome_unknown(e: Exception) -> bool:

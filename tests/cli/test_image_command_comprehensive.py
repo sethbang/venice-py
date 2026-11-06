@@ -3830,14 +3830,73 @@ class TestMultiEditCommand:
         assert mock_client.image.multi_edit.await_count == 1
         kwargs = mock_client.image.multi_edit.await_args.kwargs
         assert kwargs["prompt"] == "combine these"
-        assert kwargs["image"] == str(in1)
-        assert kwargs["image_2"] == str(in2)
-        assert kwargs["image_3"] == str(in3)
+        assert kwargs["images"] == [str(in1), str(in2), str(in3)]
+        assert "image" not in kwargs
         assert kwargs["model"] == "hidream"
         assert kwargs["aspect_ratio"] == "1:1"
         assert kwargs["output_format"] == "png"
         assert kwargs["quality"] == "high"
         assert out_file.read_bytes() == result_bytes
+
+    @staticmethod
+    def _invoke_multi_edit(cli_runner, tmp_path, args):
+        """Run the command through click with a stubbed client; return it and the result."""
+        mock_client = AsyncMock()
+        mock_client.image.multi_edit = AsyncMock(return_value=b"EDITED")
+        with (
+            patch("venice_ai.cli.config.ensure_api_key", return_value="test-key"),
+            patch("venice_ai.cli.commands.image.multi_edit.VeniceClient") as MockClient,
+        ):
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cm.__aexit__ = AsyncMock(return_value=None)
+            MockClient.return_value = mock_cm
+            result = cli_runner.invoke(
+                cli,
+                ["image", "multi-edit", "-p", "blend", "-o", str(tmp_path / "out.png"), *args],
+            )
+        return mock_client, result
+
+    def test_multi_edit_repeated_image_sends_more_than_three_in_order(self, cli_runner, tmp_path):
+        paths = [tmp_path / f"{i}.png" for i in range(6)]
+        for path in paths:
+            path.write_bytes(b"\x89PNG\r\n\x1a\n")
+        args = [arg for path in paths for arg in ("--image", str(path))]
+
+        client, result = self._invoke_multi_edit(cli_runner, tmp_path, args)
+
+        assert result.exit_code == 0, result.output
+        assert client.image.multi_edit.await_args.kwargs["images"] == [str(p) for p in paths]
+
+    def test_multi_edit_layer_flags_follow_repeated_images(self, cli_runner, tmp_path):
+        paths = [tmp_path / f"{i}.png" for i in range(4)]
+        for path in paths:
+            path.write_bytes(b"\x89PNG\r\n\x1a\n")
+        args = [
+            "--image-3", str(paths[3]),
+            "-i", str(paths[0]),
+            "--image-2", str(paths[2]),
+            "-i", str(paths[1]),
+        ]  # fmt: skip
+
+        client, result = self._invoke_multi_edit(cli_runner, tmp_path, args)
+
+        assert result.exit_code == 0, result.output
+        assert client.image.multi_edit.await_args.kwargs["images"] == [str(p) for p in paths]
+
+    def test_multi_edit_requires_an_image(self, cli_runner, tmp_path):
+        client, result = self._invoke_multi_edit(cli_runner, tmp_path, [])
+
+        assert result.exit_code == 2
+        assert client.image.multi_edit.await_count == 0
+
+    def test_multi_edit_missing_file_is_a_usage_error(self, cli_runner, tmp_path):
+        client, result = self._invoke_multi_edit(
+            cli_runner, tmp_path, ["-i", str(tmp_path / "absent.png")]
+        )
+
+        assert result.exit_code == 2
+        assert client.image.multi_edit.await_count == 0
 
     @staticmethod
     async def _run_multi_edit_failure(mock_ctx, tmp_path, exc):
@@ -3928,9 +3987,7 @@ class TestMultiEditCommand:
             )
 
         kwargs = mock_client.image.multi_edit.await_args.kwargs
-        assert kwargs["image"] == str(in1)
-        assert "image_2" not in kwargs
-        assert "image_3" not in kwargs
+        assert kwargs["images"] == [str(in1)]
         assert "model" not in kwargs
         assert "aspect_ratio" not in kwargs
         assert out_file.read_bytes() == b"RESULT"

@@ -6,6 +6,8 @@ Shared helpers for Venice AI image examples.
 - ``save_image`` writes image bytes with the extension sniffed from their magic
   bytes (``venice_ai.detect_image_format``) and returns the path it wrote, so
   each example can list exactly the files its own run produced.
+  ``save_and_report`` does that, records the path and prints the pixel size.
+- ``spec_flag`` reads a capability flag from a catalog entry.
 - ``image_dimensions`` reads the pixel size from a PNG, JPEG, WebP or GIF
   header, so examples can report and check what the server actually returned
   instead of echoing the requested size.
@@ -52,8 +54,9 @@ async def generate_base_image(
     """Generate a base image and return its raw bytes.
 
     Unless ``model`` is given, selects the cheapest image model sized by
-    ``width`` / ``height`` (``require_custom_size=True``; models that list
-    aspect ratios ignore pixel sizes). Generates a single image without the
+    ``width`` / ``height`` (``require_custom_size=True``; a model that lists
+    aspect ratios can ignore pixel sizes or reject them with a 400). Generates a
+    single image without the
     Venice watermark, so it is not carried into edits, cutouts or upscales, and
     returns the decoded bytes.
 
@@ -166,6 +169,30 @@ def save_image(stem: Path, data: bytes) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return path
+
+
+def save_and_report(data: bytes, stem: Path, written: list[Path]) -> Path:
+    """Save ``data`` as ``stem`` with a detected extension, record it and print its size.
+
+    :raises ValueError: If the bytes are not a recognised image format.
+    """
+    path = save_image(stem, data)
+    written.append(path)
+    width, height = image_dimensions(data)
+    print(f"   💾 {path.name}: {width}x{height}, {len(data)} bytes")
+    return path
+
+
+def spec_flag(spec: object, flag: str) -> bool:
+    """Whether a catalog entry's ``model_spec`` sets a capability flag.
+
+    Reads a typed field when the SDK declares one and the untyped extras otherwise.
+    """
+    value = getattr(spec, flag, None)
+    if value is None:
+        extras = getattr(spec, "model_extra", None) or {}
+        value = extras.get(flag)
+    return bool(value)
 
 
 def image_dimensions(data: bytes) -> tuple[int, int]:

@@ -77,6 +77,7 @@ BASE_MAINNET = "eip155:8453"
 CHAIN_NAMES = {
     BASE_MAINNET: "Base mainnet",
     "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "Solana mainnet",
+    "solana": "Solana mainnet",
 }
 
 

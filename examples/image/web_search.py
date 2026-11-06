@@ -12,9 +12,8 @@ flag does nothing.
 The example selects the cheapest capable model with
 ``client.models.resolve_image(require_web_search=True, prefer="cheapest")``,
 prints the catalog price, then renders a prompt about a current event with
-web search on. It passes ``resolution="1K"`` explicitly, so the catalog price
-it quotes is the image's base price; web search adds its own charge on top
-(see below).
+web search on. It asks for ``resolution="1K"`` when the model lists that tier, so
+the catalog price it quotes is the image's base price.
 
 After the render the example reads the request the server echoes back in
 ``response.request["data"]`` and fails unless its ``enable_web_search`` value
@@ -26,7 +25,8 @@ draw them either way.
 
 The ``/image/generate`` reference says additional credits are charged when a
 web search is used, on top of the catalog image price, without giving the
-amount. To show what the render cost, the example takes ``response.balance_info.usd``
+amount. The pricing page lists ``enable_web_search`` at $10.00 per 1,000 requests
+without naming image models. To show what the render cost, the example takes ``response.balance_info.usd``
 (what the API key could spend before the request) and subtracts what it can
 spend afterwards (``GET /api_keys/rate_limits``, free). It prints that drop and
 how far it exceeds the catalog image price. The drop is the render's cost only
@@ -36,19 +36,19 @@ printed as a measurement, not checked.
 If the balance cannot be read after the render, the example says the cost is
 unavailable and why; the render itself still counts as a success.
 
-Each run makes one paid generation. The output is written to
-``examples/results/``.
+Each run makes one paid generation, at the capable model's catalog price (about
+$0.10 on the listed prices when this was written) plus any search charge. The
+output is written to ``examples/results/``.
 """
 
 import asyncio
 import sys
 from pathlib import Path
 
+from _helpers import SKIPPED, catalog_price_usd, image_dimensions, spendable_usd
+
 from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
 from venice_ai.types.api import ImageGenerationResponse, ImageModelSpec
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import SKIPPED, catalog_price_usd, image_dimensions, spendable_usd  # noqa: E402
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
@@ -62,6 +62,21 @@ PROMPT = (
 
 class NoWebSearchModel(Exception):
     """No catalog image model supports web search."""
+
+
+def report_balance_drop(spent: float, price: float | None) -> None:
+    """Print what the fall in the key's spendable USD shows about the render's cost."""
+    if spent <= 0:
+        print("   💳 The key's spendable USD did not fall across this render:")
+        print("      DIEM or bundled credits paid it, or the charge had not posted yet")
+        return
+    print(f"   💳 The key's spendable USD fell ${spent:.4f} across this render")
+    if price is not None and spent >= price:
+        print(f"      ${spent - price:.4f} above the catalog image price of ${price:.2f}")
+    elif price is not None:
+        print(f"      Below the catalog image price of ${price:.2f}: DIEM or bundled")
+        print("      credits paid some of it, or the charge had not posted yet")
+    print("      This is the render's cost only if USD paid all of it")
 
 
 async def generate_with_web_search(client: VeniceClient) -> list[Path] | None:
@@ -82,19 +97,23 @@ async def generate_with_web_search(client: VeniceClient) -> list[Path] | None:
 
     spec = (await client.models.get(model)).model_spec
     print(f"📍 Using model: {model}")
+    # A model with no resolution tiers rejects the parameter, so send it only if listed.
+    resolution: str | None = None
     if isinstance(spec, ImageModelSpec):
         print(f"   supportsWebSearch: {spec.supportsWebSearch}")
-    price = catalog_price_usd(spec, resolution=RESOLUTION)
+        listed = spec.constraints.resolutions if spec.constraints else None
+        resolution = RESOLUTION if listed and RESOLUTION in listed else None
+    price = catalog_price_usd(spec, resolution=resolution)
     if price is not None:
-        print(f"💰 Catalog price at {RESOLUTION}: ${price:.2f}, plus the web-search")
-        print("   surcharge the server adds when a search runs")
+        tier = f" at {resolution}" if resolution else ""
+        print(f"💰 Catalog price{tier}: ${price:.2f}, before any charge for the web search")
 
     print("\n🎨 Generating with web search …")
     try:
         response: ImageGenerationResponse = await client.image.create(
             model=model,
             prompt=PROMPT,
-            resolution=RESOLUTION,
+            resolution=resolution,
             hide_watermark=True,
             enable_web_search=True,
             return_binary=False,
@@ -132,14 +151,7 @@ async def generate_with_web_search(client: VeniceClient) -> list[Path] | None:
                 f"   ⚠️ Cost unavailable: the key's balance could not be read after the render ({e})"
             )
         else:
-            spent = before - after
-            print(f"   💳 The key's spendable USD fell ${spent:.4f} across this render")
-            if price is not None and spent >= price:
-                print(f"      ${spent - price:.4f} above the catalog image price of ${price:.2f}")
-            elif price is not None:
-                print(f"      Below the catalog image price of ${price:.2f}: DIEM or bundled")
-                print("      credits paid some of it, or the charge had not posted yet")
-            print("      This is the render's cost only if USD paid all of it")
+            report_balance_drop(before - after, price)
 
     data = response.bytes(0)
     width, height = image_dimensions(data)

@@ -8,7 +8,7 @@ Sourced from `src/venice_ai/costs.py`. Both are async-safe (use `asyncio.Lock` i
 |---|---|---|
 | **`CostTracker`** | class | Stateful accumulator for per-request API costs. |
 | `CostTracker(pricing_map=None)` | sync ctor | Empty tracker. With no pricing map, all `track()` calls record zero cost. |
-| `CostTracker.from_client(client)` | async classmethod | Build a tracker with the live chat-pricing map (queries `client.models.list("chat")`). |
+| `CostTracker.from_client(client)` | async classmethod | Build a tracker with the live chat and embedding pricing map (queries `client.models.list(type="chat")`, then `type="embedding"`). |
 | `tracker.track(response, *, model=None, metadata=None)` | async | Record one response. Returns the call's USD cost. |
 | `tracker.summary()` | async | Returns `CostSummary{total_requests, total_cost_usd, total_tokens, average_cost_usd, average_tokens}`. |
 | `tracker.by_model()` | async | Returns `dict[model_id, Decimal_cost]`. |
@@ -195,7 +195,7 @@ For multi-instance deployments, share the tracker via Redis (see `rate-limiting.
 - **Treating `tracker.total_cost_usd` as `tracker.total`** — that attribute doesn't exist.
 - **Constructing `BudgetManager(limit=Decimal("2.00"))`** — wrong kwarg. Use `daily_usd=Decimal("2.00")` or `monthly_usd=Decimal("60.00")`.
 - **Calling `would_exceed(...)`** — that method doesn't exist. Use `await can_afford(estimated_cost)` BEFORE spending.
-- **`CostTracker()` with no pricing_map and expecting non-zero costs** — costs record as zero unless the map is populated. Use `await CostTracker.from_client(client)` for the live map.
+- **`CostTracker()` with no pricing_map and expecting non-zero costs** — costs record as zero, with one `UserWarning` per model, unless the map is populated. Use `await CostTracker.from_client(client)` for the live map.
 - **Threading raw responses to `tracker.track()` from streaming runs** — pass `stream.final_response` (which IS a `ChatCompletionResponse`), not individual chunks. `final_response` is only populated when you use `collect_with_deltas()` or `collect()` — see `venice-py/references/streaming.md`.
 
 ## Related references

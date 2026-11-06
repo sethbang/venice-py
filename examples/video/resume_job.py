@@ -66,6 +66,7 @@ import sys
 from pathlib import Path
 
 import aiohttp
+from _helpers import SKIPPED, check_video, download_video, print_progress
 
 from venice_ai import VeniceClient, VideoJob
 from venice_ai.exceptions import InvalidRequestError, VeniceError
@@ -75,9 +76,6 @@ from venice_ai.types.api.video import (
     VideoProcessingStatus,
     VideoQueueResponse,
 )
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import SKIPPED, check_video, download_video, print_progress  # noqa: E402
 
 # All example scripts live one level below examples/ (e.g., examples/video/).
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"

@@ -19,6 +19,10 @@ the model's context so it can answer questions about those pages.
 |                         | related to your prompt (no URL required).      |
 +-------------------------+------------------------------------------------+
 
+Cost: scraping bills $0.01 per successfully scraped URL and web search $0.01 per
+request, on top of tokens. A run scrapes 4 URLs and searches once, about $0.05
+plus the page text as input tokens at the cheapest model's rate.
+
 A failed scrape is not an HTTP error: the model simply answers from what it
 already knows. So every section checks that the scraped text really reached
 the model, by comparing the prompt-token count against a request with scraping
@@ -37,10 +41,9 @@ Sections:
 import asyncio
 import sys
 import textwrap
-from typing import Any
 
 from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
-from venice_ai.types.api import UserMessage
+from venice_ai.types.api import ChatCompletionResponse, UserMessage
 from venice_ai.types.api.requests import VeniceParameters
 
 # Generous caps so answers finish; each section also asks for a bounded answer.
@@ -62,19 +65,18 @@ def _print_block(label: str, text: str) -> None:
     print(textwrap.indent(text.strip() or "(empty)", "   "))
 
 
-def _finish_reason(response: Any) -> str | None:
+def _finish_reason(response: ChatCompletionResponse) -> str | None:
     return response.choices[0].finish_reason if response.choices else None
 
 
-def _prompt_tokens(response: Any) -> int:
-    usage = getattr(response, "usage", None)
-    return usage.prompt_tokens if usage is not None else 0
+def _prompt_tokens(response: ChatCompletionResponse) -> int:
+    return response.usage.prompt_tokens if response.usage else 0
 
 
-def _print_usage(response: Any, *, indent: str = "") -> None:
+def _print_usage(response: ChatCompletionResponse, *, indent: str = "") -> None:
     """Print finish reason and token usage from a response."""
     print(f"{indent}🏁 Finish reason: {_finish_reason(response)}")
-    usage = getattr(response, "usage", None)
+    usage = response.usage
     if usage is None:
         print(f"{indent}📊 Token usage: not provided by the API")
         return
@@ -84,11 +86,12 @@ def _print_usage(response: Any, *, indent: str = "") -> None:
     )
 
 
-def _check(response: Any, baseline: int | None, label: str, *, scraped: bool = True) -> bool:
+def _check(
+    response: ChatCompletionResponse, baseline: int | None, label: str, *, scraped: bool = True
+) -> bool:
     """Return ``False`` (and say why) if the answer is truncated or the scrape didn't land."""
     ok = True
-    usage = getattr(response, "usage", None)
-    used = usage.completion_tokens if usage is not None else None
+    used = response.usage.completion_tokens if response.usage else None
     if _finish_reason(response) == "length" or used is None or used >= MAX_COMPLETION_TOKENS:
         print(f"❌ {label}: the answer may be cut off ({used} of {MAX_COMPLETION_TOKENS} tokens)")
         ok = False
@@ -157,6 +160,7 @@ async def basic_url_scraping(client: VeniceClient, model: str) -> tuple[bool, in
     _print_block("📄 Summary and extracted data:", content)
     print()
     _print_usage(response)
+    print(f"🔗 Citations on the scraped response: {len(response.web_search_citations)}")
     ok = _check(response, baseline, "basic_url_scraping")
 
     # The prompt-token growth checked above is what proves the page was
@@ -261,7 +265,7 @@ async def scraping_vs_search(client: VeniceClient, model: str) -> bool:
     print(textwrap.indent((response_search.text or "").strip(), "   "))
     _print_usage(response_search, indent="   ")
 
-    # Web search returns the pages it found as citations; scraping does not.
+    # Web search returns the pages it found as citations.
     citations = response_search.web_search_citations
     print(f"   🔗 {len(citations)} citation(s) returned by web search:")
     for citation in citations[:5]:
@@ -337,7 +341,8 @@ async def main() -> int:
     print("=" * 50)
 
     async with VeniceClient() as client:
-        # Web scraping and web search share the model's web-search capability.
+        # The catalog has no flag for scraping, so this picks a model that lists
+        # web search; scraping on a model without it is untested here.
         # exclude_reasoning=True keeps the pick to models that answer directly,
         # so the whole token budget goes to the summaries.
         try:

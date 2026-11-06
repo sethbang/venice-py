@@ -416,13 +416,17 @@ class VideoJob:
         :param status: A completed status (from :meth:`wait` or :meth:`poll`).
         :return: The resolved :class:`Path` of the saved file.
         :raises VideoGenerationError: If the status carries no inline data and
-            no ``url``, and the job has no queue-time ``download_url``; nothing
-            is written in that case.
+            no ``url``, and the job has no queue-time ``download_url``, or if what
+            the URL served does not open like an MP4, MOV, WebM or Matroska file,
+            such as a gateway's HTML page or an empty body. Nothing is written in
+            either case and the error holds none of the body. Raised through an
+            ``async with`` block, it leaves the stored video in place.
         :raises APITimeoutError: If the URL fetch times out.
         :raises APIConnectionError: If the connection fails during the URL fetch.
         :raises aiohttp.ClientResponseError: If the URL answers with an error status.
         """
-        if not (status.data or status.url or self._download_url):
+        link = status.url or self._download_url
+        if not (status.data or link):
             raise VideoGenerationError(
                 f"Video job {self.queue_id} completed without a downloadable video: "
                 "the status has no inline data or url and the queue response had "
@@ -432,13 +436,16 @@ class VideoJob:
         await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
         if status.data:
             await asyncio.to_thread(path.write_bytes, status.data)
-        elif status.url:
-            data = await self._client.fetch_external(status.url)
-            await asyncio.to_thread(path.write_bytes, data)
-        elif self._download_url:
+        elif link:
             # VPS-backed models: the status carries neither inline bytes nor a
             # url; the downloadable file lives at the queue-time download_url.
-            data = await self._client.fetch_external(self._download_url)
+            data = await self._client.fetch_external(link)
+            if not _is_video_container(data):
+                raise VideoGenerationError(
+                    f"Video job {self.queue_id}: the download link answered with {len(data)} "
+                    "bytes that are not a video. Nothing was written, and the stored video "
+                    "is untouched."
+                )
             await asyncio.to_thread(path.write_bytes, data)
         return path
 

@@ -8,12 +8,20 @@ Learn how to build a simple search engine that understands meaning, not just key
 
 The technology corpus is embedded once and reused by every section, the way a
 real search index would be; only the queries are embedded per section.
+
+Cost: a few hundred embedded tokens on the cheapest embedding model, under
+$0.0001 at catalog prices.
+
+Exit status: ``0`` when every section passed, ``1`` when any failed, ``77`` (with
+a ``SKIPPED:`` line) when the catalog has no embedding model.
 """
 
 import asyncio
 import sys
+from collections.abc import Awaitable, Callable
 
 from venice_ai import NoMatchingModelError, VeniceClient, cosine_similarity
+from venice_ai.exceptions import VeniceError
 from venice_ai.types.api import EmbeddingsResponse
 
 #: Exit code for "skipped": a prerequisite is missing, not a failure.
@@ -339,17 +347,28 @@ async def main() -> int:
         print(f"📚 Embedding {len(TECH_ARTICLES)} technology articles once for all sections\n")
         doc_vectors = await embed(client, model, TECH_ARTICLES)
 
-        results = [
-            ("basic_similarity_search", await basic_similarity_search(client, model, doc_vectors)),
-            ("multi_query_search", await multi_query_search(client, model, doc_vectors)),
-            ("threshold_filtering", await threshold_filtering(client, model, doc_vectors)),
-            ("cross_domain_search", await cross_domain_search(client, model, doc_vectors)),
+        sections: list[tuple[str, Callable[[], Awaitable[bool]]]] = [
+            (
+                "basic_similarity_search",
+                lambda: basic_similarity_search(client, model, doc_vectors),
+            ),
+            ("multi_query_search", lambda: multi_query_search(client, model, doc_vectors)),
+            ("threshold_filtering", lambda: threshold_filtering(client, model, doc_vectors)),
+            ("cross_domain_search", lambda: cross_domain_search(client, model, doc_vectors)),
             (
                 "ranked_search_with_metadata",
-                await ranked_search_with_metadata(client, model, doc_vectors),
+                lambda: ranked_search_with_metadata(client, model, doc_vectors),
             ),
-            ("find_similar_documents", await find_similar_documents(doc_vectors)),
+            ("find_similar_documents", lambda: find_similar_documents(doc_vectors)),
         ]
+        # One section's failed request fails that section; the others still run.
+        results: list[tuple[str, bool]] = []
+        for name, section in sections:
+            try:
+                results.append((name, await section()))
+            except VeniceError as e:
+                print(f"\n❌ {name}: {type(e).__name__}: {e}")
+                results.append((name, False))
 
     failed = [name for name, ok in results if not ok]
     if failed:

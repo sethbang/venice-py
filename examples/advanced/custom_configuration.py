@@ -14,16 +14,29 @@ Two ways to build a client:
   client wired from a config object, including a rate limiter chosen by
   ``RateLimiterConfig.mode``.
 
-Every section reads the settings back from the built client (``timeout``,
-``rate_limiter``, ``retry_options`` and ``connection_limits``), checks them
-against what was configured, and makes one request with it. Requests use the
-cheapest chat model that answers directly and omit the Venice system prompt,
-so each costs a small fraction of a cent.
+The sections read the settings back from the built client (``timeout``,
+``rate_limiter``, ``retry_options`` and ``connection_limits``) and check them
+against what was configured. ``client_options`` runs against a local server
+standing in for a proxy and the API, and ``configuration_presets`` builds
+clients and sends nothing, so those two are free and need no API key. Every
+other section makes one request. Requests use the cheapest chat model that
+answers directly and omit the Venice system prompt.
+
+Cost: 5 short chat requests, a small fraction of a cent in total.
+
+Exit status: ``0`` when every section passed, ``1`` when any failed, ``77``
+(with a ``SKIPPED:`` line) when the catalog has no chat model to use.
 """
 
 import asyncio
+import contextlib
+import os
 import sys
+import warnings
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
+
+from aiohttp import web
 
 from venice_ai import (
     BackendConfig,
@@ -33,16 +46,34 @@ from venice_ai import (
     RateLimiterConfig,
     RateLimiterMode,
     RetryOptions,
+    SimpleRateLimiter,
     UserMessage,
     VeniceAIConfig,
     VeniceClient,
     VeniceClientFactory,
     VeniceError,
+    create_developer_client,
+)
+from venice_ai.presets import (
+    create_development_config,
+    create_production_config,
+    create_testing_config,
+)
+from venice_ai.presets.production import (
+    create_production_config_conservative,
+    create_production_config_high_throughput,
 )
 from venice_ai.types.api import VeniceParameters
 
 # Plenty for the short replies these sections ask for.
 REPLY_MAX_TOKENS = 64
+
+# Sections that send nothing, or send only to a local server, need no real key.
+PLACEHOLDER_KEY = "placeholder-key-custom-configuration"
+
+# Nothing listens on this local port. A request that reaches the stand-in went
+# through the proxy; one that tried to go direct would fail to connect.
+UNREACHABLE_BASE_URL = "http://127.0.0.1:9/api/v1"
 
 
 def memory_config(**sections: Any) -> VeniceAIConfig:
@@ -191,8 +222,13 @@ async def rate_limiter_modes() -> bool:
     print("   - Exponential backoff with jitter, honors Retry-After")
     print("   - No external dependencies")
 
+    # 5 differs from the default of 3, so reading it back proves it was applied.
+    simple_retries = 5
+    if RateLimiterConfig().max_retries == simple_retries:
+        print(f"   ❌ max_retries={simple_retries} is the default; the check proves nothing")
+        return False
     config = memory_config(
-        rate_limiter=RateLimiterConfig(mode=RateLimiterMode.SIMPLE, max_retries=3)
+        rate_limiter=RateLimiterConfig(mode=RateLimiterMode.SIMPLE, max_retries=simple_retries)
     )
     client = VeniceClientFactory.create_client(config=config)
 
@@ -203,9 +239,32 @@ async def rate_limiter_modes() -> bool:
             max_retries=config.http_client.max_retries,
             pool_limit=config.http_client.max_connections,
         )
-        assert config.rate_limiter is not None
-        print(f"   - Configured 429 retries (rate limiter): {config.rate_limiter.max_retries}")
+        limiter = client.rate_limiter
+        if not isinstance(limiter, SimpleRateLimiter) or limiter.max_retries != simple_retries:
+            print(
+                f"   ❌ Expected a SimpleRateLimiter with {simple_retries} retries, got {limiter}"
+            )
+            ok = False
+        else:
+            print(f"   - 429 retries (read from the client's limiter): {limiter.max_retries}")
         ok = await check_reply(client, "Name one primary color.") and ok
+
+    print("\n📋 RateLimiterMode.DISABLED:")
+    print("   - No limiter logic: a 429 raises RateLimitError at once, with no backoff")
+    print("   - The SDK warns when it builds this client, and logs at CRITICAL")
+    config = memory_config(rate_limiter=RateLimiterConfig(mode=RateLimiterMode.DISABLED))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        disabled_client = VeniceClientFactory.create_client(config=config)
+    async with disabled_client:
+        name = type(disabled_client.rate_limiter).__name__
+        print(f"   - Rate limiter on the client: {name}")
+        if name != "NoOpRateLimiter":
+            print(f"   ❌ Expected NoOpRateLimiter, got {name}")
+            ok = False
+    if not any("DISABLED" in str(w.message) for w in caught):
+        print("   ❌ Expected a warning that rate limiting is disabled")
+        ok = False
 
     print("\n📋 RateLimiterMode.ADAPTIVE:")
     print("   - Shares rate-limit state across processes through Redis")
@@ -290,6 +349,195 @@ async def development_config() -> bool:
         return await check_reply(client, "Reply with the single word: debugging") and ok
 
 
+@contextlib.asynccontextmanager
+async def stand_in_proxy() -> AsyncIterator[tuple[str, list[dict[str, str]]]]:
+    """Run a local server that plays both the forward proxy and the API behind it.
+
+    Yields its URL and one record per request received: the ``Host`` the client
+    was aiming at, the path, and the custom header. Every request gets an empty
+    model catalog back.
+    """
+    received: list[dict[str, str]] = []
+
+    async def answer(request: web.Request) -> web.Response:
+        received.append(
+            {
+                "host": request.headers.get("Host", ""),
+                "path": request.url.path,
+                "trace": request.headers.get("X-Example-Trace", ""),
+            }
+        )
+        return web.json_response({"object": "list", "type": "text", "data": []})
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", answer)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 0).start()
+    try:
+        yield f"http://127.0.0.1:{runner.addresses[0][1]}", received
+    finally:
+        await runner.cleanup()
+
+
+@contextlib.contextmanager
+def proxy_environment(proxy_url: str) -> Iterator[None]:
+    """Set the proxy variables ``trust_env`` reads, and restore them afterwards."""
+    names = ("HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy")
+    saved = {name: os.environ.get(name) for name in names}
+    os.environ.update(HTTP_PROXY=proxy_url, http_proxy=proxy_url, NO_PROXY="", no_proxy="")
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def reached_stand_in(label: str, received: list[dict[str, str]], trace: str = "") -> bool:
+    """Check the one request a client just sent arrived at the stand-in, aimed at the API."""
+    if len(received) != 1:
+        print(f"   ❌ {label}: expected 1 request at the stand-in, got {len(received)}")
+        return False
+    seen = received.pop()
+    print(f"   - {label}: Host {seen['host']}, path {seen['path']}")
+    if seen["host"] != "127.0.0.1:9" or seen["path"] != "/api/v1/models":
+        print(f"   ❌ {label}: the request was not aimed at the configured API")
+        return False
+    if seen["trace"] != trace:
+        print(f"   ❌ {label}: X-Example-Trace was {seen['trace']!r}, expected {trace!r}")
+        return False
+    return True
+
+
+async def client_options() -> bool:
+    """Show the constructor options for proxies, headers and connection limits.
+
+    Runs against a local server only, with a placeholder key: nothing is billed
+    and no API key is needed. ``proxy=`` and ``trust_env=True`` are proved by
+    aiming the client at a port nothing listens on and seeing the request arrive
+    at the proxy. The limits are read back from ``client.connection_limits``.
+    """
+    print("\n🔀 Proxies, Headers and Connection Limits (local stand-in, free)")
+    print("-" * 40)
+
+    ok = True
+    async with stand_in_proxy() as (proxy_url, received):
+        try:
+            async with VeniceClient(
+                api_key=PLACEHOLDER_KEY,
+                base_url=UNREACHABLE_BASE_URL,
+                proxy=proxy_url,
+                headers={"X-Example-Trace": "from-headers-option"},
+            ) as client:
+                await client.models.list()
+            ok = reached_stand_in("proxy= and headers=", received, "from-headers-option") and ok
+
+            # trust_env=True takes the proxy from HTTP_PROXY, as curl and other tools do.
+            with proxy_environment(proxy_url):
+                async with VeniceClient(
+                    api_key=PLACEHOLDER_KEY, base_url=UNREACHABLE_BASE_URL, trust_env=True
+                ) as client:
+                    await client.models.list()
+            ok = reached_stand_in("trust_env=True", received) and ok
+        except VeniceError as e:
+            print(f"   ❌ The request did not go through the proxy: {type(e).__name__}: {e}")
+            ok = False
+
+    # connector_limit_per_host caps connections to one host; the total stays at its default.
+    async with VeniceClient(api_key=PLACEHOLDER_KEY, connector_limit_per_host=3) as client:
+        limits = client.connection_limits
+        print(
+            f"   - connector_limit_per_host=3: {limits.limit} total, {limits.limit_per_host} per host"
+        )
+        if limits.limit_per_host != 3:
+            print("   ❌ The per-host limit did not reach the connector")
+            ok = False
+
+    # http_transport_options goes to aiohttp.TCPConnector, and its limits win
+    # over connector_limit and connector_limit_per_host.
+    async with VeniceClient(
+        api_key=PLACEHOLDER_KEY,
+        connector_limit_per_host=3,
+        http_transport_options={"limit": 7, "limit_per_host": 2},
+    ) as client:
+        limits = client.connection_limits
+        print(
+            f"   - http_transport_options: {limits.limit} total, {limits.limit_per_host} per host"
+        )
+        if (limits.limit, limits.limit_per_host) != (7, 2):
+            print("   ❌ http_transport_options did not reach the connector")
+            ok = False
+    return ok
+
+
+async def configuration_presets() -> bool:
+    """Show the ready-made configurations next to the hand-built ones above.
+
+    Nothing is sent: the development, testing and developer clients are built
+    with a placeholder key and their settings read back, and the production
+    variants are built as configs. A production config contacts Redis only once
+    a client starts using it; ``examples/advanced/redis_backend.py`` runs one.
+    """
+    print("\n📦 Configuration Presets (nothing sent)")
+    print("-" * 40)
+
+    ok = True
+    for name, config in (
+        ("create_development_config()", create_development_config(enable_debug=False)),
+        ("create_testing_config()", create_testing_config()),
+    ):
+        print(f"\n✅ {name}")
+        async with VeniceClientFactory.create_client(
+            config=config, api_key=PLACEHOLDER_KEY
+        ) as client:
+            ok = (
+                describe_client(
+                    client,
+                    timeout=config.http_client.timeout,
+                    max_retries=config.http_client.max_retries,
+                    pool_limit=config.http_client.max_connections,
+                )
+                and ok
+            )
+
+    # A client rather than a config: the development preset, with a shorter
+    # timeout and fewer retries so that failures surface quickly.
+    print("\n✅ create_developer_client()")
+    async with create_developer_client(api_key=PLACEHOLDER_KEY) as client:
+        ok = describe_client(client, timeout=30.0, max_retries=1, pool_limit=20) and ok
+
+    # The production variants live in venice_ai.presets.production, and all of
+    # them need a Redis URL. This host is a placeholder; building contacts nothing.
+    redis_url = "redis://redis.internal:6379/0"
+    print("\n✅ Production presets (Redis URL required)")
+    for name, config in (
+        ("create_production_config", create_production_config(redis_url=redis_url)),
+        (
+            "create_production_config_high_throughput",
+            create_production_config_high_throughput(redis_url=redis_url),
+        ),
+        (
+            "create_production_config_conservative",
+            create_production_config_conservative(redis_url=redis_url),
+        ),
+    ):
+        http = config.http_client
+        print(
+            f"   - {name}: timeout {http.timeout:.0f}s, "
+            f"{http.max_connections} connections, {http.max_retries} retries"
+        )
+        limiter = config.rate_limiter
+        if config.backend.backend_type != BackendType.REDIS or (
+            limiter is None or limiter.mode != RateLimiterMode.ADAPTIVE
+        ):
+            print(f"   ❌ {name} should pair the Redis backend with the ADAPTIVE rate limiter")
+            ok = False
+    return ok
+
+
 async def main() -> int:
     """Run all custom configuration examples and return the process exit code."""
     print("🚀 Venice AI Advanced Configuration Examples")
@@ -301,6 +549,8 @@ async def main() -> int:
         ("rate_limiter_modes", await rate_limiter_modes()),
         ("high_concurrency_config", await high_concurrency_config()),
         ("development_config", await development_config()),
+        ("client_options", await client_options()),
+        ("configuration_presets", await configuration_presets()),
     ]
     failed = [name for name, ok in results if not ok]
 
@@ -316,6 +566,8 @@ async def main() -> int:
     print("   - Reading the resolved settings back: retry_options, connection_limits")
     print("   - The SIMPLE in-process rate limiter (ADAPTIVE is in redis_backend.py)")
     print("   - High-concurrency and development settings")
+    print("   - Proxies, default headers and connection limits")
+    print("   - The development, testing and production presets")
     return 0
 
 

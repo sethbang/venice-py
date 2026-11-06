@@ -20,13 +20,17 @@ def queue_response() -> MusicQueueResponse:
     return MusicQueueResponse(model="elevenlabs-music", queue_id="q-music-1")
 
 
+#: An MP3 file's opening: an ID3 tag header with an empty tag, then an MPEG frame header.
+AUDIO_FILE = b"ID3\x04\x00\x00\x00\x00\x00\x00\xff\xfb\x90\x00MUSIC"
+
+
 @pytest.fixture
 def mock_client():
     client = Mock()
     client.music = Mock()
     client.music.retrieve = AsyncMock()
     client.music.release = AsyncMock(return_value=MusicCompleteResponse(success=True))
-    client.fetch_external = AsyncMock(return_value=b"MUSIC_BYTES")
+    client.fetch_external = AsyncMock(return_value=AUDIO_FILE)
     return client
 
 
@@ -158,7 +162,43 @@ async def test_download_fetches_url_when_no_inline_bytes(
     target = tmp_path / "out.mp3"
     await job.download(target, completed)
     mock_client.fetch_external.assert_awaited_once_with("https://example.com/a.mp3")
-    assert target.read_bytes() == b"MUSIC_BYTES"
+    assert target.read_bytes() == AUDIO_FILE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [b"<html>gateway</html>", b""], ids=["html", "empty"])
+async def test_download_of_something_not_audio_raises_and_writes_nothing(
+    job: MusicJob, mock_client, tmp_path, body: bytes
+) -> None:
+    mock_client.fetch_external = AsyncMock(return_value=body)
+    completed = MusicCompletedStatus(
+        status="COMPLETED", url="https://example.com/SECRET.mp3", expires_at=None
+    )
+    target = tmp_path / "out.mp3"
+
+    with pytest.raises(MusicGenerationError) as excinfo:
+        await job.download(target, completed)
+
+    assert not target.exists()
+    assert "SECRET" not in str(excinfo.value)
+    assert "gateway" not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_context_keeps_the_media_when_the_link_serves_no_audio(
+    job: MusicJob, mock_client, tmp_path
+) -> None:
+    mock_client.fetch_external = AsyncMock(return_value=b"<html>gateway</html>")
+    completed = MusicCompletedStatus(
+        status="COMPLETED", url="https://example.com/a", expires_at=None
+    )
+    job._status = completed
+
+    with pytest.raises(MusicGenerationError):
+        async with job:
+            await job.download(tmp_path / "out.mp3", completed)
+
+    mock_client.music.release.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

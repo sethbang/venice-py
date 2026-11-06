@@ -15,7 +15,9 @@ Covers:
 """
 
 import base64
-from collections.abc import AsyncIterator, Callable
+import os
+import stat
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,10 +38,18 @@ from venice_ai.cli.commands.video import (
     _poll_and_save,
     _status_async,
 )
+from venice_ai.exceptions import VeniceError
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def video_home(tmp_path: Path) -> Iterator[Path]:
+    """The temporary home that the CLI's saved-link store is written under."""
+    with patch("venice_ai.cli._paths._home", return_value=tmp_path):
+        yield tmp_path
 
 
 def _make_ctx(plain: bool = False):
@@ -2371,14 +2381,20 @@ class TestFromImageCLIImageStrength:
 IN_PATH = "PATHSECRET"
 IN_QUERY = "QUERYSECRET"
 LINK_TAIL = f"/{IN_PATH}/video.mp4?sig={IN_QUERY}"
+VIDEO_FILE = b"\x00\x00\x00\x18ftypmp42VIDEO"
 
-Handler = Callable[[web.Request], Any]
+Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
 
 @asynccontextmanager
 async def _server(handler: Handler) -> AsyncIterator[str]:
+    # aiohttp only recognises a plain coroutine function as a handler, not an
+    # object whose __call__ is async.
+    async def route(request: web.Request) -> web.StreamResponse:
+        return await handler(request)
+
     app = web.Application()
-    app.router.add_route("*", "/{tail:.*}", handler)
+    app.router.add_route("*", "/{tail:.*}", route)
     runner = web.AppRunner(app, access_log=None, shutdown_timeout=0.1)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -2403,7 +2419,7 @@ class _Storage:
             return web.Response(status=204)
         if self.statuses:
             return web.Response(status=self.statuses.pop(0), reason="Refused")
-        return web.Response(body=b"VIDEO", content_type="video/mp4")
+        return web.Response(body=VIDEO_FILE, content_type="video/mp4")
 
 
 class _Api:
@@ -2466,7 +2482,7 @@ class TestPollAndSaveDownloads:
                 )
 
         assert saved is True
-        assert (tmp_path / "video.mp4").read_bytes() == b"VIDEO"
+        assert (tmp_path / "video.mp4").read_bytes() == VIDEO_FILE
         assert api_host.completed == 1
         assert storage_host.requests == ["GET"]
         out = capsys.readouterr()
@@ -2494,9 +2510,83 @@ class TestPollAndSaveDownloads:
             )
 
         assert saved is True
-        assert (tmp_path / "video.mp4").read_bytes() == b"VIDEO"
+        assert (tmp_path / "video.mp4").read_bytes() == VIDEO_FILE
         assert storage_host.requests == ["GET", "DELETE"]
         out = capsys.readouterr()
+        _assert_no_link(out.out, out.err)
+
+    @pytest.mark.parametrize(
+        "body", [b"<html>gateway maintenance</html>", b""], ids=["html", "empty"]
+    )
+    @pytest.mark.parametrize("link_from", ["retrieve", "queue"])
+    async def test_link_serving_no_video_reports_failure_and_releases_nothing(
+        self,
+        video_home: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        body: bytes,
+        link_from: str,
+    ) -> None:
+        methods: list[str] = []
+
+        async def gateway(request: web.Request) -> web.Response:
+            methods.append(request.method)
+            return web.Response(body=body, content_type="text/html")
+
+        async with _server(gateway) as storage:
+            link = f"{storage}{LINK_TAIL}"
+            retrieved = {
+                "status": "COMPLETED",
+                **({"url": link} if link_from == "retrieve" else {}),
+            }
+            api_host = _Api(retrieved)
+            async with _server(api_host) as api, _real_client(api) as client:
+                saved = await _poll_and_save(
+                    client,
+                    model="m",
+                    queue_id="q",
+                    output_path=str(tmp_path / "video.mp4"),
+                    plain=True,
+                    download_url=link if link_from == "queue" else None,
+                )
+
+        assert saved is False
+        assert methods == ["GET"]
+        assert api_host.completed == 0
+        assert not (tmp_path / "video.mp4").exists()
+        out = capsys.readouterr()
+        said = " ".join((out.out + out.err).split())
+        assert "Video saved" not in said
+        assert "video status q --model m --output" in said
+        _assert_no_link(out.out, out.err)
+        # A link only the queue response gave would be lost at exit, so it is saved.
+        assert len(_saved_entries(video_home)) == (1 if link_from == "queue" else 0)
+
+    async def test_link_that_cannot_be_saved_for_a_retry_is_reported(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        async def gateway(_request: web.Request) -> web.Response:
+            return web.Response(text="<html>gateway</html>", content_type="text/html")
+
+        async with _server(gateway) as storage:
+            api_host = _Api({"status": "COMPLETED"})
+            async with _server(api_host) as api, _real_client(api) as client:
+                with patch("venice_ai.cli._video_jobs.save_job", side_effect=OSError("read-only")):
+                    saved = await _poll_and_save(
+                        client,
+                        model="m",
+                        queue_id="q",
+                        output_path=str(tmp_path / "video.mp4"),
+                        plain=True,
+                        download_url=f"{storage}{LINK_TAIL}",
+                    )
+
+        assert saved is False
+        assert api_host.completed == 0
+        out = capsys.readouterr()
+        said = " ".join((out.out + out.err).split())
+        assert "could not be saved" in said
+        assert "Retry with" not in said
         _assert_no_link(out.out, out.err)
 
     async def test_download_follows_the_clients_retry_policy(self, tmp_path: Path) -> None:
@@ -2544,13 +2634,60 @@ class TestPollAndSaveDownloads:
         _assert_no_link(str(excinfo.value), repr(excinfo.value), out.out, out.err)
         assert not (tmp_path / "video.mp4").exists()
 
+    @pytest.mark.parametrize(("status", "kept"), [(404, 1), (403, 1), (500, 1), (410, 0)])
+    async def test_failed_download_keeps_a_queue_only_link_unless_it_is_gone(
+        self,
+        video_home: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        status: int,
+        kept: int,
+    ) -> None:
+        async with _server(_Storage(*[status] * 6)) as storage:
+            link = f"{storage}{LINK_TAIL}"
+            async with _server(_Api({"status": "COMPLETED"})) as api, _real_client(api) as client:
+                with pytest.raises(aiohttp.ClientResponseError):
+                    await _poll_and_save(
+                        client,
+                        model="m",
+                        queue_id="q",
+                        output_path=str(tmp_path / "video.mp4"),
+                        plain=True,
+                        download_url=link,
+                    )
+
+        out = capsys.readouterr()
+        _assert_no_link(out.out, out.err)
+        assert len(_saved_entries(video_home)) == kept
+        assert ("video status q --model m --output" in " ".join(out.out.split())) == bool(kept)
+
+    async def test_transport_failure_keeps_a_queue_only_link(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        async with _server(_Storage(200)) as storage:
+            dead_link = f"{storage}{LINK_TAIL}"
+        async with _server(_Api({"status": "COMPLETED"})) as api, _real_client(api) as client:
+            with pytest.raises(VeniceError):
+                await _poll_and_save(
+                    client,
+                    model="m",
+                    queue_id="q",
+                    output_path=str(tmp_path / "video.mp4"),
+                    plain=True,
+                    download_url=dead_link,
+                )
+
+        out = capsys.readouterr()
+        _assert_no_link(out.out, out.err)
+        assert len(_saved_entries(video_home)) == 1
+
     async def test_failed_cleanup_is_reported_and_does_not_fail_the_save(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         async def delete_refused(request: web.Request) -> web.Response:
             if request.method == "DELETE":
                 return web.Response(status=403)
-            return web.Response(body=b"VIDEO")
+            return web.Response(body=VIDEO_FILE)
 
         async with (
             _server(delete_refused) as storage,
@@ -2578,7 +2715,7 @@ class TestPollAndSaveDownloads:
         mock_client.video.retrieve = AsyncMock(
             return_value=SimpleNamespace(status="COMPLETED", data=None, url="https://h/v.mp4")
         )
-        mock_client.fetch_external = AsyncMock(return_value=b"VIDEO")
+        mock_client.fetch_external = AsyncMock(return_value=VIDEO_FILE)
         mock_client.video.cancel = AsyncMock(return_value=SimpleNamespace(success=False))
 
         saved = await _poll_and_save(
@@ -2642,21 +2779,9 @@ class TestQueueTimeLink:
             api_host.queue["download_url"] = f"{storage}{LINK_TAIL}"
             await _queue_with(command, tmp_path)
 
-        assert (tmp_path / "video.mp4").read_bytes() == b"VIDEO"
+        assert (tmp_path / "video.mp4").read_bytes() == VIDEO_FILE
         assert storage_host.requests == ["GET", "DELETE"]
         out = capsys.readouterr()
-        _assert_no_link(out.out, out.err)
-
-    async def test_no_poll_warns_that_the_link_cannot_be_recovered(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
-    ) -> None:
-        api_host = _Api({"status": "COMPLETED"})
-        async with _stack(api_host, _Storage()) as (_api, storage):
-            api_host.queue["download_url"] = f"{storage}{LINK_TAIL}"
-            await _queue_with(command, tmp_path, no_poll=True)
-
-        out = capsys.readouterr()
-        assert "cannot be downloaded later" in " ".join(out.out.split())
         _assert_no_link(out.out, out.err)
 
     async def test_no_poll_on_an_ordinary_job_names_the_model_and_does_not_warn(
@@ -2698,7 +2823,7 @@ class TestStatusNeverPrintsTheLink:
                     _make_ctx(plain=True), job_id="q", model="m", output=str(target)
                 )
 
-        assert target.read_bytes() == b"VIDEO"
+        assert target.read_bytes() == VIDEO_FILE
         out = capsys.readouterr()
         assert "Video saved" in out.out
         _assert_no_link(out.out, out.err)
@@ -2752,7 +2877,7 @@ class TestStatusNeverPrintsTheLink:
 
         out = " ".join(capsys.readouterr().out.split())
         assert "cannot be downloaded from its job ID" in out
-        assert "without --no-poll" in out
+        assert "holds no saved link" in out
         assert not (tmp_path / "v.mp4").exists()
 
 
@@ -2767,3 +2892,338 @@ def test_no_cli_command_opens_its_own_http_session() -> None:
         if "ClientSession(" in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# --no-poll on a model that hands out its link only in the queue response
+# ---------------------------------------------------------------------------
+
+
+def _saved_entries(home: Path) -> list[Path]:
+    store_dir = home / ".venice-py" / "video_jobs"
+    return list(store_dir.iterdir()) if store_dir.exists() else []
+
+
+async def _status(tmp_path: Path, *, output: bool = True, model: str = "m") -> Path:
+    target = tmp_path / "saved.mp4"
+    await _status_async(
+        _make_ctx(plain=True), job_id="q", model=model, output=str(target) if output else None
+    )
+    return target
+
+
+@pytest.mark.parametrize("command", ["generate", "from-image"])
+class TestNoPollSavesTheLink:
+    async def test_link_is_saved_owner_only_and_never_printed(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
+    ) -> None:
+        api_host = _Api({"status": "PROCESSING"})
+        async with _stack(api_host, _Storage()) as (_api, storage):
+            api_host.queue["download_url"] = f"{storage}{LINK_TAIL}"
+            await _queue_with(command, tmp_path, no_poll=True)
+
+        entries = _saved_entries(video_home)
+        assert len(entries) == 1
+        if os.name == "posix":
+            assert stat.S_IMODE(entries[0].stat().st_mode) == 0o600
+        assert IN_QUERY in entries[0].read_text()
+        out = capsys.readouterr()
+        _assert_no_link(out.out, out.err)
+        said = " ".join(out.out.split())
+        assert "video_jobs" in said
+        assert "grants access" in said
+        assert "--output" in said
+        assert "cannot be downloaded later" not in said
+
+    async def test_message_does_not_claim_owner_only_where_the_platform_cannot_enforce_it(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
+    ) -> None:
+        api_host = _Api({"status": "PROCESSING"})
+        async with _stack(api_host, _Storage()) as (_api, storage):
+            api_host.queue["download_url"] = f"{storage}{LINK_TAIL}"
+            with patch("venice_ai.cli._video_jobs._POSIX", False):
+                await _queue_with(command, tmp_path, no_poll=True)
+
+        said = " ".join(capsys.readouterr().out.split())
+        assert "owner-only" not in said
+        assert "cannot restrict" in said
+
+    async def test_ordinary_job_saves_nothing(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
+    ) -> None:
+        async with _stack(_Api({"status": "PROCESSING"}), _Storage()):
+            await _queue_with(command, tmp_path, no_poll=True)
+
+        assert _saved_entries(video_home) == []
+        said = " ".join(capsys.readouterr().out.split())
+        assert "video status q --model m" in said
+        assert "video_jobs" not in said
+
+    async def test_job_that_polls_saves_nothing(
+        self, video_home: Path, tmp_path: Path, command: str
+    ) -> None:
+        api_host = _Api({"status": "COMPLETED"})
+        async with _stack(api_host, _Storage()) as (_api, storage):
+            api_host.queue["download_url"] = f"{storage}{LINK_TAIL}"
+            await _queue_with(command, tmp_path)
+
+        assert _saved_entries(video_home) == []
+
+    async def test_failing_to_save_the_link_exits_1_without_printing_it(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
+    ) -> None:
+        api_host = _Api({"status": "PROCESSING"})
+        async with _stack(api_host, _Storage()) as (_api, storage):
+            api_host.queue["download_url"] = f"{storage}{LINK_TAIL}"
+            with (
+                patch("venice_ai.cli._video_jobs.save_job", side_effect=OSError("read-only")),
+                pytest.raises(SystemExit) as excinfo,
+            ):
+                await _queue_with(command, tmp_path, no_poll=True)
+
+        assert excinfo.value.code == 1
+        out = capsys.readouterr()
+        _assert_no_link(out.out, out.err)
+        assert "cannot be downloaded later" in " ".join((out.out + out.err).split())
+
+
+class TestStatusUsesTheSavedLink:
+    @staticmethod
+    async def _queue(api_host: _Api, storage: str, tmp_path: Path) -> None:
+        api_host.queue["download_url"] = f"{storage}{LINK_TAIL}"
+        await _queue_with("generate", tmp_path, no_poll=True)
+
+    async def test_output_downloads_releases_and_forgets_the_link(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        storage_host = _Storage()
+        api_host = _Api({"status": "COMPLETED"})
+        async with _stack(api_host, storage_host) as (_api, storage):
+            await self._queue(api_host, storage, tmp_path)
+            target = await _status(tmp_path)
+
+        assert target.read_bytes() == VIDEO_FILE
+        assert storage_host.requests == ["GET", "DELETE"]
+        assert api_host.completed == 1
+        assert _saved_entries(video_home) == []
+        out = capsys.readouterr()
+        assert "Video saved" in out.out
+        assert "Server cleanup: OK" in out.out
+        _assert_no_link(out.out, out.err)
+
+    async def test_without_output_it_says_how_to_save_and_keeps_the_link(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        storage_host = _Storage()
+        api_host = _Api({"status": "COMPLETED"})
+        async with _stack(api_host, storage_host) as (_api, storage):
+            await self._queue(api_host, storage, tmp_path)
+            await _status(tmp_path, output=False)
+
+        assert storage_host.requests == []
+        assert len(_saved_entries(video_home)) == 1
+        out = capsys.readouterr()
+        assert "--output" in out.out
+        assert "cannot be downloaded" not in " ".join(out.out.split())
+        _assert_no_link(out.out, out.err)
+
+    async def test_running_job_keeps_the_link_and_exits_0(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        storage_host = _Storage()
+        api_host = _Api({"status": "PROCESSING", "progress_percent": 10})
+        async with _stack(api_host, storage_host) as (_api, storage):
+            await self._queue(api_host, storage, tmp_path)
+            target = await _status(tmp_path)
+
+        assert not target.exists()
+        assert storage_host.requests == []
+        assert len(_saved_entries(video_home)) == 1
+
+    async def test_failed_job_forgets_the_link_and_exits_1(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        api_host = _Api({"status": "FAILED", "error": "boom"})
+        async with _stack(api_host, _Storage()) as (_api, storage):
+            await self._queue(api_host, storage, tmp_path)
+            with pytest.raises(SystemExit) as excinfo:
+                await _status(tmp_path)
+
+        assert excinfo.value.code == 1
+        assert _saved_entries(video_home) == []
+
+    async def test_refused_release_keeps_the_link_and_keeps_the_video(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        async def delete_refused(request: web.Request) -> web.Response:
+            if request.method == "DELETE":
+                return web.Response(status=403)
+            return web.Response(body=VIDEO_FILE)
+
+        api_host = _Api({"status": "COMPLETED"})
+        async with (
+            _server(delete_refused) as storage,
+            _server(api_host) as api,
+        ):
+            with patch(
+                "venice_ai.cli.config.get_client_kwargs",
+                return_value={"api_key": "sk-fake", "base_url": f"{api}/api/v1"},
+            ):
+                await self._queue(api_host, storage, tmp_path)
+                target = await _status(tmp_path)
+
+        assert target.read_bytes() == VIDEO_FILE
+        assert len(_saved_entries(video_home)) == 1
+        out = capsys.readouterr()
+        assert "Server cleanup: skipped" in out.out
+        _assert_no_link(out.out, out.err)
+
+    async def test_link_answering_410_is_forgotten_and_exits_1(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        api_host = _Api({"status": "COMPLETED"})
+        async with _stack(api_host, _Storage(410)) as (_api, storage):
+            await self._queue(api_host, storage, tmp_path)
+            with pytest.raises(SystemExit) as excinfo:
+                await _status(tmp_path)
+
+        assert excinfo.value.code == 1
+        assert _saved_entries(video_home) == []
+        out = capsys.readouterr()
+        assert "no longer" in " ".join((out.out + out.err).split())
+        _assert_no_link(out.out, out.err)
+
+    async def test_link_answering_404_is_kept_so_a_later_run_can_collect_it(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        storage_host = _Storage(404)
+        api_host = _Api({"status": "COMPLETED"})
+        async with _stack(api_host, storage_host) as (_api, storage):
+            await self._queue(api_host, storage, tmp_path)
+            with pytest.raises(SystemExit) as excinfo:
+                await _status(tmp_path)
+
+            assert excinfo.value.code == 1
+            assert len(_saved_entries(video_home)) == 1
+            assert api_host.completed == 0
+            out = capsys.readouterr()
+            said = " ".join((out.out + out.err).split())
+            assert "404" in said
+            assert "kept" in said
+            assert _saved_entries(video_home)[0].name in said.replace(" ", "")
+            _assert_no_link(out.out, out.err)
+
+            # The host has caught up: the same command collects the video.
+            target = await _status(tmp_path)
+
+        assert target.read_bytes() == VIDEO_FILE
+        assert _saved_entries(video_home) == []
+
+    @pytest.mark.parametrize(
+        "body", [b"<html>gateway maintenance</html>", b""], ids=["html", "empty"]
+    )
+    async def test_link_serving_no_video_keeps_everything_and_exits_1(
+        self,
+        video_home: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        body: bytes,
+    ) -> None:
+        methods: list[str] = []
+
+        async def gateway(request: web.Request) -> web.Response:
+            methods.append(request.method)
+            return web.Response(body=body, content_type="text/html")
+
+        api_host = _Api({"status": "COMPLETED"})
+        async with _server(gateway) as storage, _server(api_host) as api:
+            with patch(
+                "venice_ai.cli.config.get_client_kwargs",
+                return_value={"api_key": "sk-fake", "base_url": f"{api}/api/v1"},
+            ):
+                await self._queue(api_host, storage, tmp_path)
+                with pytest.raises(SystemExit) as excinfo:
+                    await _status(tmp_path)
+
+        assert excinfo.value.code == 1
+        assert methods == ["GET"]
+        assert api_host.completed == 0
+        assert not (tmp_path / "saved.mp4").exists()
+        assert len(_saved_entries(video_home)) == 1
+        out = capsys.readouterr()
+        said = " ".join((out.out + out.err).split())
+        assert "Video saved" not in said
+        assert "gateway" not in said
+        assert "kept" in said
+        _assert_no_link(out.out, out.err)
+
+    async def test_hint_names_the_saved_model_not_the_typed_one(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        api_host = _Api({"status": "COMPLETED"})
+        async with _stack(api_host, _Storage()) as (_api, storage):
+            await self._queue(api_host, storage, tmp_path)
+            await _status(tmp_path, output=False, model="typo-model")
+
+        said = " ".join(capsys.readouterr().out.split())
+        assert "--model m " in said
+        assert "typo-model" not in said
+
+    async def test_other_download_refusal_keeps_the_link(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        api_host = _Api({"status": "COMPLETED"})
+        async with _stack(api_host, _Storage(403)) as (_api, storage):
+            await self._queue(api_host, storage, tmp_path)
+            with pytest.raises(aiohttp.ClientResponseError) as excinfo:
+                await _status(tmp_path)
+
+        assert len(_saved_entries(video_home)) == 1
+        out = capsys.readouterr()
+        _assert_no_link(str(excinfo.value), repr(excinfo.value), out.out, out.err)
+
+    async def test_saved_model_is_used_for_the_job(self, video_home: Path, tmp_path: Path) -> None:
+        from venice_ai.cli import _video_jobs
+
+        _video_jobs.save_job("q", "saved-model", f"http://127.0.0.1:9{LINK_TAIL}")
+        mock_client = AsyncMock()
+        mock_client.video.retrieve = AsyncMock(
+            return_value=SimpleNamespace(status="PROCESSING", progress_percent=1)
+        )
+        with (
+            patch("venice_ai.VeniceClient") as MockClient,
+            patch("venice_ai.cli.config.ensure_api_key", return_value="test-key"),
+        ):
+            _setup_client_patch(MockClient, mock_client)
+            await _status(tmp_path, model="typed-model")
+
+        assert mock_client.video.retrieve.await_args.kwargs["model"] == "saved-model"
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+    async def test_entry_readable_by_others_is_reported_and_narrowed(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        api_host = _Api({"status": "COMPLETED"})
+        async with _stack(api_host, _Storage()) as (_api, storage):
+            await self._queue(api_host, storage, tmp_path)
+            entry = _saved_entries(video_home)[0]
+            os.chmod(entry, 0o644)
+            await _status(tmp_path, output=False)
+
+        assert stat.S_IMODE(entry.stat().st_mode) == 0o600
+        out = capsys.readouterr()
+        assert "readable by other" in " ".join((out.out + out.err).split())
+        _assert_no_link(out.out, out.err)
+
+    async def test_corrupt_entry_is_reported_and_status_still_works(
+        self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        api_host = _Api({"status": "PROCESSING"})
+        async with _stack(api_host, _Storage()) as (_api, storage):
+            await self._queue(api_host, storage, tmp_path)
+            _saved_entries(video_home)[0].write_text("not json")
+            await _status(tmp_path, output=False)
+
+        out = capsys.readouterr()
+        assert "PROCESSING" in out.out
+        assert "could not be read" in " ".join((out.out + out.err).split())

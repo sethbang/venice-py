@@ -23,6 +23,9 @@ model would spend these small completion budgets thinking. Every request
 passes ``include_venice_system_prompt=False``, so only the prompts shown here
 are billed.
 
+Cost: about 15 short chat requests on that model, under $0.001 in total. The
+request for a model that does not exist fails before any billing.
+
 Requirements:
     pip install venice-py
     export VENICE_API_KEY="your-api-key"
@@ -302,8 +305,9 @@ async def example_async_error_handling(client: VeniceClient, model: str) -> bool
         print(f"❌ Valid task failed: {type(valid).__name__}: {valid}")
         ok = False
     else:
-        print("✅ Task 1 succeeded")
-        ok = check_answer(valid, "Response", "valid") and ok
+        ok = check_answer(valid, "Task 1", "valid") and ok
+        if ok:
+            print("✅ Task 1 succeeded")
 
     if isinstance(invalid, NotFoundError):
         print(f"✅ Task 2 failed as expected with {type(invalid).__name__}")
@@ -380,6 +384,13 @@ async def example_bounded_concurrency(client: VeniceClient, model: str) -> bool:
     - It accepts awaitables across any modality (chat, image, embeddings…)
     - ``return_exceptions=True`` (the default) returns failures as list items,
       so count them
+    - For chat alone, ``client.chat.completions.batch(requests, max_concurrency=N)``
+      does the same job from one ``create()`` kwargs dict per request, and refuses
+      streaming. ``advanced/performance_optimization.py`` runs it
+
+    Both helpers bound in-flight requests with a semaphore and keep input order.
+    Neither is a server-side batch: each request is sent and billed on its own, so
+    they save time, not money.
     """
     print("\n" + "=" * 60)
     print("Pattern 6: Bounded Concurrency with client.gather()")
@@ -404,7 +415,12 @@ async def example_bounded_concurrency(client: VeniceClient, model: str) -> bool:
             tracked(
                 client.chat.completions.create(
                     model=model,
-                    messages=[UserMessage(content=f"Spell the number {i + 1} as an English word.")],
+                    messages=[
+                        UserMessage(
+                            content=f"Write the number {i + 1} as an English word. "
+                            "Reply with the word only."
+                        )
+                    ],
                     max_completion_tokens=60,
                     venice_parameters=OWN_PROMPT_ONLY,
                 )
@@ -423,6 +439,7 @@ async def example_bounded_concurrency(client: VeniceClient, model: str) -> bool:
             ok = check_answer(result, f"Request {i + 1}", NUMBER_WORDS[i]) and ok
 
     print(f"\n   {len(results) - len(errors)}/{len(results)} succeeded")
+    print("   For chat alone, client.chat.completions.batch() takes kwargs dicts instead.")
     print(f"   Peak requests in flight: {peak} (limit {max_concurrency})")
     if peak > max_concurrency:
         print("   ❌ Concurrency limit was exceeded")

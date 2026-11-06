@@ -24,6 +24,10 @@ Every answer is checked: a reply cut off at the cap (``finish_reason ==
 answer fails its section, and the script exits non-zero. If the catalog has no
 model a section needs, that section prints ``Section skipped:``; the script
 exits 77 when no reasoning model exists at all.
+
+Cost: seven requests on the cheapest reasoning models. Each is capped at 16384
+tokens or the model's own limit, but thinks far less on these short questions, so
+a run is typically under $0.005.
 """
 
 import asyncio
@@ -32,14 +36,11 @@ import re
 import sys
 from typing import Literal
 
+from _helpers import completion_cap
+
 from venice_ai import NoMatchingModelError, ReasoningConfig, VeniceClient
 from venice_ai.types.api import ChatCompletionResponse, SystemMessage, TextModelSpec, UserMessage
 from venice_ai.types.api.requests import VeniceParameters
-
-# Room for reasoning plus the visible answer. Small reasoning models vary
-# widely in how long they think, even on easy questions, so the cap leaves
-# several thousand tokens of headroom over a typical run.
-REASONING_CAP = 16384
 
 ANSWER_INSTRUCTION = "Finish with a final line of the form 'ANSWER: {format}'."
 
@@ -61,17 +62,18 @@ def contains_part(answer: str, part: str) -> bool:
     return re.search(rf"(?<![a-z0-9]){body}(?![a-z0-9])", answer) is not None
 
 
-def check_response(response: ChatCompletionResponse, expected: list[str]) -> bool:
+def check_response(response: ChatCompletionResponse, expected: list[str], cap: int) -> bool:
     """Print ``finish_reason`` and verify the ``ANSWER:`` line holds every expected part.
 
     Some models report an answer cut off at the cap as ``finish_reason="stop"``,
-    so the completion-token count is checked against ``REASONING_CAP`` too.
+    so the completion-token count is checked against ``cap``, the request's
+    ``max_completion_tokens``, too.
     """
     finish_reason = response.choices[0].finish_reason if response.choices else None
     used = response.usage.completion_tokens if response.usage else None
     print(f"↳ finish_reason: {finish_reason}")
-    if finish_reason == "length" or used is None or used >= REASONING_CAP:
-        print(f"❌ The answer may be cut off: {used} of {REASONING_CAP} completion tokens used")
+    if finish_reason == "length" or used is None or used >= cap:
+        print(f"❌ The answer may be cut off: {used} of {cap} completion tokens used")
         return False
     answer = answer_line(response.text or "")
     if not answer:
@@ -153,6 +155,7 @@ async def basic_reasoning_with_venice_parameters(client: VeniceClient, model: st
         "include_venice_system_prompt=False)"
     )
 
+    cap = await completion_cap(client, model)
     response = await client.chat.completions.create(
         model=model,
         messages=[
@@ -162,7 +165,7 @@ async def basic_reasoning_with_venice_parameters(client: VeniceClient, model: st
         venice_parameters=venice_params,
         # No temperature override: the server default applies (see the module
         # docstring).
-        max_completion_tokens=REASONING_CAP,
+        max_completion_tokens=cap,
     )
 
     if response.venice_parameters:
@@ -176,7 +179,7 @@ async def basic_reasoning_with_venice_parameters(client: VeniceClient, model: st
     format_thinking_output(thinking_blocks, (response.text or "").strip(), "FINAL ANSWER")
     print_usage(response)
 
-    ok = check_response(response, ["42", "56", "72"])
+    ok = check_response(response, ["42", "56", "72"], cap)
     if not thinking_blocks:
         print("❌ Expected a visible reasoning trace with strip_thinking_response=False")
         ok = False
@@ -214,6 +217,7 @@ async def test_strip_thinking_parameter(client: VeniceClient, model: str) -> boo
         "include_venice_system_prompt=False)"
     )
 
+    cap = await completion_cap(client, model)
     response = await client.chat.completions.create(
         model=model,
         messages=[
@@ -223,7 +227,7 @@ async def test_strip_thinking_parameter(client: VeniceClient, model: str) -> boo
         venice_parameters=venice_params,
         # No temperature override: the server default applies (see the module
         # docstring).
-        max_completion_tokens=REASONING_CAP,
+        max_completion_tokens=cap,
     )
 
     if response.venice_parameters:
@@ -241,7 +245,7 @@ async def test_strip_thinking_parameter(client: VeniceClient, model: str) -> boo
     print("-" * 70)
     print_usage(response)
 
-    ok = check_response(response, ["alice=blue", "bob=green", "charlie=red"])
+    ok = check_response(response, ["alice=blue", "bob=green", "charlie=red"], cap)
     if response.thinking_blocks:
         print("❌ A reasoning trace is still present despite strip_thinking_response=True")
         ok = False
@@ -307,6 +311,7 @@ async def test_disable_thinking_parameter(client: VeniceClient, model: str) -> b
     wire = ReasoningConfig(enabled=False).model_dump(exclude_none=True)
     print(f"🔬 reasoning=ReasoningConfig(enabled=False) is sent as: {wire}")
 
+    cap = await completion_cap(client, model)
     ok = True
     responses: dict[str, ChatCompletionResponse] = {}
     for label, extra in variants:
@@ -314,14 +319,14 @@ async def test_disable_thinking_parameter(client: VeniceClient, model: str) -> b
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
-            max_completion_tokens=REASONING_CAP,
+            max_completion_tokens=cap,
             **extra,
         )
         responses[label] = response
         print(f"   Answer: {(response.text or '').strip()}")
         print(f"   Visible reasoning trace: {'yes' if response.thinking_blocks else 'no'}")
         print_usage(response)
-        ok = check_response(response, ["150minutes"]) and ok
+        ok = check_response(response, ["150minutes"], cap) and ok
 
     baseline = responses["thinking on (default)"]
     base_reasoning = reasoning_tokens(baseline)
@@ -377,6 +382,7 @@ async def usage_breakdown_with_typed_access(client: VeniceClient) -> bool | None
         return None
     print(f"📍 Using reasoning model: {model} (reasoning_effort={effort!r})")
 
+    cap = await completion_cap(client, model)
     # Venice's system prompt stays on here: it is a long prefix shared by many
     # requests, so it is often served from the prompt cache and the cache
     # counts below show a real reading instead of zeros.
@@ -386,9 +392,9 @@ async def usage_breakdown_with_typed_access(client: VeniceClient) -> bool | None
             UserMessage(content="What is 47 * 83? " + ANSWER_INSTRUCTION.format(format="<number>"))
         ],
         reasoning_effort=effort,
-        max_completion_tokens=REASONING_CAP,
+        max_completion_tokens=cap,
     )
-    ok = check_response(response, ["3901"])
+    ok = check_response(response, ["3901"], cap)
 
     usage = response.usage
     if not usage:

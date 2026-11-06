@@ -324,7 +324,12 @@ class VeniceClient:
                 Each request passes ``middlewares=``, which repeats the session's own
                 so they keep running, and its default headers and cookies do not
                 reach hosts other than the API.
-            timeout: The default request timeout in seconds.
+            timeout: The default request timeout in seconds, 120 unless given.
+                Bounds a whole request, a stream included. Overrides
+                ``config.http_client.timeout``, which applies only when it was
+                set explicitly, by keyword or by ``VENICE_HTTP_CLIENT__TIMEOUT``.
+                ``VeniceClientFactory`` differs: it uses the config's value
+                even when unset, so 30 seconds.
             default_timeout: A pre-configured ``aiohttp.ClientTimeout`` object
                 that overrides the ``timeout`` setting.
             max_retries: The number of retries after the first attempt for a
@@ -405,6 +410,15 @@ class VeniceClient:
 
         # --- Timeout resolution ---
         effective_timeout = default_timeout if default_timeout is not None else timeout
+        # The config's timeout applies only if something set it (a keyword, an
+        # assignment or VENICE_HTTP_CLIENT__TIMEOUT). Its 30s field default is
+        # shorter than the client's, and this timeout also bounds streams.
+        if (
+            config is not None
+            and effective_timeout is _constants.DEFAULT_TIMEOUT
+            and "timeout" in config.http_client.model_fields_set
+        ):
+            effective_timeout = config.http_client.timeout
 
         if isinstance(effective_timeout, bool):
             self._timeout = _constants.DEFAULT_TIMEOUT
@@ -553,24 +567,16 @@ class VeniceClient:
         :param tracker: The :class:`CostTracker` to receive every chat /
             embedding response from now on.
         :param populate_pricing: When ``True`` (default), fetch the live
-            chat-pricing map from ``GET /models?type=chat`` and merge it
+            chat and embedding prices from ``GET /models`` and merge them
             into ``tracker.pricing_map`` (existing entries kept, missing
             entries filled in). Skip this if you've already hydrated the
             tracker yourself or want to defer the network round-trip.
         """
         if populate_pricing:
-            from .types.api.models import LLMModelPricing
+            from .costs import _token_pricing_map
 
-            catalog = await self.models.list(type="chat")
-            for entry in catalog.data:
-                spec = entry.model_spec
-                if (
-                    spec
-                    and spec.pricing
-                    and isinstance(spec.pricing, LLMModelPricing)
-                    and entry.id not in tracker.pricing_map
-                ):
-                    tracker.pricing_map[entry.id] = spec.pricing
+            for model_id, pricing in (await _token_pricing_map(self)).items():
+                tracker.pricing_map.setdefault(model_id, pricing)
         self._cost_tracker = tracker
 
     # -------------------------------------------------------------------

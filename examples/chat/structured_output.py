@@ -8,6 +8,10 @@ models using ``chat.completions.parse(response_format=PydanticModel)``. The
 the response against it, and returns a typed instance — no manual
 ``json.loads`` + field-presence checks required.
 
+Cost: five requests capped at 1024 tokens (the free unknown-model failure aside)
+and at most two re-samples, on the catalog's default schema-capable pick.
+Typically under $0.01 in total; the price depends on that pick.
+
 Requirements:
     - Venice AI API key (set as VENICE_API_KEY environment variable)
     - Python 3.11+
@@ -18,18 +22,15 @@ import asyncio
 import operator
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Literal
 
+from _helpers import states_number
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from venice_ai import NoMatchingModelError, SystemMessage, UserMessage, VeniceClient
 from venice_ai.exceptions import APIError, NotFoundError, VeniceError
 from venice_ai.types.api.chat import ParsedChatCompletion
 from venice_ai.types.api.requests import VeniceParameters
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import states_number  # noqa: E402
 
 # Bounds a runaway generation; every schema here fits comfortably.
 MAX_COMPLETION_TOKENS = 1024
@@ -114,6 +115,9 @@ async def math_problem_example(client: VeniceClient, model: str) -> bool:
     except ValidationError as e:
         if not _cut_off(e):
             print(f"❌ Pydantic ValidationError: model output didn't satisfy schema:\n{e}")
+        return False
+    except ValueError as e:
+        print(f"❌ {e}")
         return False
     except VeniceError as e:
         # VeniceError is the SDK base: covers APIError, APIResponseValidationError,
@@ -202,6 +206,9 @@ async def data_extraction_example(client: VeniceClient, model: str) -> bool:
     except ValidationError as e:
         if not _cut_off(e):
             print(f"❌ Pydantic ValidationError: model output didn't satisfy schema:\n{e}")
+        return False
+    except ValueError as e:
+        print(f"❌ {e}")
         return False
     except VeniceError as e:
         # VeniceError is the SDK base: covers APIError, APIResponseValidationError,
@@ -329,7 +336,8 @@ async def quiz_generation_example(client: VeniceClient, model: str) -> bool:
 
     # Bounded retry on ValidationError only (e.g. duplicate options): the
     # schema can't stop every model from repeating a value, and re-sampling
-    # usually fixes it. Cut-off JSON and API errors are returned immediately.
+    # usually fixes it. Cut-off JSON, an empty reply and API errors are returned
+    # immediately.
     max_attempts = MAX_PARSE_ATTEMPTS
     parsed = None
     for attempt in range(1, max_attempts + 1):
@@ -351,6 +359,9 @@ async def quiz_generation_example(client: VeniceClient, model: str) -> bool:
                 print(f"❌ Pydantic ValidationError after {max_attempts} attempts:\n{e}")
                 return False
             print("   Retrying...")
+        except ValueError as e:
+            print(f"❌ {e}")
+            return False
         except VeniceError as e:
             # VeniceError is the SDK base: covers APIError, APIResponseValidationError,
             # APITimeoutError, and APIConnectionError. A timeout on a single slow
@@ -500,6 +511,9 @@ async def task_planning_example(client: VeniceClient, model: str) -> bool:
                 print(f"❌ Pydantic ValidationError after {max_attempts} attempts:\n{e}")
                 return False
             print("   Retrying...")
+        except ValueError as e:
+            print(f"❌ {e}")
+            return False
         except VeniceError as e:
             # VeniceError is the SDK base: covers APIError, APIResponseValidationError,
             # APITimeoutError, and APIConnectionError. A timeout on a single slow
@@ -558,13 +572,16 @@ class StrictResponse(BaseModel):
 
 
 async def error_handling_example(client: VeniceClient, model: str) -> bool:
-    """Demonstrate the two failure classes a structured-output call can raise.
+    """Demonstrate the failure classes a structured-output call can raise.
 
-    ``parse()`` raises ``pydantic.ValidationError`` when the model's JSON
-    doesn't match the schema (wrong types, missing fields, pattern mismatch),
-    and a ``VeniceError`` subclass (``NotFoundError``, ``InvalidRequestError``,
-    ``APITimeoutError``, ...) when the request itself fails. This demo triggers
-    each one on purpose, then shows a strict schema succeeding.
+    ``parse()`` raises ``pydantic.ValidationError`` when the model's reply
+    doesn't match the schema (wrong types, missing fields, pattern mismatch, an
+    empty string or truncated JSON), plain ``ValueError`` when the reply has no
+    content at all (null, as on a tool-call reply), and a ``VeniceError``
+    subclass (``NotFoundError``, ``InvalidRequestError``, ``APITimeoutError``,
+    ...) when the request itself fails. ``ValidationError`` subclasses
+    ``ValueError``, so catch it first. This demo triggers the first and the
+    last on purpose, then shows a strict schema succeeding.
     """
     print("\n🛡️ Example 5: Error Handling Demo")
     print("=" * 50)
@@ -632,6 +649,9 @@ async def error_handling_example(client: VeniceClient, model: str) -> bool:
         if not _cut_off(e):
             print(f"   ❌ Pydantic ValidationError: model output didn't satisfy schema:\n{e}")
         return False
+    except ValueError as e:
+        print(f"   ❌ {e}")
+        return False
     except VeniceError as e:
         print(f"   ❌ Venice API call failed ({type(e).__name__}): {e}")
         return False
@@ -639,13 +659,13 @@ async def error_handling_example(client: VeniceClient, model: str) -> bool:
     if not _finished(parsed):
         return False
     result = parsed.parsed
-    print("   ✅ Valid response received:")
     print(f"      Status: {result.status}")
     print(f"      Code: {result.code}")
     print(f"      Timestamp: {result.timestamp}")
     if (result.status, result.code, result.timestamp) != ("success", 200, now):
         print("   ❌ The response does not match the requested values")
         return False
+    print("   ✅ The response matches the requested values")
     return ok
 
 
@@ -670,7 +690,7 @@ async def main() -> int:
         # creative dialogue; this example wants careful, factual answers.
         try:
             chat_model = await client.models.resolve_chat(
-                require_response_schema=True, exclude_uncensored=True
+                require_response_schema=True, exclude_uncensored=True, exclude_e2ee=True
             )
         except NoMatchingModelError as e:
             print(f"SKIPPED: no catalog model supports a JSON response schema ({e})")
@@ -716,8 +736,9 @@ async def main() -> int:
         print("     report reaching the cap as 'stop', and it is not a valid result")
         print("   • Schema validation checks shape, not truth: verify content in code")
         print("   • Put reasoning fields before answer fields in the schema")
-        print("   • Pydantic raises ValidationError on schema violations; request")
-        print("     failures raise VeniceError subclasses such as NotFoundError")
+        print("   • Pydantic raises ValidationError on schema violations, ValueError means")
+        print("     the reply had no content, and request failures raise VeniceError")
+        print("     subclasses such as NotFoundError")
         print("   • Lower temperature values improve consistency")
         print("\n📚 Learn more at: https://docs.venice.ai/guides/features/structured-responses")
         return 0

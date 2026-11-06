@@ -15,7 +15,7 @@ Edit models differ in what they accept, so each demo selects its model from
 catalog traits with ``client.models.resolve_inpaint()`` rather than by ID,
 adding ``prefer="cheapest"`` to take the lowest-priced model that qualifies:
 
-- no filter for the default edit model the basic and input-method demos use
+- no filter for the cheapest edit model, which the basic and input-method demos use
 - ``require_resolution="2K"`` for a model that accepts a ``resolution`` tier
   (models without a ``resolutions`` constraint reject the parameter)
 - ``require_uncensored=True`` for a model that honours ``safe_mode=False``
@@ -23,25 +23,25 @@ adding ``prefer="cheapest"`` to take the lowest-priced model that qualifies:
   multi-image input (see ``quality_control.py`` and ``multi_edit.py``)
 
 One base image is generated and reused by every demo. Each run makes that
-generation plus six paid edits. Outputs are written to ``examples/results/``.
+generation plus six paid edits, about $0.15 to $0.20 on the catalog prices listed when
+this was written. Outputs are written to ``examples/results/``.
 """
 
 import asyncio
 import sys
 from pathlib import Path
 
-from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
-from venice_ai.types.api import InpaintModelSpec
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import (  # noqa: E402
+from _helpers import (
     SKIPPED,
     catalog_price_usd,
     format_price,
     generate_base_image,
     image_dimensions,
-    save_image,
+    save_and_report,
 )
+
+from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
+from venice_ai.types.api import InpaintModelSpec
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).
@@ -55,11 +55,7 @@ TWO_K_MIN_LONG_SIDE = 1920
 
 
 def _save(data: bytes, stem: str, written: list[Path]) -> Path:
-    path = save_image(RESULTS_DIR / stem, data)
-    written.append(path)
-    width, height = image_dimensions(data)
-    print(f"   💾 {path.name}: {width}x{height}, {len(data)} bytes")
-    return path
+    return save_and_report(data, RESULTS_DIR / stem, written)
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +316,7 @@ async def main() -> int:
             return SKIPPED
         spec = (await client.models.get(edit_model)).model_spec
         price = catalog_price_usd(spec)
-        print(f"📍 Default edit model: {edit_model} (catalog {format_price(price)} per edit)\n")
+        print(f"📍 Cheapest edit model: {edit_model} (catalog {format_price(price)} per edit)\n")
 
         try:
             print("🎨 Generating the base image every demo edits …")

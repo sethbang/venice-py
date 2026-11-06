@@ -45,6 +45,9 @@ request::
 
     VENICE_RUN_PAID_VIDEO=1
 
+A job quoted above ``VIDEO_CEILING_USD`` ($0.50) is refused. To spend more, raise it
+with ``VENICE_VIDEO_MAX_USD``.
+
 A queue call that ends in a 5xx, a read timeout or a dropped connection may
 still have queued and billed a job. The example says so, and the remaining
 paid section does not queue. A file that is not a video keeps the job's stored
@@ -57,39 +60,30 @@ import os
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any
 
-import aiohttp
-
-from venice_ai import (
-    CheapestVideoResult,
-    ModelQuotesUnavailableError,
-    NoMatchingModelError,
-    VeniceClient,
-    VideoGenerationError,
-    VideoJob,
-    cheapest_video_params,
-)
-from venice_ai.exceptions import AuthenticationError, PermissionDeniedError, VeniceError
-from venice_ai.types.api.models import VideoModelConstraints, VideoModelSpec
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import (  # noqa: E402
+from _helpers import (
     NOT_PAID,
     QUEUE_UNCERTAIN,
     Outcome,
-    UnplayableVideoError,
-    check_video,
-    download_video,
+    ceiling_refusal,
     duration_seconds,
     exit_code,
-    print_progress,
-    print_recovery,
-    read_playable_video,
     read_video_listing,
+    report_error,
     report_uncertain_queue,
+    resolution_height,
     unrecognised_durations,
+    video_constraints,
+    wait_and_check,
 )
+
+from venice_ai import (
+    CheapestVideoResult,
+    NoMatchingModelError,
+    VeniceClient,
+    cheapest_video_params,
+)
+from venice_ai.exceptions import VeniceError
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/video/).
@@ -110,101 +104,13 @@ _queue_uncertain = False
 # ---------------------------------------------------------------------------
 
 
-def _resolution_height(value: str) -> int:
-    """Sort key for resolution tiers: ``"720p"`` -> 720, ``"4k"`` -> 2160."""
-    tier = value.strip().lower()
-    if tier.endswith("k") and tier[:-1].isdigit():
-        return {2: 1440, 4: 2160, 8: 4320}.get(int(tier[:-1]), 0)
-    digits = tier.removesuffix("p")
-    return int(digits) if digits.isdigit() else 0
-
-
-async def _constraints(client: VeniceClient, model: str) -> VideoModelConstraints:
-    """Return the video constraints the catalog lists for ``model``."""
-    entry = await client.models.get(model)
-    spec = entry.model_spec
-    if not isinstance(spec, VideoModelSpec) or spec.constraints is None:
-        raise ValueError(f"{model} has no video constraints in the catalog")
-    return spec.constraints
-
-
-async def _wait_and_save(
-    job: VideoJob,
-    output_path: Path,
-    request: dict[str, Any],
-    *,
-    expect_audio: bool | None = None,
-) -> bool:
-    """Wait for completion, save to disk and check the clip against ``request``.
-
-    The duration, aspect ratio and resolution that were sent must show up in
-    the file. ``expect_audio`` (when not ``None``) also checks that the file
-    has, or lacks, a sound track, so a request whose audio setting was
-    ignored fails.
-    """
-    print(f"⏳ Polling for completion (queue_id={job.queue_id}) ...")
-    # The handlers sit outside the block: leaving it cleanly releases a finished
-    # job's stored video, so a failed download has to raise through it.
-    try:
-        async with job:
-            status = await job.wait(on_progress=print_progress)
-            saved = await download_video(job, output_path, status)
-            data = read_playable_video(saved)
-    except UnplayableVideoError as e:
-        WRITTEN.append(output_path)
-        print(f"❌ {output_path} is not a usable video: {e} (queue_id={job.queue_id})")
-        print_recovery(job)
-        return False
-    except VideoGenerationError as e:
-        code = f" (code={e.error_code})" if e.error_code else ""
-        print(f"❌ Generation failed: {e}{code}")
-        return False
-    except TimeoutError as e:
-        # wait() ran out of polls; the job is still queued or running.
-        print(f"❌ {e} (queue_id={job.queue_id})")
-        print_recovery(job)
-        return False
-    except aiohttp.ClientResponseError as e:
-        # The error shows the storage host at most, never the link.
-        print(f"❌ The download answered HTTP {e.status} (queue_id={job.queue_id})")
-        print_recovery(job)
-        return False
-    except VeniceError as e:
-        # A status request failed, or every download attempt did. That does not
-        # cancel the job: it may still finish, and it is billed either way.
-        print(f"❌ Video request failed (queue_id={job.queue_id}): {e}")
-        print_recovery(job)
-        return False
-
-    WRITTEN.append(saved)
-    print(f"💾 Saved to {saved} ({len(data):,} bytes)")
-    if not check_video(data, request, expect_audio=expect_audio):
-        print("❌ The clip does not match the request")
-        return False
-    print("✅ Video ready and matches the request")
-    return True
-
-
-def _report_error(e: Exception) -> None:
-    if isinstance(e, ModelQuotesUnavailableError):
-        # Models matched but none could be priced: an outage, a rate limit or
-        # a request Venice rejects. Each model's own error says which.
-        print(f"❌ No usable quote: {len(e.failures)} quotes failed")
-        for model_id, error in list(e.failures.items())[:3]:
-            print(f"   {model_id}: {type(error).__name__}: {error}")
-        return
-    print(f"❌ Error: {e}")
-    if isinstance(e, (AuthenticationError, PermissionDeniedError)):
-        print("💡 Check VENICE_API_KEY: video generation needs a valid key with API access")
-
-
 def _report_queue_failure(e: Exception) -> None:
     """Report a failed ``video.run()``, and stop queueing if it may have been billed."""
     global _queue_uncertain
     if report_uncertain_queue(e):
         _queue_uncertain = True
     else:
-        _report_error(e)
+        report_error(e)
 
 
 def _print_pick(pick: CheapestVideoResult) -> None:
@@ -248,6 +154,9 @@ async def basic_text_to_video(client: VeniceClient) -> Outcome:
                 "⏭️  Not queued: set VENICE_RUN_PAID_VIDEO=1 to generate (incurs the quoted cost)."
             )
             return NOT_PAID
+        refusal = ceiling_refusal(pick.quote_usd)
+        if refusal is not None:
+            return refusal
         if failures := pick.quote_failures:
             print(
                 f"❌ Not queued: {len(failures)} models could not be priced, and any of them "
@@ -255,7 +164,7 @@ async def basic_text_to_video(client: VeniceClient) -> Outcome:
             )
             return False
 
-        # run() returns a VideoJob. _wait_and_save() uses it as an async context
+        # run() returns a VideoJob. wait_and_check() uses it as an async context
         # manager, which releases the job's stored media once it has finished
         # and the block exits cleanly.
         try:
@@ -264,10 +173,12 @@ async def basic_text_to_video(client: VeniceClient) -> Outcome:
             _report_queue_failure(e)
             return False
         print(f"📨 Queued — queue_id: {job.queue_id}")
-        return await _wait_and_save(job, RESULTS_DIR / "basic_video.mp4", pick.request_params)
+        return await wait_and_check(
+            job, RESULTS_DIR / "basic_video.mp4", pick.request_params, WRITTEN
+        )
 
     except (VeniceError, ValueError) as e:
-        _report_error(e)
+        report_error(e)
         return False
 
 
@@ -291,10 +202,10 @@ async def cost_estimation(client: VeniceClient) -> Outcome:
     except NoMatchingModelError as e:
         return f"no text-to-video model to quote ({e})"
     try:
-        constraints = await _constraints(client, model)
+        constraints = await video_constraints(client, model)
         base = cheapest_video_params(constraints)
     except (VeniceError, ValueError) as e:
-        _report_error(e)
+        report_error(e)
         return False
 
     print(f"📍 Model: {model}")
@@ -317,7 +228,7 @@ async def cost_estimation(client: VeniceClient) -> Outcome:
             await quote(f"{duration:>4}", duration_seconds=duration)
 
     print(f"\n📊 By resolution ({base['duration_seconds']}):")
-    for resolution in sorted(constraints.resolutions, key=_resolution_height):
+    for resolution in sorted(constraints.resolutions, key=resolution_height):
         await quote(f"{resolution:>5}", resolution=resolution)
 
     return ok
@@ -368,6 +279,9 @@ async def advanced_options(client: VeniceClient) -> Outcome:
                 "⏭️  Not queued: set VENICE_RUN_PAID_VIDEO=1 to generate (incurs the quoted cost)."
             )
             return NOT_PAID
+        refusal = ceiling_refusal(pick.quote_usd)
+        if refusal is not None:
+            return refusal
         if failures := pick.quote_failures:
             print(
                 f"❌ Not queued: {len(failures)} models could not be priced, and any of them "
@@ -386,12 +300,16 @@ async def advanced_options(client: VeniceClient) -> Outcome:
             _report_queue_failure(e)
             return False
         print(f"📨 Queued — queue_id: {job.queue_id}")
-        return await _wait_and_save(
-            job, RESULTS_DIR / "advanced_video.mp4", pick.request_params, expect_audio=False
+        return await wait_and_check(
+            job,
+            RESULTS_DIR / "advanced_video.mp4",
+            pick.request_params,
+            WRITTEN,
+            expect_audio=False,
         )
 
     except (VeniceError, ValueError) as e:
-        _report_error(e)
+        report_error(e)
         return False
 
 
@@ -426,9 +344,7 @@ async def model_discovery(client: VeniceClient) -> Outcome:
             return False
         print(f"📚 {len(t2v)} text-to-video models online. First five:")
         for model_id, c in t2v[:5]:
-            audio = (
-                "on/off" if c.audio_configurable else ("always" if c.audio else "not configurable")
-            )
+            audio = "on/off" if c.audio_configurable else ("always" if c.audio else "none")
             print(
                 f"   - {model_id}: durations={c.durations} resolutions={c.resolutions} audio={audio}"
             )
@@ -479,7 +395,7 @@ async def model_discovery(client: VeniceClient) -> Outcome:
         return True
 
     except (VeniceError, ValueError) as e:
-        _report_error(e)
+        report_error(e)
         return False
 
 
@@ -525,8 +441,9 @@ async def main() -> int:
     passed = {name for name, outcome in results if outcome is True}
     print("\n💡 Key concepts demonstrated:")
     print("   - resolve_cheapest_video(): cheapest model plus the parameters it was quoted at")
-    audio = ", audio" if "advanced_options" in passed else ""
-    print(f"   - Each clip checked against its request: duration, aspect, resolution{audio}")
+    print("   - Each clip checked against its request: duration, aspect, resolution")
+    if "advanced_options" in passed:
+        print("   - The audio=False clip also checked for having no sound track")
     if "cost_estimation" in passed:
         print("   - Quote matrix built from one model's listed durations and resolutions")
     if "model_discovery" in passed:

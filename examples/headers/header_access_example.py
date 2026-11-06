@@ -16,7 +16,26 @@ Features demonstrated:
   charged. The account balance itself is client.billing.get_balance().
 - DIEM credit left this epoch (x-venice-balance-diem): the staking allowance,
   where each staked DIEM grants $1 of credit per epoch, reset at 00:00 UTC.
-- Server build identification
+- Server build identification, and the request ID to quote to support
+  (``request_id``, read from CF-RAY)
+- Model details (``model_info``). Venice's spec declares these headers on image
+  edits and voice conversion only, so expect ``None`` on chat and embeddings.
+- Content safety flags (``content_safety_info``), declared on image endpoints
+
+Each accessor is compared with its raw header whenever the header arrives. A header
+that is absent is not a failure, except where a comment below says so.
+
+Two accessors are not exercised here:
+
+- ``pagination_info`` reads ``x-pagination-*`` headers, which chat, image and
+  embeddings responses do not carry.
+- ``x402_balance_remaining`` reads ``X-Balance-Remaining``. The spec declares that
+  header for wallet-paid requests, but Venice did not send it on a wallet-paid chat
+  measured on 2026-11-05, so it was ``None`` even there. Read the wallet's credit
+  with ``client.x402.balance(auth=...)`` instead.
+
+Cost: one small image at the catalog's cheapest price, usually $0.01 to $0.02, plus
+a short chat and one embedding, each a tiny fraction of a cent.
 
 Usage:
     python examples/headers/header_access_example.py
@@ -269,6 +288,29 @@ def _check_accessors(response, headers: dict[str, str], expect_tokens: bool) -> 
         problems.append(
             f"x-venice-version={raw_version!r} but venice_version={response.venice_version!r}"
         )
+
+    raw_ray = headers.get("cf-ray")
+    if raw_ray is not None and response.request_id != raw_ray:
+        problems.append(f"cf-ray={raw_ray!r} but request_id={response.request_id!r}")
+
+    # model_info is None unless at least one model header arrived.
+    raw_model_id = headers.get("x-venice-model-id")
+    if raw_model_id is not None:
+        model_info = response.model_info
+        parsed_id = model_info.model_id if model_info else None
+        if parsed_id != raw_model_id:
+            problems.append(f"x-venice-model-id={raw_model_id!r} but model_info gave {parsed_id!r}")
+
+    # content_safety_info is None unless at least one safety header arrived.
+    raw_blurred = headers.get("x-venice-is-blurred")
+    if raw_blurred is not None:
+        safety = response.content_safety_info
+        parsed_blurred = safety.is_blurred if safety else None
+        if parsed_blurred != (raw_blurred.lower() == "true"):
+            problems.append(
+                f"x-venice-is-blurred={raw_blurred!r} but content_safety_info "
+                f"gave {parsed_blurred!r}"
+            )
     return problems
 
 
@@ -355,15 +397,41 @@ def demonstrate_response_headers(response, response_type: str, *, expect_tokens:
     else:
         print("ℹ️ No balance information available")
 
-    # 5. Server build (x-venice-version identifies the server build that
-    # handled the request; include it when reporting issues to Venice)
+    # 5. What to quote when reporting an issue to Venice: the request ID (CF-RAY,
+    # which names this one request) and the server build that handled it.
+    request_id = response.request_id
+    if request_id:
+        print(f"\n🎫 Request ID: {request_id}")
+    else:
+        print("ℹ️ No request ID (no CF-RAY header)")
     version = response.venice_version
     if version:
-        print(f"\n🏷️ Server build: {version}")
+        print(f"🏷️ Server build: {version}")
     else:
         print("ℹ️ No server build information")
 
-    # 6. Check that every typed accessor matches its raw header.
+    # 6. Model details. None is normal: the headers are not sent on every endpoint.
+    model_info = response.model_info
+    if model_info:
+        print(f"🤖 Model: {model_info.model_id} ({model_info.model_name})")
+        if model_info.model_router:
+            print(f"   Router: {model_info.model_router}")
+    else:
+        print("ℹ️ No model headers on this response (model_info is None)")
+
+    # 7. Content safety. Also None when the endpoint sends no safety headers.
+    safety = response.content_safety_info
+    if safety:
+        print(
+            f"🛡️ Content safety: blurred={safety.is_blurred}, "
+            f"violation={safety.is_content_violation}, "
+            f"adult model violation={safety.is_adult_model_content_violation}, "
+            f"contains minor={safety.contains_minor}"
+        )
+    else:
+        print("ℹ️ No content safety headers on this response")
+
+    # 8. Check that every typed accessor matches its raw header.
     problems = _check_accessors(response, headers, expect_tokens)
     if problems:
         for problem in problems:
@@ -386,7 +454,7 @@ def show_header_properties_usage():
 response = await client.chat.completions.create(...)
 if response.response_rate_limits:
     remaining = response.response_rate_limits.remaining_requests
-    if remaining and remaining < 10:
+    if remaining is not None and remaining < 10:
         print(f"Warning: Only {remaining} requests remaining!")
         """,
         ),
@@ -423,6 +491,24 @@ headers = response.headers
 custom_header = headers.get('x-custom-header') if headers else None
         """,
         ),
+        (
+            "Report an Issue",
+            """
+# Quote these to Venice support; either may be None
+response = await client.chat.completions.create(...)
+print(f"request id: {response.request_id}, server build: {response.venice_version}")
+        """,
+        ),
+        (
+            "Handle Optional Accessors",
+            """
+# model_info and content_safety_info are None when their headers are absent
+response = await client.image.create(...)
+safety = response.content_safety_info
+if safety and safety.is_blurred:
+    print("The image came back blurred")
+        """,
+        ),
     ]
 
     for title, code in code_examples:
@@ -443,6 +529,7 @@ async def main() -> int:
     print("• Easy access to rate limit information for throttling")
     print("• Automatic detection of deprecated models")
     print("• Spend monitoring: the balance header is read before each request is charged")
+    print("• A request ID and server build to quote to support")
     print("• Access to all HTTP headers for debugging")
 
     failed = [name for name, result in outcomes.items() if result is False]

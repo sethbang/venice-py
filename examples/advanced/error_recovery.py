@@ -840,10 +840,10 @@ async def classify(
         print(f"   ⏱️ RateLimitError (back off, then retry later): {e}")
         raised = e
     except APITimeoutError as e:
-        print(f"   ⏰ APITimeoutError (retries exhausted): {e}")
+        print(f"   ⏰ APITimeoutError (resent only if its retry class allows): {e}")
         raised = e
     except APIConnectionError as e:
-        print(f"   🌐 APIConnectionError (retries exhausted): {e}")
+        print(f"   🌐 APIConnectionError (resent only if its retry class allows): {e}")
         raised = e
     except APIError as e:
         print(f"   🚨 {type(e).__name__} (status {e.status_code}): {e}")
@@ -901,7 +901,7 @@ async def comprehensive_error_handling(chat_model: str) -> bool:
     return unknown_model_ok and bad_key_ok
 
 
-def error_recovery_best_practices() -> bool:
+def error_recovery_best_practices() -> None:
     """Print error recovery guidance. No API calls."""
     print("\n💡 Error Recovery Best Practices")
     print("-" * 40)
@@ -923,7 +923,10 @@ def error_recovery_best_practices() -> bool:
     print("   - Use on_retry to count and log retries")
     print()
     print("3. ⏱️ Set timeouts to match the workload:")
-    print("   - Interactive: 5-10s; background: 30-60s; batch: 120s+")
+    print("   - A timed-out inference or paid call is not resent and may still be billed,")
+    print("     so leave room for your model's slowest normal reply (the default is 120s)")
+    print("   - Interactive: stream the reply instead of shortening the timeout")
+    print("   - Free reads (GETs, quotes): a short timeout costs only a repeat of the read")
     print()
     print("4. 🎭 Plan fallbacks: cached responses, degraded functionality, another model")
     print()
@@ -935,9 +938,8 @@ def error_recovery_best_practices() -> bool:
     print("       retry_options=RetryOptions(max_attempts=3, base_delay=1.0, max_delay=30.0),")
     print("   )")
     print("   async with client.with_retries(RetryOptions(max_attempts=5)):")
-    print("       ...  # calls in this block use the stricter policy")
+    print("       ...  # calls in this block retry up to 5 times instead of 3")
     print("   ```")
-    return True
 
 
 async def main() -> int:
@@ -958,8 +960,8 @@ async def main() -> int:
         ("timeout_errors", await timeout_errors()),
         ("rate_limits_and_unavailable", await rate_limits_and_unavailable()),
         ("comprehensive_error_handling", await comprehensive_error_handling(chat_model)),
-        ("error_recovery_best_practices", error_recovery_best_practices()),
     ]
+    error_recovery_best_practices()
 
     failed = [name for name, ok in results if not ok]
 

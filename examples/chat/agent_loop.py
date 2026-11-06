@@ -16,8 +16,15 @@ It showcases:
   letting the SDK introspect them via ``tool_from_function``
 - Running a multi-step agent loop where the model actually calls the tools and
   the SDK executes them, feeding results back automatically
-- Observing each tool call as it happens with the ``on_tool_call`` hook
-- Inspecting the ``ToolLoopResult`` (final text, round-trip count, token usage)
+- Observing each successful tool call as it happens with the ``on_tool_call``
+  hook (a call that raises goes to ``on_tool_error`` instead)
+- Inspecting the ``ToolLoopResult`` (final text, round-trip count, token usage,
+  full message history)
+- ``on_tool_error``, ``parallel=True``, extra ``create()`` arguments and
+  ``Conversation.run_with_tools``
+
+Cost: two tool loops of two or three short requests each on the cheapest model
+with function calling, typically under $0.002 in total.
 
 Prerequisites:
 - Install: pip install venice-py
@@ -27,12 +34,15 @@ Prerequisites:
 import asyncio
 import sys
 import textwrap
-from pathlib import Path
 from typing import Any, Literal
 
+from _helpers import completion_cap, states_number, states_reading
+
 from venice_ai import (
+    Conversation,
     MaxIterationsExceededError,
     NoMatchingModelError,
+    ToolMessage,
     UserMessage,
     VeniceClient,
     VeniceError,
@@ -40,15 +50,6 @@ from venice_ai import (
 )
 from venice_ai.types.api.chat import ToolCall
 from venice_ai.types.api.requests import VeniceParameters
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import states_number, states_reading  # noqa: E402
-
-# Per-round completion budget. The cheapest function-calling model is often a
-# reasoning model, and small reasoning models vary widely in how long they
-# think before emitting a tool call or the answer, so the cap leaves several
-# thousand tokens of headroom over any answer this task needs.
-MAX_COMPLETION_TOKENS = 16384
 
 # ---------------------------------------------------------------------------
 # Tool implementations
@@ -99,13 +100,15 @@ def get_weather(
     return f"{city.title()}: {temp}{symbol}, {sky}"
 
 
-async def agent_loop_demo(client: VeniceClient, model_id: str) -> bool:
+async def agent_loop_demo(client: VeniceClient, model_id: str, cap: int) -> bool:
     """Run a multi-step agent loop that exercises both tools.
 
     Returns ``True`` only when the model called both tools, the loop finished
     with a complete answer, and that answer uses the tool results. Returns
     ``False`` on an API error, a loop that never converged, a truncated answer,
-    or an answer that ignored the tools.
+    or an answer that ignored the tools. ``cap`` is the per-round completion
+    budget: the cheapest function-calling model is often a reasoning model, which
+    spends part of it thinking before it emits a tool call or the answer.
     """
     print("\n🤖 Agent Loop (run_with_tools)")
     print("-" * 40)
@@ -149,7 +152,7 @@ async def agent_loop_demo(client: VeniceClient, model_id: str) -> bool:
             tools=[calculator, get_weather],
             on_tool_call=on_tool_call,
             max_iterations=6,
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
+            max_completion_tokens=cap,
             # The tools and the user message are all the context this task
             # needs, so Venice's own system prompt is left out.
             venice_parameters=VeniceParameters(include_venice_system_prompt=False),
@@ -164,7 +167,7 @@ async def agent_loop_demo(client: VeniceClient, model_id: str) -> bool:
 
     answer = result.text or ""
     print(f"\n🔁 Loop converged in {result.iterations} round-trip(s).")
-    print(f"   Tool calls executed: {len(tool_calls_seen)}")
+    print(f"   Tool calls that succeeded: {len(tool_calls_seen)}")
     print(f"   Finish reason: {result.finish_reason}")
     print("\n📝 Final answer:")
     print(textwrap.indent(answer.strip(), "   "))
@@ -203,11 +206,11 @@ async def agent_loop_demo(client: VeniceClient, model_id: str) -> bool:
     # Some models report an answer cut off at the cap as finish_reason="stop",
     # so the final round's completion count is checked against the cap too.
     used = result.usage.completion_tokens if result.usage else None
-    if result.finish_reason == "length" or used is None or used >= MAX_COMPLETION_TOKENS:
+    if result.finish_reason == "length" or used is None or used >= cap:
         problems.append(
             "the final answer may be cut off: "
             f"finish_reason={result.finish_reason}, completion tokens {used} "
-            f"of {MAX_COMPLETION_TOKENS}"
+            f"of {cap}"
         )
     if not answer.strip():
         problems.append("the final answer is empty")
@@ -227,12 +230,142 @@ async def agent_loop_demo(client: VeniceClient, model_id: str) -> bool:
     return True
 
 
-async def inspect_tool_schema_demo() -> bool:
-    """Show what ``tool_from_function`` builds from a plain function.
+# ---------------------------------------------------------------------------
+# Loop options: a tool that fails, and tools that can run at the same time
+# ---------------------------------------------------------------------------
 
-    Pure introspection — no network call — so this always returns ``True``.
-    It makes the magic behind ``run_with_tools`` visible: the same conversion
-    happens automatically when you pass bare callables to the loop.
+# Plain digits: models often rewrite a hyphen as U+2011, which would miss the table.
+ORDER_STATUS = {"1001": "shipped"}
+
+# Tells apart what on_tool_error returned from the SDK's default error text.
+NOT_FOUND = "No such order on file."
+
+
+class OrderLookup:
+    """An async tool that records how many of its calls overlapped."""
+
+    def __init__(self) -> None:
+        self.running = 0
+        self.peak = 0
+
+    async def lookup_order(self, order_id: str) -> str:
+        """Look up the status of one order by its ID."""
+        self.running += 1
+        self.peak = max(self.peak, self.running)
+        try:
+            await asyncio.sleep(0.05)  # stands in for a real network call
+            if order_id not in ORDER_STATUS:
+                raise LookupError(f"unknown order {order_id}")
+            return ORDER_STATUS[order_id]
+        finally:
+            self.running -= 1
+
+
+async def loop_options_demo(client: VeniceClient, model_id: str, cap: int) -> bool:
+    """Run ``Conversation.run_with_tools`` with a tool that fails.
+
+    - ``on_tool_call`` sees only calls that succeeded; a call that raises goes to
+      ``on_tool_error``, and the string it returns is what the model reads.
+    - ``parallel=True`` runs the calls of one assistant turn concurrently. Only
+      use it when the handlers are safe to run together. A model may still ask
+      for one call per turn, so the overlap is checked only if it asked for two.
+    - Every other keyword argument goes to ``create()`` on each round.
+    - ``Conversation.run_with_tools`` appends what the loop produced to the
+      conversation, which is then ready for the next user turn.
+    """
+    print("\n🧰 Loop Options (on_tool_error, parallel, Conversation)")
+    print("-" * 40)
+
+    succeeded: list[str] = []
+    failed: list[str] = []
+    orders = OrderLookup()
+
+    def on_tool_call(call: ToolCall, result: Any) -> None:
+        if call.function is not None:
+            succeeded.append(str(call.function.arguments_dict.get("order_id", "")))
+            print(f"   🔧 {call.function.name}({call.function.arguments}) -> {result!r}")
+
+    def on_tool_error(call: ToolCall, error: Exception) -> str:
+        if call.function is not None:
+            failed.append(str(call.function.arguments_dict.get("order_id", "")))
+        print(f"   ⚠️  Tool raised {type(error).__name__}: {error}")
+        return NOT_FOUND
+
+    conversation = Conversation()
+    conversation.add_user(
+        "Call lookup_order for order 1001 and for order 2002, in the same turn if you can. "
+        "Then state each order's status in plain text. If a lookup fails, say so."
+    )
+    before = len(conversation.messages)
+
+    try:
+        result = await conversation.run_with_tools(
+            client,
+            model=model_id,
+            tools=[orders.lookup_order],
+            on_tool_call=on_tool_call,
+            on_tool_error=on_tool_error,
+            parallel=True,
+            max_iterations=6,
+            max_completion_tokens=cap,
+            venice_parameters=VeniceParameters(include_venice_system_prompt=False),
+        )
+    except MaxIterationsExceededError as e:
+        print(f"❌ Tool loop did not converge: {e}")
+        return False
+    except VeniceError as e:
+        print(f"❌ Agent loop request failed ({type(e).__name__}): {e}")
+        return False
+
+    answer = result.text or ""
+    print("\n📝 Final answer:")
+    print(textwrap.indent(answer.strip(), "   "))
+
+    tool_turns = [m.tool_calls for m in result.messages if getattr(m, "tool_calls", None)]
+    most_in_one_turn = max((len(calls) for calls in tool_turns), default=0)
+    tool_results = [m.content for m in result.messages if isinstance(m, ToolMessage)]
+    grown = len(conversation.messages) - before
+    print(
+        f"\n📜 result.messages: {len(result.messages)} messages, {result.iterations} round-trip(s)"
+    )
+    print(
+        f"   Most tool calls in one turn: {most_in_one_turn}; most running at once: {orders.peak}"
+    )
+    print(f"   The conversation grew by {grown} messages")
+
+    problems: list[str] = []
+    if "1001" not in succeeded or "2002" in succeeded:
+        problems.append(f"on_tool_call should see 1001 only, saw {succeeded}")
+    # A model may try the failed lookup again, so this allows repeats.
+    if set(failed) != {"2002"}:
+        problems.append(f"on_tool_error should see 2002 only, saw {failed}")
+    if NOT_FOUND not in tool_results:
+        problems.append("the string on_tool_error returned is not in result.messages")
+    if most_in_one_turn >= 2 and orders.peak < 2:
+        problems.append("two calls in one turn did not overlap despite parallel=True")
+    if grown != len(result.messages) - before:
+        problems.append("the conversation did not gain the messages the loop produced")
+    used = result.usage.completion_tokens if result.usage else None
+    if result.finish_reason == "length" or used is None or used >= cap:
+        problems.append(f"the final answer may be cut off ({used} of {cap} tokens)")
+    if "shipped" not in answer.lower():
+        problems.append("the final answer does not state order 1001's status (shipped)")
+
+    if problems:
+        for problem in problems:
+            print(f"❌ {problem}")
+        return False
+    print("\n✅ The failure reached on_tool_error and the model carried on from its message.")
+    return True
+
+
+async def inspect_tool_schema_demo() -> bool:
+    """Show and check what ``tool_from_function`` builds from a plain function.
+
+    Pure introspection, with no network call. It makes the work behind
+    ``run_with_tools`` visible: the same conversion happens automatically when
+    you pass bare callables to the loop. Returns ``False`` if the schema does
+    not match the function's signature.
     """
     print("\n🔍 Inspecting tool_from_function output")
     print("-" * 40)
@@ -244,6 +377,12 @@ async def inspect_tool_schema_demo() -> bool:
     print(f"   Description:   {weather_tool.function.description}")
     print(f"   Parameters:    {weather_tool.function.parameters}")
 
+    parameters = weather_tool.function.parameters or {}
+    unit = parameters.get("properties", {}).get("unit", {})
+    if parameters.get("required") != ["city"] or unit.get("enum") != ["celsius", "fahrenheit"]:
+        print("   ❌ The schema does not match get_weather's signature")
+        return False
+    print("   ✅ city is required; unit is optional and limited to its Literal values")
     return True
 
 
@@ -271,7 +410,9 @@ async def main() -> int:
         except NoMatchingModelError as e:
             print(f"\nSKIPPED: no function-calling chat model in the catalog ({e})")
             return 77
-        results.append(("agent_loop_demo", await agent_loop_demo(client, model_id)))
+        cap = await completion_cap(client, model_id)
+        results.append(("agent_loop_demo", await agent_loop_demo(client, model_id, cap)))
+        results.append(("loop_options_demo", await loop_options_demo(client, model_id, cap)))
 
     failed = [name for name, ok in results if not ok]
 
@@ -283,7 +424,9 @@ async def main() -> int:
     print("\n💡 Key concepts demonstrated:")
     print("   - run_with_tools drives the full tool-call loop for you")
     print("   - Plain Python functions become tools via tool_from_function")
-    print("   - on_tool_call observes each tool the model invokes")
+    print("   - on_tool_call observes each successful call; on_tool_error handles failures")
+    print("   - parallel=True runs one turn's calls concurrently")
+    print("   - Conversation.run_with_tools keeps the history for the next turn")
     print("   - ToolLoopResult carries the final text, iterations, and usage")
     return 0
 
@@ -295,9 +438,5 @@ if __name__ == "__main__":
         print("\n👋 Goodbye!")
         sys.exit(130)
     except Exception as e:
-        print(f"\n❌ Error: {e}", file=sys.stderr)
-        print(
-            "Check that your API key is valid and you have a model that supports function calling.",
-            file=sys.stderr,
-        )
+        print(f"\n❌ Error: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

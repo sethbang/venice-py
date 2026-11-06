@@ -4,10 +4,14 @@ Venice AI SDK - Vision / Multimodal Chat Completions
 =====================================================
 
 This example demonstrates how to send images to vision-capable models using
-the Venice AI SDK. Every image is encoded as a base64 ``data:`` URI before
-sending (see "Why we pre-fetch and resize the source images" below) — learn
-how to analyze a single image, send image bytes you produced yourself, compare
-multiple images, and use different analysis prompt strategies.
+the Venice AI SDK. Most sections encode the image as a base64 ``data:`` URI
+before sending (see "Why we pre-fetch and resize the source images" below); one
+sends a public URL for Venice to fetch itself. Learn how to analyze a single
+image, send image bytes you produced yourself, compare multiple images, set the
+``detail`` level and use different analysis prompt strategies.
+
+Cost: eight short requests with images on the cheapest vision models, typically
+under $0.002 in total. Vision tokens depend on the model and the image size.
 
 Why we pre-fetch and resize the source images
 ---------------------------------------------
@@ -16,7 +20,8 @@ and answer a multi-megapixel image with HTTP 500 ``"Inference processing
 failed"``. To make this example work with every vision-capable model, we
 download the source images once and run them through
 ``fit_image_bytes(max_dim=512)`` before encoding as base64. That keeps every
-image within the tighter limits without excluding any model.
+image within the tighter limits without excluding any model. A URL is sent as
+is, so the URL section uses a source image that is already small.
 
 Each section checks that the answer is complete (``finish_reason``, and a
 completion count below the cap, since some models report a cut-off answer as
@@ -38,6 +43,7 @@ import importlib.util
 import io
 import re
 import sys
+from typing import Literal
 
 import aiohttp
 
@@ -124,45 +130,44 @@ def _check_keywords(content: str, keywords: list[str], label: str) -> None:
 # ============================================================================
 
 
-async def basic_image_analysis(cat_uri: str):
+async def basic_image_analysis(client: VeniceClient, cat_uri: str):
     print("👁️  Basic Image Analysis")
     print("-" * 40)
 
-    async with VeniceClient() as client:
-        vision_model = await client.models.resolve_chat(
-            require_vision=True, exclude_reasoning=True, prefer="cheapest"
-        )
-        print(f"📍 Using vision model: {vision_model}")
+    vision_model = await client.models.resolve_chat(
+        require_vision=True, exclude_reasoning=True, prefer="cheapest"
+    )
+    print(f"📍 Using vision model: {vision_model}")
 
-        # Pattern 1: fluent builder — most readable for incremental construction.
-        # cat_uri is a fitted base64 data URI prepared at startup.
-        message = (
-            UserMessage.builder()
-            .text("What do you see in this image? Describe it in one paragraph.")
-            .image(cat_uri)
-            .build()
-        )
+    # Pattern 1: fluent builder — most readable for incremental construction.
+    # cat_uri is a fitted base64 data URI prepared at startup.
+    message = (
+        UserMessage.builder()
+        .text("What do you see in this image? Describe it in one paragraph.")
+        .image(cat_uri)
+        .build()
+    )
 
-        response = await client.chat.completions.create(
-            model=vision_model,
-            messages=[message],
-            venice_parameters=NO_VENICE_PROMPT,
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
-            temperature=0.5,
-        )
+    response = await client.chat.completions.create(
+        model=vision_model,
+        messages=[message],
+        venice_parameters=NO_VENICE_PROMPT,
+        max_completion_tokens=MAX_COMPLETION_TOKENS,
+        temperature=0.5,
+    )
 
-        content = _check_complete(response, "basic_image_analysis")
-        print(f"🤖 Assistant: {content}")
+    content = _check_complete(response, "basic_image_analysis")
+    print(f"🤖 Assistant: {content}")
 
-        if response.usage:
-            usage = response.usage
-            print("\n📊 Token Usage:")
-            print(f"   Input tokens:  {usage.prompt_tokens}")
-            print(f"   Output tokens: {usage.completion_tokens}")
-            print(f"   Total tokens:  {usage.total_tokens}")
+    if response.usage:
+        usage = response.usage
+        print("\n📊 Token Usage:")
+        print(f"   Input tokens:  {usage.prompt_tokens}")
+        print(f"   Output tokens: {usage.completion_tokens}")
+        print(f"   Total tokens:  {usage.total_tokens}")
 
-        # SAMPLE_IMAGE_URL is a tabby cat on a stone wall
-        _check_keywords(content, ["cat", "tabby", "feline", "kitten"], "basic_image_analysis")
+    # SAMPLE_IMAGE_URL is a tabby cat on a stone wall
+    _check_keywords(content, ["cat", "tabby", "feline", "kitten"], "basic_image_analysis")
 
 
 # ============================================================================
@@ -192,7 +197,7 @@ def _draw_sample_png() -> bytes:
     return buffer.getvalue()
 
 
-async def base64_image_input():
+async def base64_image_input(client: VeniceClient):
     print("\n🖼️  Base64 Image Input (drawn locally → analysed)")
     print("-" * 40)
 
@@ -200,42 +205,41 @@ async def base64_image_input():
     png_bytes = _draw_sample_png()
     print(f"🎨 Drew a 512x512 PNG locally ({len(png_bytes)} bytes)")
 
-    async with VeniceClient() as client:
-        # --- Step 2: Send the bytes as a base64 data URI ---
-        vision_model = await client.models.resolve_chat(
-            require_vision=True, exclude_reasoning=True, prefer="cheapest"
+    # --- Step 2: Send the bytes as a base64 data URI ---
+    vision_model = await client.models.resolve_chat(
+        require_vision=True, exclude_reasoning=True, prefer="cheapest"
+    )
+    print(f"📍 Analysing with vision model: {vision_model}")
+
+    # detect_image_format() reads the magic bytes, so the data URI carries
+    # the right MIME type whatever produced the image.
+    _ext, mime_type = detect_image_format(png_bytes)
+    data_uri = f"data:{mime_type};base64,{base64.b64encode(png_bytes).decode('ascii')}"
+    message = (
+        UserMessage.builder()
+        .text(
+            "Describe this image in two sentences: its shapes and colors, and the exact "
+            "text written on it."
         )
-        print(f"📍 Analysing with vision model: {vision_model}")
+        .image(data_uri)
+        .build()
+    )
 
-        # detect_image_format() reads the magic bytes, so the data URI carries
-        # the right MIME type whatever produced the image.
-        _ext, mime_type = detect_image_format(png_bytes)
-        data_uri = f"data:{mime_type};base64,{base64.b64encode(png_bytes).decode('ascii')}"
-        message = (
-            UserMessage.builder()
-            .text(
-                "Describe this image in two sentences: its shapes and colors, and the exact "
-                "text written on it."
-            )
-            .image(data_uri)
-            .build()
-        )
+    response = await client.chat.completions.create(
+        model=vision_model,
+        messages=[message],
+        venice_parameters=NO_VENICE_PROMPT,
+        max_completion_tokens=MAX_COMPLETION_TOKENS,
+        temperature=0.2,
+    )
 
-        response = await client.chat.completions.create(
-            model=vision_model,
-            messages=[message],
-            venice_parameters=NO_VENICE_PROMPT,
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
-            temperature=0.2,
-        )
+    content = _check_complete(response, "base64_image_input")
+    print(f"🤖 Assistant: {content}")
 
-        content = _check_complete(response, "base64_image_input")
-        print(f"🤖 Assistant: {content}")
-
-        # The image is a red circle on blue with a caption only the pixels carry.
-        _check_keywords(content, ["circle", "circular", "round"], "base64_image_input (shape)")
-        _check_keywords(content, ["red"], "base64_image_input (color)")
-        _check_keywords(content, ["2718"], "base64_image_input (text)")
+    # The image is a red circle on blue with a caption only the pixels carry.
+    _check_keywords(content, ["circle", "circular", "round"], "base64_image_input (shape)")
+    _check_keywords(content, ["red"], "base64_image_input (color)")
+    _check_keywords(content, ["2718"], "base64_image_input (text)")
 
 
 # ============================================================================
@@ -243,53 +247,52 @@ async def base64_image_input():
 # ============================================================================
 
 
-async def image_comparison(cat_uri: str, dog_uri: str):
+async def image_comparison(client: VeniceClient, cat_uri: str, dog_uri: str):
     print("\n🔍 Image Comparison (two images)")
     print("-" * 40)
 
-    async with VeniceClient() as client:
-        # Two images in one message need a model that accepts several images.
-        vision_model = await client.models.resolve_chat(
-            require_vision=True,
-            require_multiple_images=True,
-            exclude_reasoning=True,
-            prefer="cheapest",
+    # Two images in one message need a model that accepts several images.
+    vision_model = await client.models.resolve_chat(
+        require_vision=True,
+        require_multiple_images=True,
+        exclude_reasoning=True,
+        prefer="cheapest",
+    )
+    print(f"📍 Using vision model: {vision_model}")
+
+    # Builder makes multi-image messages especially compact
+    message = (
+        UserMessage.builder()
+        .text(
+            "I'm showing you two images. "
+            "Please compare them in one short paragraph: what are the main "
+            "differences and similarities?"
         )
-        print(f"📍 Using vision model: {vision_model}")
+        .image(cat_uri)
+        .image(dog_uri)
+        .build()
+    )
 
-        # Builder makes multi-image messages especially compact
-        message = (
-            UserMessage.builder()
-            .text(
-                "I'm showing you two images. "
-                "Please compare them in one short paragraph: what are the main "
-                "differences and similarities?"
-            )
-            .image(cat_uri)
-            .image(dog_uri)
-            .build()
-        )
+    response = await client.chat.completions.create(
+        model=vision_model,
+        messages=[
+            SystemMessage(
+                content="You are an observant image analyst. Be concise but thorough.",
+            ),
+            message,
+        ],
+        venice_parameters=NO_VENICE_PROMPT,
+        max_completion_tokens=MAX_COMPLETION_TOKENS,
+        temperature=0.4,
+    )
 
-        response = await client.chat.completions.create(
-            model=vision_model,
-            messages=[
-                SystemMessage(
-                    content="You are an observant image analyst. Be concise but thorough.",
-                ),
-                message,
-            ],
-            venice_parameters=NO_VENICE_PROMPT,
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
-            temperature=0.4,
-        )
+    content = _check_complete(response, "image_comparison")
+    print(f"🤖 Comparison: {content}")
 
-        content = _check_complete(response, "image_comparison")
-        print(f"🤖 Comparison: {content}")
-
-        # A real comparison mentions what is in BOTH images: the cat from
-        # image 1 and the dog from image 2.
-        _check_keywords(content, ["cat", "feline", "tabby", "kitten"], "image_comparison (1)")
-        _check_keywords(content, ["dog", "beagle", "canine", "puppy"], "image_comparison (2)")
+    # A real comparison mentions what is in BOTH images: the cat from
+    # image 1 and the dog from image 2.
+    _check_keywords(content, ["cat", "feline", "tabby", "kitten"], "image_comparison (1)")
+    _check_keywords(content, ["dog", "beagle", "canine", "puppy"], "image_comparison (2)")
 
 
 # ============================================================================
@@ -297,7 +300,7 @@ async def image_comparison(cat_uri: str, dog_uri: str):
 # ============================================================================
 
 
-async def detailed_analysis_prompts(cat_uri: str):
+async def detailed_analysis_prompts(client: VeniceClient, cat_uri: str):
     print("\n📝 Detailed Analysis Prompts")
     print("-" * 40)
 
@@ -311,77 +314,151 @@ async def detailed_analysis_prompts(cat_uri: str):
         ),
     ]
 
-    async with VeniceClient() as client:
-        vision_model = await client.models.resolve_chat(
-            require_vision=True, exclude_reasoning=True, prefer="cheapest"
+    vision_model = await client.models.resolve_chat(
+        require_vision=True, exclude_reasoning=True, prefer="cheapest"
+    )
+    print(f"📍 Using vision model: {vision_model}")
+
+    # Aggregate descriptions for a single keyword check across strategies.
+    all_text_parts: list[str] = []
+
+    for label, prompt_text in strategies:
+        print(f"\n🔎 Strategy: {label}")
+        message = UserMessage.builder().text(prompt_text).image(cat_uri).build()
+
+        response = await client.chat.completions.create(
+            model=vision_model,
+            messages=[message],
+            venice_parameters=NO_VENICE_PROMPT,
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
+            temperature=0.3,
         )
-        print(f"📍 Using vision model: {vision_model}")
 
-        # Aggregate descriptions for a single keyword check across strategies.
-        all_text_parts: list[str] = []
+        content = _check_complete(response, f"detailed_analysis_prompts ({label})")
+        print(f"   🤖 {content}")
+        all_text_parts.append(content)
 
-        for label, prompt_text in strategies:
-            print(f"\n🔎 Strategy: {label}")
-            message = UserMessage.builder().text(prompt_text).image(cat_uri).build()
+    # Verify at least one strategy mentioned something cat-like.
+    _check_keywords(
+        "\n".join(all_text_parts),
+        ["cat", "tabby", "feline", "kitten"],
+        "detailed_analysis_prompts",
+    )
 
-            response = await client.chat.completions.create(
-                model=vision_model,
-                messages=[message],
-                venice_parameters=NO_VENICE_PROMPT,
-                max_completion_tokens=MAX_COMPLETION_TOKENS,
-                temperature=0.3,
-            )
 
-            content = _check_complete(response, f"detailed_analysis_prompts ({label})")
-            print(f"   🤖 {content}")
-            all_text_parts.append(content)
+# ============================================================================
+# 5. Public URL Input and the detail Level
+# ============================================================================
 
-        # Verify at least one strategy mentioned something cat-like.
+
+async def public_url_input(client: VeniceClient) -> None:
+    """Send a public URL for Venice to fetch, instead of the image bytes.
+
+    A URL keeps the request small, but Venice has to be able to fetch it and the
+    image reaches the model at its original size, so a large original can fail
+    on a model with tighter limits. ``SAMPLE_IMAGE_URL_2`` is 600 pixels wide.
+    """
+    print("\n🔗 Public URL Input")
+    print("-" * 40)
+
+    vision_model = await client.models.resolve_chat(
+        require_vision=True, exclude_reasoning=True, prefer="cheapest"
+    )
+    print(f"📍 Using vision model: {vision_model}")
+
+    message = (
+        UserMessage.builder()
+        .text("What animal is in this image? Answer in one sentence.")
+        .image(SAMPLE_IMAGE_URL_2)
+        .build()
+    )
+    response = await client.chat.completions.create(
+        model=vision_model,
+        messages=[message],
+        venice_parameters=NO_VENICE_PROMPT,
+        max_completion_tokens=MAX_COMPLETION_TOKENS,
+        temperature=0.2,
+    )
+    content = _check_complete(response, "public_url_input")
+    print(f"🤖 Assistant: {content}")
+    _check_keywords(content, ["dog", "beagle", "canine", "puppy"], "public_url_input")
+
+
+async def image_detail_levels(client: VeniceClient, cat_uri: str) -> None:
+    """Set an image's ``detail`` to ``"low"`` and ``"high"``.
+
+    ``detail`` is a hint, and whether it changes the bill depends on the model,
+    so the prompt tokens of the two requests are reported rather than compared.
+    The check is that the model still recognises the image at each level.
+    """
+    print("\n🔬 Image detail Levels")
+    print("-" * 40)
+
+    vision_model = await client.models.resolve_chat(
+        require_vision=True, exclude_reasoning=True, prefer="cheapest"
+    )
+    print(f"📍 Using vision model: {vision_model}")
+
+    detail_levels: tuple[Literal["low"], Literal["high"]] = ("low", "high")
+    for detail in detail_levels:
+        message = (
+            UserMessage.builder()
+            .text("What animal is in this image? Answer in one sentence.")
+            .image(cat_uri, detail=detail)
+            .build()
+        )
+        response = await client.chat.completions.create(
+            model=vision_model,
+            messages=[message],
+            venice_parameters=NO_VENICE_PROMPT,
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
+            temperature=0.2,
+        )
+        content = _check_complete(response, f"image_detail_levels ({detail})")
+        tokens = response.usage.prompt_tokens if response.usage else None
+        print(f"   detail={detail!r}: {tokens} prompt tokens. {content}")
         _check_keywords(
-            "\n".join(all_text_parts),
-            ["cat", "tabby", "feline", "kitten"],
-            "detailed_analysis_prompts",
+            content, ["cat", "tabby", "feline", "kitten"], f"image_detail_levels ({detail})"
         )
 
 
 # ============================================================================
-# 5. Model Discovery — list vision-capable models
+# 6. Model Discovery — list vision-capable models
 # ============================================================================
 
 
-async def model_discovery():
+async def model_discovery(client: VeniceClient):
     print("\n🗺️  Vision Model Discovery")
     print("-" * 40)
 
     from venice_ai.types.api import TextModelSpec
 
-    async with VeniceClient() as client:
-        # Vision is a chat/text capability — restrict the listing to text
-        # models so ``capabilities`` is typed.
-        all_models = await client.models.list(type="text")
+    # Vision is a chat/text capability — restrict the listing to text
+    # models so ``capabilities`` is typed.
+    all_models = await client.models.list(type="text")
 
-        vision_models = []
-        for model in all_models.data:
-            spec = model.model_spec
-            if not isinstance(spec, TextModelSpec):
-                continue
-            caps = spec.capabilities
-            if caps is not None and caps.supportsVision:
-                vision_models.append(model.id)
+    vision_models = []
+    for model in all_models.data:
+        spec = model.model_spec
+        if not isinstance(spec, TextModelSpec):
+            continue
+        caps = spec.capabilities
+        if caps is not None and caps.supportsVision:
+            vision_models.append(model.id)
 
-        print(f"✅ Found {len(vision_models)} vision-capable model(s):")
-        for m in sorted(vision_models):
-            print(f"   • {m}")
+    print(f"✅ Found {len(vision_models)} vision-capable model(s):")
+    for m in sorted(vision_models):
+        print(f"   • {m}")
 
-        # prefer="cheapest" ranks strictly by price, so the cheapest vision
-        # model may be a reasoning model. The sections above add
-        # exclude_reasoning=True so the whole token budget goes to the answer.
-        cheapest_vision = await client.models.resolve_chat(require_vision=True, prefer="cheapest")
-        cheapest_direct = await client.models.resolve_chat(
-            require_vision=True, exclude_reasoning=True, prefer="cheapest"
-        )
-        print(f"\n⭐ Cheapest vision model (via resolve_chat): {cheapest_vision}")
-        print(f"⭐ Cheapest vision model that answers directly: {cheapest_direct}")
+    # prefer="cheapest" ranks strictly by price, so the cheapest vision
+    # model may be a reasoning model. The sections above add
+    # exclude_reasoning=True so the whole token budget goes to the answer.
+    cheapest_vision = await client.models.resolve_chat(require_vision=True, prefer="cheapest")
+    cheapest_direct = await client.models.resolve_chat(
+        require_vision=True, exclude_reasoning=True, prefer="cheapest"
+    )
+    print(f"\n⭐ Cheapest vision model (via resolve_chat): {cheapest_vision}")
+    print(f"⭐ Cheapest vision model that answers directly: {cheapest_direct}")
 
 
 # ============================================================================
@@ -411,35 +488,37 @@ async def main() -> int:
         )
     print(f"   ✅ cat ({len(cat_uri)} chars), dog ({len(dog_uri)} chars)")
 
-    # Every section needs a vision model; without one there is nothing to show.
+    results: list[tuple[str, bool | None]] = []
     async with VeniceClient() as client:
+        # Every section needs a vision model; without one there is nothing to show.
         try:
             await client.models.resolve_chat(require_vision=True, exclude_reasoning=True)
         except NoMatchingModelError as e:
             print(f"SKIPPED: the catalog lists no non-reasoning vision model ({e})")
             return 77
 
-    sub_examples = [
-        ("basic_image_analysis", basic_image_analysis(cat_uri)),
-        ("base64_image_input", base64_image_input()),
-        ("image_comparison", image_comparison(cat_uri, dog_uri)),
-        ("detailed_analysis_prompts", detailed_analysis_prompts(cat_uri)),
-        ("model_discovery", model_discovery()),
-    ]
+        sub_examples = [
+            ("basic_image_analysis", basic_image_analysis(client, cat_uri)),
+            ("base64_image_input", base64_image_input(client)),
+            ("image_comparison", image_comparison(client, cat_uri, dog_uri)),
+            ("detailed_analysis_prompts", detailed_analysis_prompts(client, cat_uri)),
+            ("public_url_input", public_url_input(client)),
+            ("image_detail_levels", image_detail_levels(client, cat_uri)),
+            ("model_discovery", model_discovery(client)),
+        ]
 
-    results: list[tuple[str, bool | None]] = []
-    for name, coro in sub_examples:
-        try:
-            await coro
-            results.append((name, True))
-        except NoMatchingModelError as e:
-            # The catalog has no model for this section (checked before VeniceError,
-            # which it subclasses): a skip, not a failure.
-            print(f"\nSection skipped: '{name}' has no matching model ({e})")
-            results.append((name, None))
-        except (VeniceError, VisionCheckError) as e:
-            print(f"\n❌ Sub-example '{name}' failed: {e}")
-            results.append((name, False))
+        for name, coro in sub_examples:
+            try:
+                await coro
+                results.append((name, True))
+            except NoMatchingModelError as e:
+                # The catalog has no model for this section (checked before VeniceError,
+                # which it subclasses): a skip, not a failure.
+                print(f"\nSection skipped: '{name}' has no matching model ({e})")
+                results.append((name, None))
+            except (VeniceError, VisionCheckError) as e:
+                print(f"\n❌ Sub-example '{name}' failed: {e}")
+                results.append((name, False))
 
     # Summary
     succeeded = sum(1 for _, ok in results if ok)
@@ -456,6 +535,7 @@ async def main() -> int:
     print("\n💡 Key concepts demonstrated:")
     print("   - fit_image_bytes() to keep images within all models' size limits")
     print("   - Sending images as base64 data URIs, including locally made bytes")
+    print("   - Sending a public URL for Venice to fetch, and the detail level")
     print("   - Comparing multiple images in one message")
     print("   - Different analysis prompt strategies")
     print("   - Discovering vision-capable models")

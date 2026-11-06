@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from venice_ai.resources.tee import Tee
-from venice_ai.tee.types import TeeSignatureResponse
+from venice_ai.tee.types import TeeReceiptSignature, TeeSignatureResponse
 
 LIVE_SHAPE = {
     "api_version": "aci/1",
@@ -51,7 +51,8 @@ def test_parses_live_signature_shape():
     assert r.signing_algo == "ecdsa"
     assert r.tee_provider == "phala"
     assert r.receipt is not None
-    assert r.receipt.signature is not None and r.receipt.signature.algo == "ecdsa-secp256k1"
+    assert isinstance(r.receipt.signature, TeeReceiptSignature)
+    assert r.receipt.signature.algo == "ecdsa-secp256k1"
     assert r.receipt.event_log[0].type == "request.received"
 
 
@@ -79,3 +80,20 @@ async def test_get_signature_calls_endpoint(tee_resource: Tee):
         "request_id": "chatcmpl-e62c4a55-85cb-497a-ba0a-1891b21",
     }
     assert call.kwargs["cast_to"] is TeeSignatureResponse
+
+
+def test_parses_a_receipt_without_seq_and_with_a_bare_signature():
+    """Another shape seen live: events carry no ``seq`` and the signature is a hex string."""
+    receipt = {
+        **LIVE_SHAPE["receipt"],
+        "event_log": [
+            {"type": "request.received", "body_hash": "sha256:dab0"},
+            {"type": "route.selected", "target_route_id": "phala-1"},
+        ],
+        "signature": "3e58e7442b1c023b09e3ce5e",
+    }
+    r = TeeSignatureResponse.model_validate({**LIVE_SHAPE, "receipt": receipt})
+    assert r.receipt is not None
+    assert r.receipt.signature == "3e58e7442b1c023b09e3ce5e"
+    assert [e.seq for e in r.receipt.event_log] == [None, None]
+    assert (r.receipt.event_log[1].model_extra or {}).get("target_route_id") == "phala-1"

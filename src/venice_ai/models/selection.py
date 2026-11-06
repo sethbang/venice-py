@@ -718,7 +718,8 @@ def cheapest_video_params(
     - ``resolution``: the lowest listed tier, spelled as the catalog spells it,
       or *resolution* when given. Omitted when the model lists none.
     - ``aspect_ratio``: *aspect_ratio* when given, else ``"16:9"`` when listed,
-      else the first listed ratio. Omitted when the model lists none.
+      else the first listed ratio. Omitted when the model lists none, even when
+      *aspect_ratio* is given: such a model follows its source media.
     - ``audio``: *audio*, sent only when the model's ``audio_configurable`` is
       set. ``False`` (default) asks for the cheaper silent clip; ``None``
       leaves it to the model.
@@ -763,12 +764,13 @@ def cheapest_video_params(
         params["resolution"] = min(resolutions, key=_resolution_height)
 
     ratios = [r for r in data.get("aspect_ratios") or [] if isinstance(r, str)]
-    if aspect_ratio is not None:
-        if ratios and aspect_ratio not in ratios:
+    if ratios:
+        if aspect_ratio is None:
+            params["aspect_ratio"] = "16:9" if "16:9" in ratios else ratios[0]
+        elif aspect_ratio in ratios:
+            params["aspect_ratio"] = aspect_ratio
+        else:
             raise ValueError(f"aspect ratio {aspect_ratio!r} not offered; listed: {ratios}")
-        params["aspect_ratio"] = aspect_ratio
-    elif ratios:
-        params["aspect_ratio"] = "16:9" if "16:9" in ratios else ratios[0]
 
     if audio is True and not data.get("audio", False):
         raise ValueError("model does not generate audio")

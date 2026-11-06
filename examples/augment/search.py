@@ -10,7 +10,8 @@ or Google (anonymised proxy). The ``date`` field is often empty, and
 snippets can contain HTML highlighting such as ``<strong>``, so strip tags
 before showing or reusing them.
 
-**Pricing:** $0.01 per request.
+**Pricing:** $0.01 per request, so $0.04 per run for the four searches here, plus
+one small chat request on the cheapest direct-answer model (under $0.001).
 
 **Note:** The Augment API is marked experimental in the Venice docs; request
 and response shapes may change without notice.
@@ -26,6 +27,7 @@ import asyncio
 import html
 import re
 import sys
+from typing import Literal
 
 from venice_ai import NoMatchingModelError, VeniceClient
 from venice_ai.exceptions import VeniceError
@@ -42,7 +44,7 @@ def clean(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. Basic search (Brave default), then the same query through Google
+# 1. Basic search (Brave default), then the same query through Google and Exa
 # ---------------------------------------------------------------------------
 
 COMPARE_QUERY = "EIP-4361 Sign-In-With-Ethereum"
@@ -59,10 +61,10 @@ def print_results(response: AugmentSearchResponse) -> None:
 
 
 async def search_and_compare_providers(client: VeniceClient) -> bool:
-    """Search once with the default provider, then repeat the query on Google.
+    """Search once with the default provider, then repeat the query on the others.
 
-    Leaving out ``search_provider`` uses Brave. The second call names
-    ``search_provider="google"`` explicitly so the two result sets can be compared.
+    Leaving out ``search_provider`` uses Brave. The later calls name
+    ``search_provider`` explicitly so the result sets can be compared.
     """
     print("🔎 Basic Search (Brave, default)")
     print("-" * 30)
@@ -80,26 +82,28 @@ async def search_and_compare_providers(client: VeniceClient) -> bool:
         print("❌ The search returned no results")
         return False
 
-    print("\n🆚 Same query through Google")
-    print("-" * 30)
-    try:
-        google = await client.augment.search(
-            query=COMPARE_QUERY,
-            limit=3,
-            search_provider="google",
-        )
-    except VeniceError as e:
-        print(f"❌ google failed: {type(e).__name__}: {e}")
-        return False
+    providers: tuple[Literal["google", "exa"], ...] = ("google", "exa")
+    for provider in providers:
+        print(f"\n🆚 Same query through {provider}")
+        print("-" * 30)
+        try:
+            other = await client.augment.search(
+                query=COMPARE_QUERY,
+                limit=3,
+                search_provider=provider,
+            )
+        except VeniceError as e:
+            print(f"❌ {provider} failed: {type(e).__name__}: {e}")
+            return False
 
-    print(f"🔢 Results: {len(google.results)}")
-    print_results(google)
-    if not google.results:
-        print("❌ google returned no results")
-        return False
+        print(f"🔢 Results: {len(other.results)}")
+        print_results(other)
+        if not other.results:
+            print(f"❌ {provider} returned no results")
+            return False
 
-    shared = {r.url for r in brave.results} & {r.url for r in google.results}
-    print(f"\n🔗 URLs returned by both providers: {len(shared)} of {len(brave.results)}")
+        shared = {r.url for r in brave.results} & {r.url for r in other.results}
+        print(f"\n🔗 URLs also returned by Brave: {len(shared)} of {len(brave.results)}")
     return True
 
 
@@ -164,21 +168,9 @@ async def search_grounded_chat(client: VeniceClient) -> bool | None:
 
     question = "What are the current best practices for Python type hinting?"
 
-    # Step 1 — search for recent context.
-    search = await client.augment.search(query=question, limit=4)
-    if not search.results:
-        print("❌ The search returned no results to ground the answer in")
-        return False
-
-    # Step 2 — build a numbered source list for the prompt. Keep the exact
-    # text sent to the model, so the citations can be checked against it.
-    source_texts = [f"{clean(r.title)}: {clean(r.content)[:300]}" for r in search.results]
-    sources = [
-        f"[{n}] ({r.url}) {text}"
-        for n, (r, text) in enumerate(zip(search.results, source_texts, strict=True), start=1)
-    ]
-
-    # Step 3 — ask a chat model that answers directly (no reasoning phase).
+    # Step 1 — find the chat model first: the search is billed, so do not pay for
+    # it when there is no model to use its results. This one answers directly,
+    # with no reasoning phase.
     try:
         chat_model = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
     except NoMatchingModelError as e:
@@ -186,6 +178,21 @@ async def search_grounded_chat(client: VeniceClient) -> bool | None:
         return None
     print(f"📍 Chat model: {chat_model}")
 
+    # Step 2 — search for recent context.
+    search = await client.augment.search(query=question, limit=4)
+    if not search.results:
+        print("❌ The search returned no results to ground the answer in")
+        return False
+
+    # Step 3 — build a numbered source list for the prompt. Keep the exact
+    # text sent to the model, so the citations can be checked against it.
+    source_texts = [f"{clean(r.title)}: {clean(r.content)[:300]}" for r in search.results]
+    sources = [
+        f"[{n}] ({r.url}) {text}"
+        for n, (r, text) in enumerate(zip(search.results, source_texts, strict=True), start=1)
+    ]
+
+    # Step 4 — ask the chat model.
     response = await client.chat.completions.create(
         model=chat_model,
         messages=[
@@ -298,7 +305,7 @@ async def main() -> int:
     print("✨ Search examples completed!")
     print("\n💡 Key concepts demonstrated:")
     print("   - Structured search results (title, url, content, date)")
-    print("   - Provider selection (brave default vs google proxied; exa also available)")
+    print("   - Provider selection (brave default, google proxied, exa)")
     print("   - Grounding a chat answer in numbered sources, with each quote checked")
     print("     against the source it cites (anchoring, not fact-checking)")
     return 0

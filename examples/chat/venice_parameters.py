@@ -15,6 +15,14 @@ Venice Parameters Covered:
     • enable_web_citations: Request citation formatting in responses
     • return_search_results_as_documents: Surface search results as a tool call
     • include_venice_system_prompt: Control Venice system prompt inclusion
+    • include_search_results_in_stream: Ask for search results in a stream
+    • enable_x_search: Found in the catalog and shown on the wire; not sent
+
+Cost: three web searches at $0.01 each, plus short requests on the cheapest
+capable models, typically about $0.04 in total. ``enable_x_search`` is not sent
+because its price is unsettled: the API reference says about $0.01 per search,
+and the pricing page says $0.01 per result returned, so one answer citing ten
+results would cost either $0.01 or $0.10. Only a paid call could settle it.
 
 Each section checks that its parameter had the effect it claims (citations
 returned, reasoning tokens gone, prompt tokens changed, ...) and that the
@@ -38,22 +46,37 @@ import json
 import math
 import re
 import sys
+from collections.abc import Coroutine
+from typing import Any
 
-from venice_ai import NoMatchingModelError, VeniceClient, model_price
-from venice_ai.types.api import ChatCompletionResponse, SystemMessage, TextModelSpec, UserMessage
+from _helpers import completion_cap
+
+from venice_ai import NoMatchingModelError, VeniceClient, VeniceError, model_price
+from venice_ai.types.api import (
+    ChatCompletionResponse,
+    LLMModelPricing,
+    SystemMessage,
+    TextModelSpec,
+    UserMessage,
+)
 from venice_ai.types.api.requests import VeniceParameters
 
 # Leaving Venice's system prompt out (or adding a character prompt) must move
 # the prompt size by at least this many tokens to count as an effect.
 MIN_PROMPT_DELTA = 100
 
-# Room for a reasoning model to think and still answer. Small reasoning models
-# vary widely in how long they think, even on easy questions, so the cap leaves
-# several thousand tokens of headroom over a typical run.
-REASONING_CAP = 16384
-
 # Enough for a short in-character introduction from a non-reasoning model.
 CHARACTER_CAP = 300
+
+# Characters are walked up to this many, in the listing's order.
+MAX_CHARACTERS = 500
+
+# A character runs on whatever model its author chose, so the example declines
+# one whose reply could cost more than this at its token cap.
+MAX_CHARACTER_SPEND_USD = 0.02
+
+# Ample for a short streamed answer from a non-reasoning model.
+STREAM_ANSWER_CAP = 300
 
 # Ample for a two-or-three-sentence answer with citation markers.
 WEB_ANSWER_CAP = 800
@@ -166,20 +189,30 @@ async def character_example(client: VeniceClient) -> bool | None:
     A character carries its own persona prompt and names the model it was
     built for (``modelId``); chatting with it on that model gives the persona
     as designed. Venice sends the persona prompt in place of its own default
-    system prompt, so a comparison with that prompt on would hide the persona.
-    Both requests here leave it out (``include_venice_system_prompt=False``),
-    which leaves the character as the only difference between them.
+    system prompt. Both requests here leave that prompt out
+    (``include_venice_system_prompt=False``), which leaves the character as the
+    only difference between them.
 
     Characters run on whatever model their author chose, so check the price
     first: this picks the character whose model is cheapest, preferring one
-    that does not reason (a short reply then needs only a small token cap).
-    Returns ``None`` (section skipped) when no listed character names a model
-    from the current catalog.
+    that does not reason (a short reply then needs only a small token cap), and
+    declines it if a reply at the cap could cost over
+    ``MAX_CHARACTER_SPEND_USD``. Returns ``None`` (section skipped) when no
+    listed character names a usable model from the current catalog.
     """
     print_section_header("Character-Based Chat Example", "🎭")
 
-    characters = (await client.characters.list()).data or []
-    text_models = {model.id: model for model in (await client.models.list(type="text")).data}
+    characters = [c async for c in client.characters.iter_all(max_items=MAX_CHARACTERS)]
+    # A plain chat cannot run on an end-to-end encrypted model, and an offline or
+    # beta model may not answer at all.
+    text_models = {
+        model.id: model
+        for model in (await client.models.list(type="text")).data
+        if isinstance(model.model_spec, TextModelSpec)
+        and not model.model_spec.beta
+        and not model.model_spec.offline
+        and not (model.model_spec.capabilities and model.model_spec.capabilities.supportsE2EE)
+    }
 
     def cost_rank(model_id: str) -> tuple[bool, float]:
         entry = text_models[model_id]
@@ -201,7 +234,18 @@ async def character_example(client: VeniceClient) -> bool | None:
     character = min(usable, key=lambda c: cost_rank(c.modelId))
     model = character.modelId
     reasons, blended = cost_rank(model)
-    cap = REASONING_CAP if reasons else CHARACTER_CAP
+    cap = await completion_cap(client, model) if reasons else CHARACTER_CAP
+    spec = text_models[model].model_spec
+    pricing = spec.pricing if isinstance(spec, TextModelSpec) else None
+    if isinstance(pricing, LLMModelPricing):
+        worst_case = cap * pricing.output.usd / 1_000_000
+        if worst_case > MAX_CHARACTER_SPEND_USD:
+            print(
+                f"Section skipped: {character.slug} runs on {model}, where a reply could "
+                f"cost ${worst_case:.3f}, above ${MAX_CHARACTER_SPEND_USD}",
+                flush=True,
+            )
+            return None
     print(f"📍 Using character: {character.slug} ({character.name})", flush=True)
     if character.description:
         print(f"   Description: {character.description[:200]}", flush=True)
@@ -263,18 +307,17 @@ async def character_example(client: VeniceClient) -> bool | None:
         )
         and ok
     )
+    # The prompt growth and the echo above are the checks. Whether the answer uses
+    # the character's name depends on the character: one that is a group of
+    # people introduces each of them instead, so the name is reported, not required.
     # The longest word of the name, so "Dr. Reed" and "The Oracle" need the part
     # that identifies them.
     name_word = max(re.findall(r"\w+", character.name), key=len, default=character.name)
-    named = re.search(rf"\b{re.escape(name_word)}\b", response.text or "", re.IGNORECASE)
-    return (
-        check(
-            named is not None,
-            f"The answer gives the character's name: {name_word}",
-            f"The answer never says {name_word!r}, so the persona did not answer",
-        )
-        and ok
-    )
+    if re.search(rf"\b{re.escape(name_word)}\b", response.text or "", re.IGNORECASE):
+        print(f"✅ The answer gives the character's name: {name_word}")
+    else:
+        print(f"ℹ️ The answer does not say {name_word!r}; read it above to judge the persona")
+    return ok
 
 
 async def thinking_control_example(client: VeniceClient) -> bool | None:
@@ -296,6 +339,7 @@ async def thinking_control_example(client: VeniceClient) -> bool | None:
         print("Section skipped: no reasoning model can switch reasoning off", flush=True)
         return None
     print(f"📍 Using model: {model}", flush=True)
+    cap = await completion_cap(client, model)
 
     # The clues admit exactly one solution: Alice=blue, Bob=green, Carol=red.
     puzzle = (
@@ -331,7 +375,7 @@ async def thinking_control_example(client: VeniceClient) -> bool | None:
                 # No temperature override: model publishers recommend their own
                 # sampling settings for thinking mode, and they differ from
                 # model to model, so the server default applies.
-                max_completion_tokens=REASONING_CAP,
+                max_completion_tokens=cap,
             )
             for params in (params_on, params_off, params_stripped)
         ]
@@ -347,7 +391,7 @@ async def thinking_control_example(client: VeniceClient) -> bool | None:
         if response.thinking_blocks:
             trace = response.thinking_blocks[0].strip().splitlines()
             print(f"💭 Reasoning trace ({len(trace)} lines), first line: {trace[0]}", flush=True)
-        ok = print_answer(response, REASONING_CAP) and ok
+        ok = print_answer(response, cap) and ok
         print_usage(response)
         answer = "".join((response.text or "").lower().replace("*", "").split())
         correct = all(pair in answer for pair in expected)
@@ -577,6 +621,7 @@ async def comprehensive_example(client: VeniceClient) -> bool | None:
         "successful clean energy startup?"
     )
     print(f"\n💼 Business Question:\n{question}", flush=True)
+    cap = await completion_cap(client, model)
 
     venice_params = VeniceParameters(
         strip_thinking_response=False,  # Keep the reasoning trace in the response
@@ -600,7 +645,7 @@ async def comprehensive_example(client: VeniceClient) -> bool | None:
         ],
         venice_parameters=venice_params,
         # Server-default sampling for the reasoning model (see thinking_control_example).
-        max_completion_tokens=REASONING_CAP,
+        max_completion_tokens=cap,
     )
 
     ok = True
@@ -618,7 +663,7 @@ async def comprehensive_example(client: VeniceClient) -> bool | None:
         ok = False
 
     print_subsection("Comprehensive Business Analysis", "📊")
-    ok = print_answer(response, REASONING_CAP) and ok
+    ok = print_answer(response, cap) and ok
     count = print_citations(response, "Market Research Sources")
     ok = (
         check(
@@ -640,9 +685,103 @@ async def comprehensive_example(client: VeniceClient) -> bool | None:
     return ok
 
 
+async def search_results_in_stream_example(client: VeniceClient) -> bool | None:
+    """Stream with ``include_search_results_in_stream=True`` (experimental).
+
+    The API reference says the search results come as the first emitted chunk
+    but gives no layout for them, so the fields beyond the usual chunk are
+    printed as found rather than read by name. The check is that the stream
+    finishes with an answer. A stream's assembled ``final_response`` carries no
+    ``venice_parameters``, so citations must be read from the chunks.
+    """
+    print_section_header("Search Results in a Stream (experimental)", "📡")
+
+    try:
+        model = await client.models.resolve_chat(
+            require_web_search=True, exclude_reasoning=True, prefer="cheapest"
+        )
+    except NoMatchingModelError:
+        print("Section skipped: no non-reasoning model supports web search", flush=True)
+        return None
+    print(f"📍 Using model: {model}", flush=True)
+
+    stream = await client.chat.completions.stream(
+        model=model,
+        messages=[UserMessage(content="In one sentence, what is solar power?")],
+        venice_parameters=VeniceParameters(
+            enable_web_search="on",
+            include_search_results_in_stream=True,
+            include_venice_system_prompt=False,
+        ),
+        max_completion_tokens=STREAM_ANSWER_CAP,
+    )
+    text = ""
+    finish_reason: str | None = None
+    used: int | None = None
+    first_chunk = True
+    async with stream:
+        async for chunk in stream:
+            if first_chunk:
+                first_chunk = False
+                print(
+                    f"   First chunk's extra fields: {sorted(chunk.model_extra or {})}", flush=True
+                )
+            text += chunk.text
+            if chunk.choices and chunk.choices[0].finish_reason is not None:
+                finish_reason = chunk.choices[0].finish_reason
+            if chunk.usage is not None:
+                used = chunk.usage.completion_tokens
+    print(f"📝 {text.strip()}", flush=True)
+    print(f"↳ finish_reason: {finish_reason} ({used} of {STREAM_ANSWER_CAP} tokens)", flush=True)
+    return check(
+        bool(text.strip())
+        and finish_reason not in (None, "length")
+        and used is not None
+        and used < STREAM_ANSWER_CAP,
+        "The stream finished with a complete answer",
+        "The stream did not finish with a complete answer",
+    )
+
+
+async def x_search_lookup(client: VeniceClient) -> bool | None:
+    """Find X-search models and show the request body, without paying for a search.
+
+    ``enable_x_search=True`` needs a model listing ``supportsXSearch``. The call
+    is left out on purpose (see the module docstring on its unsettled price), so
+    the section always ends as skipped unless its local check fails.
+    """
+    print_section_header("X Search (lookup only, nothing sent)", "🔎")
+
+    models = [
+        model.id
+        for model in (await client.models.list(type="text")).data
+        if isinstance(model.model_spec, TextModelSpec)
+        and model.model_spec.capabilities
+        and model.model_spec.capabilities.supportsXSearch
+    ]
+    print(f"📍 Models listing supportsXSearch: {models or 'none'}", flush=True)
+
+    wire = VeniceParameters(enable_x_search=True).to_wire()
+    print(f"   venice_parameters on the wire: {wire}", flush=True)
+    if wire != {"enable_x_search": True}:
+        print("❌ enable_x_search would not reach the API as set", flush=True)
+        return False
+    print("Section skipped: enable_x_search has an unsettled price, so none was sent", flush=True)
+    return None
+
+
 # =============================================================================
 # Main Function
 # =============================================================================
+
+
+async def run_section(section: Coroutine[Any, Any, bool | None]) -> bool | None:
+    """Run one section; a request failure fails only that section."""
+    try:
+        return await section
+    except VeniceError as e:
+        print(f"❌ {type(e).__name__}: {e}", flush=True)
+        return False
 
 
 async def main() -> int:
@@ -653,11 +792,19 @@ async def main() -> int:
 
     async with VeniceClient() as client:
         results: list[tuple[str, bool | None]] = [
-            ("character_example", await character_example(client)),
-            ("thinking_control_example", await thinking_control_example(client)),
-            ("web_search_example", await web_search_example(client)),
-            ("system_prompt_control_example", await system_prompt_control_example(client)),
-            ("comprehensive_example", await comprehensive_example(client)),
+            ("character_example", await run_section(character_example(client))),
+            ("thinking_control_example", await run_section(thinking_control_example(client))),
+            ("web_search_example", await run_section(web_search_example(client))),
+            (
+                "system_prompt_control_example",
+                await run_section(system_prompt_control_example(client)),
+            ),
+            ("comprehensive_example", await run_section(comprehensive_example(client))),
+            (
+                "search_results_in_stream_example",
+                await run_section(search_results_in_stream_example(client)),
+            ),
+            ("x_search_lookup", await run_section(x_search_lookup(client))),
         ]
 
     failed = [name for name, ok in results if ok is False]
@@ -681,6 +828,7 @@ async def main() -> int:
     print("   • enable_web_citations: Get source attribution", flush=True)
     print("   • return_search_results_as_documents: OpenAI-compatible tools", flush=True)
     print("   • include_venice_system_prompt: Fine-tune system behavior", flush=True)
+    print("   • include_search_results_in_stream: Search results in a stream", flush=True)
     return 0
 
 

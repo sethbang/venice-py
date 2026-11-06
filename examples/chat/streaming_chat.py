@@ -13,23 +13,35 @@ Features Demonstrated:
     - collect(): only the assembled final response
     - Usage on streams (``stream()`` always requests it, no ``stream_options`` needed)
     - Concurrent streaming
+    - text_deltas(): text only, the shortest form for display
     - Multi-turn streaming conversations
     - Typed error handling during streams, and detecting truncated streams
+    - Reading a reasoning model's summary, and passing encrypted reasoning back
 
 ``text_deltas()`` is the lightest option when you only display text: it yields
 the text and nothing else, so it cannot tell you whether the answer finished.
-Every section below checks for truncation and treats an answer that hit
-``max_completion_tokens`` as a failure, except the one that deliberately
-demonstrates truncation. ``finish_reason == "length"`` is the usual signal,
-but some models report a cut-off answer as ``"stop"``, so the completion-token
-count from the final chunk's usage is compared with the cap as well.
+Use ``collect_with_deltas()`` whenever a cut-off answer would matter. Every
+section below checks for truncation and treats an answer that hit
+``max_completion_tokens`` as a failure, except the text_deltas() section, which
+has no way to, and the one that deliberately demonstrates truncation.
+``finish_reason == "length"`` is the usual signal, but some models report a
+cut-off answer as ``"stop"``, so the completion-token count from the final
+chunk's usage is compared with the cap as well.
+
+Cost: a dozen short requests on the cheapest direct-answer model, plus one or
+two on the cheapest reasoning model, typically under $0.002 in total. The two
+deliberate failures (unknown model, invalid key) are not billed.
 """
 
 import asyncio
 import sys
 import time
+from collections.abc import Coroutine
+from typing import Any
 
-from venice_ai import NoMatchingModelError, VeniceClient
+from _helpers import completion_cap
+
+from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
 from venice_ai.exceptions import AuthenticationError, NotFoundError
 from venice_ai.types.api import (
     AssistantMessage,
@@ -197,8 +209,9 @@ async def concurrent_streams(client: VeniceClient, chat_model: str) -> bool:
     print("\n🚀 Starting concurrent streams...")
 
     start_time = time.perf_counter()
-    # return_exceptions=True keeps one failed stream from cancelling the others;
-    # every exception in the results still counts as a failure below.
+    # return_exceptions=True puts a failed stream's exception in the results, so
+    # every stream gets reported; without it gather raises the first failure and
+    # the other results are lost. Each exception counts as a failure below.
     results = await asyncio.gather(*(process_stream(p) for p in prompts), return_exceptions=True)
     total_time = time.perf_counter() - start_time
 
@@ -342,6 +355,118 @@ async def multi_turn_streaming(client: VeniceClient, chat_model: str) -> bool:
     return True
 
 
+async def text_deltas_display(client: VeniceClient, chat_model: str) -> bool:
+    """Show ``text_deltas()``, the shortest way to print a stream.
+
+    It yields text and nothing else: no usage, no ``finish_reason`` and no
+    ``final_response``. A cut-off answer looks exactly like a finished one, so
+    this section can only check that text arrived.
+    """
+    print("\n✏️ Display-Only Streaming with text_deltas()")
+    print("-" * 40)
+
+    print("🤖 Assistant: ", end="", flush=True)
+    stream = await client.chat.completions.stream(
+        model=chat_model,
+        messages=[UserMessage(content="Say hello in one short sentence.")],
+        venice_parameters=NO_VENICE_PROMPT,
+        max_completion_tokens=60,
+    )
+    text = ""
+    async with stream:
+        async for delta in stream.text_deltas():
+            print(delta, end="", flush=True)
+            text += delta
+    print()
+
+    if not text.strip():
+        print("   ❌ No text arrived")
+        return False
+    if stream.final_response is not None:
+        print("   ❌ text_deltas() is documented to leave final_response unset")
+        return False
+    print("   ✅ Text arrived. final_response is None, so whether it finished is unknown.")
+    return True
+
+
+async def reasoning_summary_stream(client: VeniceClient, model: str) -> bool | None:
+    """Show a reasoning model's thinking safely, and pass encrypted reasoning back.
+
+    Some reasoning models send an encrypted block alongside their plain summary
+    and flag it with ``reasoning_encrypted``. The assembled
+    ``message.reasoning_content`` keeps that block because the API needs it back
+    verbatim on the next turn, so display ``stream.reasoning_summary`` instead,
+    which never contains it. ``AssistantMessage.from_response`` carries the block
+    forward; the second turn runs only when one arrived. The catalog does not
+    say which models send one, so most runs on the cheapest model report plain
+    reasoning and send no second turn.
+
+    Returns ``None`` when the model showed no reasoning at all.
+    """
+    print("\n🧠 Reasoning Summary and Encrypted Reasoning")
+    print("-" * 40)
+    print(f"📍 Using model: {model}")
+
+    cap = await completion_cap(client, model)
+    question = UserMessage(content="What is 12 * 12? Reply with the number only.")
+    stream = await client.chat.completions.stream(
+        model=model,
+        messages=[question],
+        venice_parameters=NO_VENICE_PROMPT,
+        max_completion_tokens=cap,
+    )
+    async with stream:
+        response = await stream.collect()
+    if not finish_ok(response, cap):
+        return False
+
+    summary = stream.reasoning_summary
+    message = response.choices[0].message
+    encrypted = bool((message.model_extra or {}).get("reasoning_encrypted"))
+    print(f"   Reasoning summary: {len(summary or '')} chars")
+    print(f"   message.reasoning_content: {len(message.reasoning_content or '')} chars")
+    print(f"   reasoning_encrypted: {encrypted}")
+    if not summary and not message.reasoning_content:
+        print("Section skipped: this model returned no reasoning to show")
+        return None
+
+    if not encrypted:
+        if summary != message.reasoning_content:
+            print("   ❌ With no encrypted block the summary and the trace should match")
+            return False
+        print("   ✅ Plain reasoning: the summary is the whole trace")
+        print("   ℹ️ No encrypted block arrived, so no second turn was sent")
+        return True
+
+    if summary and summary == message.reasoning_content:
+        print("   ❌ The summary still contains the encrypted block")
+        return False
+    print("   ✅ The summary leaves the encrypted block out; passing it back on the next turn")
+    follow_up = await client.chat.completions.create(
+        model=model,
+        messages=[
+            question,
+            AssistantMessage.from_response(response),
+            UserMessage(content="Add 1 to that. Reply with the number only."),
+        ],
+        venice_parameters=NO_VENICE_PROMPT,
+        max_completion_tokens=cap,
+    )
+    if not finish_ok(follow_up, cap):
+        return False
+    print("   ✅ The next turn accepted the encrypted block")
+    return True
+
+
+async def run_section(section: Coroutine[Any, Any, bool | None]) -> bool | None:
+    """Run one section; a request failure or interrupted stream fails only that section."""
+    try:
+        return await section
+    except (VeniceError, ValueError) as e:
+        print(f"\n   ❌ {type(e).__name__}: {e}")
+        return False
+
+
 async def main() -> int:
     """Run all streaming examples; return a process exit code."""
     print("🚀 Venice AI Streaming Chat Examples")
@@ -356,24 +481,54 @@ async def main() -> int:
             print(f"SKIPPED: the catalog lists no non-reasoning chat model ({e})")
             return 77
 
-        results: list[tuple[str, bool]] = [
-            ("manual_chunk_iteration", await manual_chunk_iteration(client, chat_model)),
-            ("streaming_with_collect", await streaming_with_collect(client, chat_model)),
-            ("concurrent_streams", await concurrent_streams(client, chat_model)),
-            ("error_handling_in_streams", await error_handling_in_streams(client, chat_model)),
-            ("multi_turn_streaming", await multi_turn_streaming(client, chat_model)),
+        results: list[tuple[str, bool | None]] = [
+            (
+                "manual_chunk_iteration",
+                await run_section(manual_chunk_iteration(client, chat_model)),
+            ),
+            (
+                "streaming_with_collect",
+                await run_section(streaming_with_collect(client, chat_model)),
+            ),
+            ("text_deltas_display", await run_section(text_deltas_display(client, chat_model))),
+            ("concurrent_streams", await run_section(concurrent_streams(client, chat_model))),
+            (
+                "error_handling_in_streams",
+                await run_section(error_handling_in_streams(client, chat_model)),
+            ),
+            ("multi_turn_streaming", await run_section(multi_turn_streaming(client, chat_model))),
         ]
 
-    failed = [name for name, ok in results if not ok]
+        try:
+            reasoning_model = await client.models.resolve_chat(
+                require_reasoning=True, prefer="cheapest"
+            )
+        except NoMatchingModelError:
+            print("\nSection skipped: the catalog lists no reasoning model")
+            results.append(("reasoning_summary_stream", None))
+        else:
+            results.append(
+                (
+                    "reasoning_summary_stream",
+                    await run_section(reasoning_summary_stream(client, reasoning_model)),
+                )
+            )
+
+    failed = [name for name, ok in results if ok is False]
     if failed:
         print(f"\n❌ {len(failed)} of {len(results)} sections failed: {', '.join(failed)}")
         return 1
+    skipped = [name for name, ok in results if ok is None]
+    if skipped:
+        print(f"\nℹ️ {len(skipped)} section(s) skipped: {', '.join(skipped)}")
 
     print("\n✨ Streaming examples completed!")
     print("\n💡 Key concepts demonstrated:")
     print("   - Manual chunk iteration with finish_reason and usage")
     print("   - collect_with_deltas() for live display plus the final response")
     print("   - collect() for assembled responses")
+    print("   - text_deltas() for display only, with no finish state")
+    print("   - reasoning_summary for display, reasoning_content passed back as it arrived")
     print("   - Concurrent stream processing with per-stream failure counting")
     print("   - Typed errors (NotFoundError, AuthenticationError) and truncation detection")
     print("   - Multi-turn conversations with streaming")

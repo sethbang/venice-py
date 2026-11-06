@@ -16,6 +16,9 @@ only calls model endpoints, plus an expiry (``expiresAt``) and a spend cap
 ``ipAllowlist`` and ``modelPrivacy`` are also available to narrow a key further.
 Creating a key needs an ADMIN key; see examples/api_keys/key_management.py.
 
+Cost: one short chat request on the cheapest direct-answer model, well under $0.001.
+Everything else here reads a free endpoint or runs locally.
+
 Exit status: ``0`` when every demo passed, ``1`` when one failed or VENICE_API_KEY
 is not set (the demos that need no key still print), ``77`` when the catalog has
 no model of the kind the live client demo needs.
@@ -310,11 +313,8 @@ async def key_rotation_pattern() -> bool | None:
     return True
 
 
-async def multi_environment_pattern() -> bool:
-    """Demonstrate managing keys across environments.
-
-    Pure informational output — always returns ``True``.
-    """
+def multi_environment_pattern() -> None:
+    """Print guidance for managing keys across environments. Checks nothing."""
     print("\n🌍 Multi-Environment Pattern")
     print("-" * 40)
 
@@ -351,14 +351,9 @@ async def multi_environment_pattern() -> bool:
     print("           raise ValueError(f'Unknown environment: {environment}')")
     print("   ```")
 
-    return True
 
-
-async def security_best_practices() -> bool:
-    """Demonstrate security best practices for API key management.
-
-    Pure informational output — always returns ``True``.
-    """
+def security_best_practices() -> None:
+    """Print security guidance for API key management. Checks nothing."""
     print("\n🛡️ Security Best Practices")
     print("-" * 40)
 
@@ -396,14 +391,9 @@ async def security_best_practices() -> bool:
     print("   - Audit for damage")
     print("   - Update affected systems")
 
-    return True
 
-
-async def testing_with_keys() -> bool:
-    """Demonstrate testing patterns that don't expose real keys.
-
-    Pure informational output — always returns ``True``.
-    """
+def testing_with_keys() -> None:
+    """Print testing patterns that don't expose real keys. Checks nothing."""
     print("\n🧪 Testing Patterns")
     print("-" * 40)
 
@@ -433,11 +423,13 @@ async def testing_with_keys() -> bool:
     print("   - Inject at runtime")
     print("   - Never log key values")
 
-    return True
-
 
 async def production_client_pattern() -> bool | None:
-    """Demonstrate building a client from a loaded key.
+    """Check a loaded key without spending, then build a client and smoke-test it.
+
+    ``test_key`` is the health check: it reads the key's rate limits, which is
+    free. The chat afterwards is a billed smoke test of the whole path, which a
+    health check that runs often should not be.
 
     Returns ``True`` on success, ``None`` (skipped) when VENICE_API_KEY is not
     set, and ``False`` if the live API call failed — so a real failure surfaces
@@ -455,6 +447,11 @@ async def production_client_pattern() -> bool | None:
         return None
 
     try:
+        if not await test_key(api_key):
+            print("❌ Health check failed: Venice rejected the key or denied it access")
+            return False
+        print("✅ Health check passed (free: rate limits read with this key)")
+
         async with VeniceClient(api_key=api_key) as client:
             chat_model = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
             response = await client.chat.completions.create(
@@ -467,21 +464,21 @@ async def production_client_pattern() -> bool | None:
     except NoMatchingModelError:
         raise  # a missing model skips the example; see __main__
     except VeniceError as e:
-        print(f"❌ Client health check failed: {type(e).__name__}: {e}")
+        print(f"❌ Client check failed: {type(e).__name__}: {e}")
         print("   Check API key validity")
         print("   Verify network connectivity")
         print("   Review error logs")
         return False
 
     finish_reason = response.choices[0].finish_reason if response.choices else None
-    print("✅ Production client initialized and health check passed")
     print(f"   Key: {key_fingerprint(api_key)}")
     print(f"   Model: {chat_model}")
     print(f"   Response: {response.text}")
     print(f"   finish_reason: {finish_reason}")
     if finish_reason == "length" or not (response.text or "").strip():
-        print("❌ Health-check reply was truncated or empty")
+        print("❌ Smoke-test reply was truncated or empty")
         return False
+    print("✅ Smoke test passed (billed: one short chat request)")
     return True
 
 
@@ -500,11 +497,12 @@ async def main() -> int:
     results: list[tuple[str, bool | None]] = [
         ("environment_variable_pattern", await environment_variable_pattern()),
         ("key_rotation_pattern", await key_rotation_pattern()),
-        ("multi_environment_pattern", await multi_environment_pattern()),
-        ("security_best_practices", await security_best_practices()),
-        ("testing_with_keys", await testing_with_keys()),
-        ("production_client_pattern", await production_client_pattern()),
     ]
+    # Printed guidance only, so these are not counted as passing anything.
+    multi_environment_pattern()
+    security_best_practices()
+    testing_with_keys()
+    results.append(("production_client_pattern", await production_client_pattern()))
 
     failed = [name for name, ok in results if ok is False]
     skipped = [name for name, ok in results if ok is None]

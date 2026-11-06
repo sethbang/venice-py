@@ -53,6 +53,7 @@ IN_FRAGMENT = "FRAGMENTSECRET"
 SECRETS = (IN_PATH, IN_QUERY, IN_FRAGMENT)
 LINK_TAIL = f"/{IN_PATH}/video.mp4?sig={IN_QUERY}"
 API_KEY = "sk-TESTKEYSECRET"
+VIDEO_FILE = b"\x00\x00\x00\x18ftypmp42VIDEO"
 FAST_RETRIES = RetryOptions(max_attempts=2, base_delay=0.001, max_delay=0.002)
 
 Handler = Callable[[web.Request], Any]
@@ -80,7 +81,7 @@ def _serve_after_503s(failures: int) -> Handler:
         if remaining[0]:
             remaining[0] -= 1
             return web.Response(status=503, reason="Busy")
-        return web.Response(body=b"VIDEO", content_type="video/mp4")
+        return web.Response(body=VIDEO_FILE, content_type="video/mp4")
 
     return handler
 
@@ -164,7 +165,7 @@ async def test_download_retry_logs_only_scheme_and_host(
             tmp_path / "v.mp4", VideoCompletedStatus(status="COMPLETED")
         )
 
-    assert saved.read_bytes() == b"VIDEO"
+    assert saved.read_bytes() == VIDEO_FILE
     retrying = [r.getMessage() for r in all_logs.records if "Retrying" in r.getMessage()]
     assert len(retrying) == 1
     assert f"GET {URL(storage).scheme}://127.0.0.1 " in retrying[0]
@@ -626,7 +627,7 @@ def _drop_first_connection() -> Handler:
         if calls[0] == 1:
             assert request.transport is not None
             request.transport.close()
-        return web.Response(body=b"VIDEO", content_type="video/mp4")
+        return web.Response(body=VIDEO_FILE, content_type="video/mp4")
 
     return handler
 
@@ -688,7 +689,7 @@ async def test_retry_hook_on_fetch_external_gets_an_error_without_the_link() -> 
             api_key=API_KEY, base_url=f"{api}/api/v1", retry_options=_hook_recording(seen)
         ) as client,
     ):
-        assert await client.fetch_external(f"{storage}{LINK_TAIL}") == b"VIDEO"
+        assert await client.fetch_external(f"{storage}{LINK_TAIL}") == VIDEO_FILE
 
     assert len(seen) == 1
     error = seen[0]

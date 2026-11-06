@@ -43,17 +43,15 @@ Run::
 from __future__ import annotations
 
 import asyncio
-import re
 import sys
 import time
 from pathlib import Path
 
+from _helpers import EXIT_SKIPPED, tts_formats, tts_spec, word_overlap
+
 from venice_ai import NoMatchingModelError, VeniceClient
 from venice_ai.audio_helpers import DEFAULT_WORD_BUDGET, MODEL_WORD_BUDGETS, split_text_for_tts
 from venice_ai.exceptions import VeniceError
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import tts_formats, tts_spec  # noqa: E402
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -75,19 +73,6 @@ LAST_LINE = LONG_POEM.splitlines()[-1]
 
 #: Minimum share of the poem's words the transcript must contain.
 MIN_OVERLAP = 0.8
-
-#: Exit status for a run that skipped because a prerequisite is missing.
-EXIT_SKIPPED = 77
-
-
-def _words(text: str) -> list[str]:
-    return re.findall(r"[a-z]+", text.lower())
-
-
-def word_overlap(expected: str, actual: str) -> float:
-    want = _words(expected)
-    got = set(_words(actual))
-    return sum(w in got for w in want) / len(want) if want else 0.0
 
 
 async def pick_models(

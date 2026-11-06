@@ -39,6 +39,14 @@ def client() -> Iterator[SyncVeniceClient]:
     sync_client.close()
 
 
+def _item(name: str) -> SimpleNamespace:
+    """An item carrying both identities the paginators key on."""
+    return SimpleNamespace(id=name, slug=name)
+
+
+_A, _B, _C = _item("a"), _item("b"), _item("c")
+
+
 def _single_page(*items: Any, **fields: Any) -> SimpleNamespace:
     return SimpleNamespace(data=list(items), **fields)
 
@@ -58,23 +66,16 @@ ENDPOINTS = {
     "characters.iter_all": (
         "characters",
         "list",
-        [_single_page("a", "b"), _single_page("c")],
+        [_single_page(_A, _B), _single_page(_C)],
         lambda c: c.characters.iter_all(page_size=2),
-        ["a", "b", "c"],
+        [_A, _B, _C],
     ),
     "characters.iter_reviews": (
         "characters",
         "reviews",
-        [_reviews_page(1, 2, "a", "b"), _reviews_page(2, 2, "c")],
+        [_reviews_page(1, 2, _A, _B), _reviews_page(2, 2, _C)],
         lambda c: c.characters.iter_reviews("some-slug", page_size=2),
-        ["a", "b", "c"],
-    ),
-    "api_keys.iter_all": (
-        "api_keys",
-        "list",
-        [["a", "b"], ["c"]],
-        lambda c: c.api_keys.iter_all(page_size=2),
-        ["a", "b", "c"],
+        [_A, _B, _C],
     ),
     "billing.iter_usage_history": (
         "billing",
@@ -86,9 +87,9 @@ ENDPOINTS = {
     "x402.iter_transactions": (
         "x402",
         "transactions",
-        [_transactions_page(True, "a", "b"), _transactions_page(False, "c")],
+        [_transactions_page(True, _A, _B), _transactions_page(False, _C)],
         lambda c: c.x402.iter_transactions(auth=Mock(), page_size=2),
-        ["a", "b", "c"],
+        [_A, _B, _C],
     ),
 }
 _CSV_FIRST = SimpleNamespace(nextCursor="next")
@@ -205,10 +206,13 @@ def test_pages_are_fetched_only_as_the_walk_reaches_them(client: SyncVeniceClien
 
 def test_max_items_stops_without_fetching_a_discarded_page(client: SyncVeniceClient) -> None:
     stub, _threads = _stub_pages(
-        client, "api_keys", "list", [["a", "b"], ["c", "d"], ["should", "not-fetch"]]
+        client,
+        "characters",
+        "list",
+        [_single_page(_A, _B), _single_page(_C, _item("d")), _single_page(_item("not-fetched"))],
     )
 
-    assert list(client.api_keys.iter_all(page_size=2, max_items=3)) == ["a", "b", "c"]
+    assert list(client.characters.iter_all(page_size=2, max_items=3)) == [_A, _B, _C]
     assert stub.await_count == 2
 
 

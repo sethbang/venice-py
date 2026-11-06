@@ -12,11 +12,13 @@ A fifth capture, ``attestation_live_evidence.json``, uses the current
 :data:`EVIDENCE_CAPTURE_EPOCH`.
 
 Each capture has its **own** ``collateral_<slug>.json`` snapshot
-(:class:`dcap_qvl.QuoteCollateralV3` ``to_json()``). Collateral is per-capture,
-NOT per-FMSPC: all four quotes share FMSPC ``90C06F000000`` / ``ca=platform`` /
-TDX v4, yet their PCK certificate chains differ (different physical platforms),
-so a single shared collateral fails QE-report signature verification on two of
-the four. Tests must pair each capture with its matching collateral.
+(:class:`dcap_qvl.QuoteCollateralV3` ``to_json()``). All four quotes share FMSPC
+``90C06F000000`` / ``ca=platform`` / TDX v4, yet their PCK certificate chains differ
+(different physical platforms). A snapshot carries the PCK chain of the machine it
+was fetched from. ``DcapTdxVerifier`` drops that chain and uses the one in the quote,
+so one snapshot can verify any of the four; handed straight to
+``dcap_qvl.verify_with_root_ca``, it fails QE-report signature verification on the
+other machines' quotes.
 
 Freeze ``now_secs`` to :data:`CAPTURE_EPOCH` in every test: the TCB-info /
 QE-identity collateral carries a validity window, and a real wall-clock

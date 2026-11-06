@@ -22,9 +22,22 @@ to the server and the upstream model. For example, most chat models accept
 support with HTTP 400, so this example shows what was sent and what came back
 rather than promising an effect.
 
+Three more top-level fields follow the same idea, with their own section:
+
+- ``verbosity`` — the top-level form, distinct from ``text.verbosity``.
+- ``anon_user_id`` — your end user's identifier, attributed upstream. Printable
+  ASCII without ``||``; the SDK rejects anything else before sending.
+- ``fallbacks`` — an Anthropic beta for server-side refusal fallback, forwarded
+  only on direct Anthropic routes and ignored elsewhere. The refusal path is not
+  provoked here: this shows only that a non-Anthropic model accepts the field.
+
+Cost: under $0.01 in total, mostly the cached prefix sent up to 12 times.
+
 What a run verifies:
 
 - The request carrying all five fields is accepted and answered completely.
+- The request carrying the three further fields is too, and ``anon_user_id``
+  rejects a reserved delimiter locally.
 - Each retention tier is accepted and answered completely.
 - For each tier, whether a warm repeat read the long prefix back from the
   cache (``usage.cached_tokens``). Cache reads are best-effort and can differ
@@ -45,6 +58,7 @@ from typing import Any
 from venice_ai import NoMatchingModelError, VeniceClient
 from venice_ai.types.api import ChatCompletionResponse, SystemMessage, UserMessage
 from venice_ai.types.api.requests import VeniceParameters
+from venice_ai.types.api.requests.common import validate_anon_user_id
 
 
 def cut_off(response: ChatCompletionResponse, cap: int) -> bool:
@@ -114,6 +128,43 @@ async def demo_passthrough_fields(client: VeniceClient, model: str) -> bool:
         "ℹ️ The request was accepted with all five fields. text.verbosity is a hint: "
         "models that don't support it answer at their normal length."
     )
+    return ok
+
+
+async def demo_end_user_and_routing(client: VeniceClient, model: str) -> bool:
+    """Send top-level ``verbosity``, ``anon_user_id`` and ``fallbacks``."""
+    print("\n🧭 Top-level verbosity, anon_user_id and fallbacks")
+    print("-" * 30)
+    print(f"📍 Using model: {model}")
+
+    # The check on anon_user_id runs in the SDK, so this costs nothing.
+    ok = True
+    try:
+        validate_anon_user_id("user||42")
+    except ValueError as e:
+        print(f"✅ anon_user_id with '||' rejected locally: {e}")
+    else:
+        print("❌ anon_user_id with '||' was accepted")
+        ok = False
+
+    fallback = await client.models.resolve_chat(
+        exclude_reasoning=True, exclude_models=[model], prefer="cheapest"
+    )
+    print(f"   fallbacks=[{{'model': {fallback!r}}}] (ignored on non-Anthropic routes)")
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[UserMessage(content="Name the largest planet in one short sentence.")],
+        venice_parameters=VeniceParameters(include_venice_system_prompt=False),
+        max_completion_tokens=100,
+        verbosity="low",
+        anon_user_id="end-user-123",
+        fallbacks=[{"model": fallback}],
+    )
+    ok = answer_ok(response, 100) and ok
+    if "jupiter" not in (response.text or "").lower():
+        print("❌ The answer does not name Jupiter")
+        ok = False
+    print(f"📏 Asked {model}; response.model is {response.model}")
     return ok
 
 
@@ -273,16 +324,24 @@ async def main() -> int:
             return 77
         results: list[tuple[str, bool | None]] = [
             ("demo_passthrough_fields", await demo_passthrough_fields(client, model)),
+            ("demo_end_user_and_routing", await demo_end_user_and_routing(client, model)),
         ]
         cache: CacheTierResult | None = None
         # The cache demo needs a model that caches prompts. The catalog has no
         # caching flag, only a cached-input price, so require_prompt_caching
-        # filters on that price, and the catalog's default ranking picks among
-        # those models.
+        # filters on that price, and the cheapest of those models is used, since
+        # the demo reports cache reads without requiring one. Its replies are capped
+        # at REPLY_CAP, which a reasoning model would spend on thinking, so reasoning
+        # models are excluded.
         try:
-            cache_model = await client.models.resolve_chat(require_prompt_caching=True)
+            cache_model = await client.models.resolve_chat(
+                require_prompt_caching=True,
+                exclude_reasoning=True,
+                exclude_e2ee=True,
+                prefer="cheapest",
+            )
         except NoMatchingModelError:
-            print("\nSection skipped: no catalog model lists a cached-input price")
+            print("\nSection skipped: no non-reasoning model lists a cached-input price")
             results.append(("demo_cache_retention_tiers", None))
         else:
             cache = await demo_cache_retention_tiers(client, cache_model)
@@ -299,6 +358,7 @@ async def main() -> int:
     print("\n✨ Done.")
     print("\n💡 Key concepts demonstrated:")
     print("   - store / text / include / metadata (OpenAI-compat passthroughs)")
+    print("   - verbosity, anon_user_id and fallbacks at the top level")
     if cache is not None:
         print(
             f"   - prompt_cache_retention with prompt_cache_key: {', '.join(cache.accepted)} "

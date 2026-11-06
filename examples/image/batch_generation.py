@@ -6,6 +6,12 @@ Venice AI SDK - Batch Image Generation
 This example demonstrates efficient batch generation of multiple images.
 Learn how to generate multiple images concurrently and manage batch workflows.
 
+The API can also return several images from one request: ``num_images`` (up to 4,
+sent as ``variants``) with ``response.save_all()``. That form needs a JSON
+response, so ``return_binary=True`` is shown separately on a single image, and the
+two are never combined. The catalog has no field for which models accept
+``num_images`` above 1, so a model that refuses it skips that part.
+
 Each returned image's pixel size is read from its header and checked against
 the request. The concurrent demo counts requests in flight to show that
 ``client.gather(max_concurrency=N)`` holds the cap, and the seed demo renders
@@ -19,7 +25,8 @@ recorded as that image's failure and the rest of the batch carries on.
 
 Generation costs real money, so by default this example only resolves the model
 (free), prints what it would run and exits 77 ("skipped"). Opt in to make the
-13 paid generations and write the outputs to ``examples/results/``::
+16 paid images, about $0.16 at the cheapest listed $0.01 per image, and write the
+outputs to ``examples/results/``::
 
     VENICE_RUN_PAID_IMAGES=1
 """
@@ -32,17 +39,22 @@ import time
 from pathlib import Path
 from typing import Any
 
-from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
-from venice_ai.types.api import ImageGenerationResponse
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import (  # noqa: E402
+from _helpers import (
     SKIPPED,
     catalog_price_usd,
     format_price,
     image_dimensions,
     mean_pixel_difference,
 )
+
+from venice_ai import (
+    InvalidRequestError,
+    NoMatchingModelError,
+    VeniceClient,
+    VeniceError,
+    detect_image_format,
+)
+from venice_ai.types.api import ImageGenerationResponse
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).
@@ -64,7 +76,11 @@ PAID_GENERATIONS = {
     "batch_with_variations": 3,
     "progressive_batch_generation": 3,
     "batch_with_mixed_parameters": 2,
+    "native_batching": 3,
 }
+
+#: Images asked for in the one native batch request.
+NATIVE_BATCH_SIZE = 2
 
 
 class InFlight:
@@ -344,6 +360,72 @@ async def batch_with_mixed_parameters(
     return report(results) == 0
 
 
+async def native_batching(client: VeniceClient, model: str, written: list[Path]) -> bool | None:
+    """One request for several images, then one request for raw bytes.
+
+    A reply can hold fewer images than asked for: moderation can drop some, and a
+    model can return one whatever was asked. That is reported and accepted. A reply
+    with none is a failure.
+    Returns ``None`` if the model refuses ``num_images`` above 1.
+    """
+    print("\n🧺 Native Batching: num_images, save_all and return_binary")
+    print("-" * 40)
+
+    try:
+        response: ImageGenerationResponse = await client.image.create(
+            model=model,
+            prompt="A lighthouse on a rocky coast at dawn",
+            width=512,
+            height=512,
+            num_images=NATIVE_BATCH_SIZE,
+            hide_watermark=True,
+            return_binary=False,
+        )
+    except InvalidRequestError as e:
+        print(f"Section skipped: native batching: {model} refused num_images: {e}")
+        return None
+    except VeniceError as e:
+        print(f"   ❌ {type(e).__name__}: {e}")
+        return False
+
+    got = len(response.images)
+    if got == 0:
+        print("   ❌ The reply holds no images")
+        return False
+    if got < NATIVE_BATCH_SIZE:
+        print(f"   ℹ️ {got} of {NATIVE_BATCH_SIZE} images came back: moderated, or not supported")
+    paths = response.save_all(RESULTS_DIR, prefix="batch_native", overwrite=True)
+    written.extend(paths)
+    sizes = [image_dimensions(path.read_bytes()) for path in paths]
+    print(f"   ✅ save_all() wrote {len(paths)} files: {sizes}")
+    if len(paths) != got or any(size != (512, 512) for size in sizes):
+        print("   ❌ The saved files do not match the reply or the 512x512 request")
+        return False
+
+    try:
+        data = await client.image.create(
+            model=model,
+            prompt="A lighthouse on a rocky coast at dawn",
+            width=512,
+            height=512,
+            format="png",
+            hide_watermark=True,
+            return_binary=True,
+        )
+    except VeniceError as e:
+        print(f"   ❌ {type(e).__name__}: {e}")
+        return False
+    binary = RESULTS_DIR / "batch_binary.png"
+    binary.write_bytes(data)
+    written.append(binary)
+    fmt = detect_image_format(data)[0]
+    print(f"   ✅ return_binary=True: {len(data)} bytes of {fmt}")
+    if fmt != "png":
+        print("   ❌ Asked for format='png'")
+        return False
+    return True
+
+
 async def main() -> int:
     """Run all batch generation examples.
 
@@ -390,6 +472,7 @@ async def main() -> int:
             ("batch_with_variations", batch_with_variations),
             ("progressive_batch_generation", progressive_batch_generation),
             ("batch_with_mixed_parameters", batch_with_mixed_parameters),
+            ("native_batching", native_batching),
         ]:
             results.append((name, await demo(client, image_model, written)))
 
@@ -409,6 +492,9 @@ async def main() -> int:
         print("   - Progressive batch processing")
         print("   - Mixed output sizes, checked against the returned images")
         print("   - Counting per-item failures, including exceptions returned by gather")
+        if "native_batching" not in skipped:
+            print("   - One request for several images, with num_images and save_all()")
+            print("   - Raw image bytes with return_binary=True, on a single image")
 
     print(f"\n📁 Files written by this run ({len(written)}):")
     for path in written:

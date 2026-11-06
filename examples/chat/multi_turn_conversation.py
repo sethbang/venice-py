@@ -14,11 +14,16 @@ completion-token count is compared with the cap as well.
 
 Each conversation sets its own system message, so every request leaves
 Venice's own system prompt out (``include_venice_system_prompt=False``).
+
+Cost: about 20 short requests on the cheapest direct-answer model, typically
+under $0.001 in total.
 """
 
 import asyncio
 import sys
 from collections import Counter
+
+from _helpers import states_number
 
 from venice_ai import Conversation, NoMatchingModelError, VeniceClient
 from venice_ai.types.api import (
@@ -161,7 +166,10 @@ async def context_window_management(client: VeniceClient, chat_model: str) -> bo
 
     # Short numeric answers keep the demo focused on what the model can still see.
     system_message = SystemMessage(
-        content="You are a math tutor. Reply with just the resulting number, nothing else."
+        content=(
+            "You are a math tutor. For arithmetic, reply with just the resulting number. "
+            "For any other request, reply in one short sentence."
+        )
     )
 
     # Keep only last N conversation turns (sliding window)
@@ -174,9 +182,9 @@ async def context_window_management(client: VeniceClient, chat_model: str) -> bo
         "What is 15 + 27?",
         "Multiply the answer by 2.",  # Refers to previous
         "Now divide that by 3.",  # Refers to previous
-        "What exactly was my first question?",  # Turn 1 has left the window by now
+        "Quote word for word the earliest question of mine you can see.",  # Turn 1 has left
     ]
-    expected_numbers = ["42", "84", "28"]
+    expected_numbers = [42, 84, 28]
     replies: list[str] = []
 
     for turn_num, question in enumerate(questions, 1):
@@ -223,14 +231,16 @@ async def context_window_management(client: VeniceClient, chat_model: str) -> bo
 
     ok = True
     for turn_num, (reply, number) in enumerate(zip(replies, expected_numbers, strict=False), 1):
-        if number not in reply:
+        if not states_number(reply, number):
             print(f"   ❌ Turn {turn_num} should answer {number}; the chain lost its context")
             ok = False
-    # The trimmed question can't be quoted back; seeing it would mean the window
-    # did not actually drop turn 1.
-    first_question_seen = all(n in replies[3] for n in ("15", "27"))
-    if first_question_seen:
+    # The earliest question in the window is turn 2's. Quoting turn 1's would mean
+    # the window did not actually drop it.
+    if states_number(replies[3], 15) and states_number(replies[3], 27):
         print("   ❌ Turn 4 quoted the first question, which should have left the window")
+        ok = False
+    elif "multiply" not in replies[3].lower():
+        print("   ❌ Turn 4 did not quote the earliest question in the window (turn 2's)")
         ok = False
     if ok:
         print("   ✅ Each step used the previous answer, and turn 1 was out of view by turn 4")

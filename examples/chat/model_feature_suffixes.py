@@ -32,6 +32,9 @@ answer as ``"stop"``). The script exits 77 if the catalog has no model for the
 web-search base, and a section whose reasoning model is missing prints
 ``Section skipped:``.
 
+Cost: one web search ($0.01) plus about seven short requests on the cheapest
+capable models, typically about $0.012 in total.
+
 Requirements:
     - Venice AI API key (set as VENICE_API_KEY environment variable)
     - Python 3.11+
@@ -41,6 +44,8 @@ Requirements:
 import asyncio
 import sys
 
+from _helpers import completion_cap
+
 from venice_ai import NoMatchingModelError, VeniceClient, build_model_id
 from venice_ai.types.api import ChatCompletionResponse, UserMessage
 from venice_ai.types.api.requests import VeniceParameters
@@ -48,11 +53,6 @@ from venice_ai.types.api.requests import VeniceParameters
 # Venice's own system prompt adds hundreds of tokens to every request; leaving
 # it out must shrink the prompt by at least this much.
 MIN_SYSTEM_PROMPT_TOKENS = 100
-
-# Room for a reasoning model to think and still answer. Small reasoning models
-# vary widely in how long they think, even on easy questions, so the cap leaves
-# several thousand tokens of headroom over a typical run.
-REASONING_CAP = 16384
 
 # =============================================================================
 # Helper Functions
@@ -196,13 +196,14 @@ async def multiple_params_example(client: VeniceClient, reasoning_model: str) ->
 
     question = "Briefly explain quantum computing in two sentences."
     reference_tokens = await default_prompt_tokens(client, reasoning_model, question)
+    cap = await completion_cap(client, reasoning_model)
     response = await client.chat.completions.create(
         model=model_with_params,
         messages=[UserMessage(content=question)],
-        max_completion_tokens=REASONING_CAP,
+        max_completion_tokens=cap,
     )
 
-    ok = print_response(response, REASONING_CAP, "Multi-param Suffix Response")
+    ok = print_response(response, cap, "Multi-param Suffix Response")
     # Stripping only means something if the model actually reasoned.
     used = reasoning_tokens(response)
     ok = (
@@ -335,8 +336,8 @@ async def comparison_example(client: VeniceClient, base_model: str) -> bool:
     return ok
 
 
-def use_cases_example() -> bool:
-    """Document when to use suffixes vs venice_parameters (no API call needed)."""
+def use_cases_example() -> None:
+    """Print when to use suffixes vs venice_parameters (no API call, nothing to check)."""
     print_section_header("When to Use Model Feature Suffixes", "💡")
 
     print("""
@@ -350,7 +351,6 @@ def use_cases_example() -> bool:
      📋  You want type-safe, IDE-autocompleted parameter names
      🔀  Settings change from request to request and you'd rather not rebuild model strings
 """)
-    return True
 
 
 # =============================================================================
@@ -398,7 +398,7 @@ async def main() -> int:
             ]
         results.append(("comparison_example", await comparison_example(client, search_model)))
 
-    results.append(("use_cases_example", use_cases_example()))
+    use_cases_example()
 
     failed = [name for name, ok in results if ok is False]
     if failed:

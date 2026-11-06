@@ -191,7 +191,8 @@ class X402(APIResource["VeniceClient"]):
 
         Wraps :meth:`transactions` for unbounded enumeration. Termination
         uses the response's ``data.pagination.hasMore`` flag, so iteration
-        stops when the server signals no more pages. Each page hits
+        stops when the server signals no more pages, or on a page that adds no
+        transaction the walk has not yet yielded. Each page hits
         ``GET /api/v1/x402/transactions/{wallet}``.
 
         Args:
@@ -221,7 +222,9 @@ class X402(APIResource["VeniceClient"]):
             has_more = response.data.pagination.hasMore
             return _PageResult(items=items, has_more=has_more)
 
-        return Paginator(_fetch_page, page_size=page_size, max_items=max_items)
+        return Paginator(
+            _fetch_page, page_size=page_size, max_items=max_items, key=lambda tx: tx.id
+        )
 
     async def top_up(self, *, payment_header: str | None = None) -> X402TopUpResponse:
         """Top up the wallet balance via the x402 payment channel.
@@ -243,8 +246,8 @@ class X402(APIResource["VeniceClient"]):
         Raises:
             PaymentRequiredError: When the server returns 402 with payment
                 instructions (the structured payment requirements are
-                attached to the error body).
-            AuthenticationError: If the server rejects the client's credentials.
+                attached to the error body). An empty POST gets this 402
+                whatever the API key, so it says nothing about the key.
             InvalidRequestError: If the supplied payment header is
                 malformed.
             APIError: For other HTTP-level failures.
