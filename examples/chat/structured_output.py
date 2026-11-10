@@ -43,16 +43,31 @@ NO_VENICE_PROMPT = VeniceParameters(include_venice_system_prompt=False)
 
 
 def _finished(parsed: ParsedChatCompletion) -> bool:
-    """Print the finish reason and return ``False`` if the output was truncated.
+    """Print the finish reason and return ``False`` if the output reached the cap.
 
-    Some models report output cut off at the cap as ``finish_reason="stop"``,
-    so the completion-token count is checked against the cap as well.
+    ``parse()`` has already validated the JSON by now, so this catches a complete
+    document that stopped at the cap; JSON cut off mid-document is handled by
+    :func:`_cut_off`. Some models report reaching the cap as
+    ``finish_reason="stop"``, so the completion-token count is checked as well.
     """
     used = parsed.usage.completion_tokens if parsed.usage else None
     print(f"🏁 Finish reason: {parsed.finish_reason} ({used} of {MAX_COMPLETION_TOKENS} tokens)")
     if parsed.finish_reason == "length" or used is None or used >= MAX_COMPLETION_TOKENS:
         print("❌ The response may be cut off by the token limit")
         return False
+    return True
+
+
+def _cut_off(e: ValidationError) -> bool:
+    """Print a message and return ``True`` if the JSON stopped mid-document.
+
+    ``parse()`` validates before it returns, so output cut off at the cap arrives
+    as an end-of-input ``ValidationError`` and never reaches :func:`_finished`.
+    Sending the same request at the same cap would pay for the same cut-off.
+    """
+    if not any(err["type"] == "json_invalid" and "EOF" in err["msg"] for err in e.errors()):
+        return False
+    print(f"❌ The JSON ends mid-document, cut off by the token limit: {e.errors()[0]['msg']}")
     return True
 
 
@@ -97,7 +112,8 @@ async def math_problem_example(client: VeniceClient, model: str) -> bool:
             temperature=0.2,
         )
     except ValidationError as e:
-        print(f"❌ Pydantic ValidationError: model output didn't satisfy schema:\n{e}")
+        if not _cut_off(e):
+            print(f"❌ Pydantic ValidationError: model output didn't satisfy schema:\n{e}")
         return False
     except VeniceError as e:
         # VeniceError is the SDK base: covers APIError, APIResponseValidationError,
@@ -184,7 +200,8 @@ async def data_extraction_example(client: VeniceClient, model: str) -> bool:
             max_completion_tokens=MAX_COMPLETION_TOKENS,
         )
     except ValidationError as e:
-        print(f"❌ Pydantic ValidationError: model output didn't satisfy schema:\n{e}")
+        if not _cut_off(e):
+            print(f"❌ Pydantic ValidationError: model output didn't satisfy schema:\n{e}")
         return False
     except VeniceError as e:
         # VeniceError is the SDK base: covers APIError, APIResponseValidationError,
@@ -312,7 +329,7 @@ async def quiz_generation_example(client: VeniceClient, model: str) -> bool:
 
     # Bounded retry on ValidationError only (e.g. duplicate options): the
     # schema can't stop every model from repeating a value, and re-sampling
-    # usually fixes it. API errors are returned immediately.
+    # usually fixes it. Cut-off JSON and API errors are returned immediately.
     max_attempts = MAX_PARSE_ATTEMPTS
     parsed = None
     for attempt in range(1, max_attempts + 1):
@@ -327,6 +344,8 @@ async def quiz_generation_example(client: VeniceClient, model: str) -> bool:
             )
             break
         except ValidationError as e:
+            if _cut_off(e):
+                return False
             print(f"⚠️ Attempt {attempt}/{max_attempts}: model output didn't satisfy schema.")
             if attempt == max_attempts:
                 print(f"❌ Pydantic ValidationError after {max_attempts} attempts:\n{e}")
@@ -452,7 +471,8 @@ async def task_planning_example(client: VeniceClient, model: str) -> bool:
     # Bounded retry: structured-output models occasionally return JSON that
     # violates the schema. A short retry (re-sampling) usually resolves it.
     # We only retry ValidationError; VeniceError (HTTP/transport) is returned
-    # immediately so a genuine API problem isn't masked by pointless retries.
+    # immediately so a genuine API problem isn't masked by pointless retries,
+    # and so is JSON cut off at the cap, which the same cap would cut off again.
     max_attempts = MAX_PARSE_ATTEMPTS
     parsed = None
     for attempt in range(1, max_attempts + 1):
@@ -470,6 +490,8 @@ async def task_planning_example(client: VeniceClient, model: str) -> bool:
             )
             break
         except ValidationError as e:
+            if _cut_off(e):
+                return False
             print(
                 f"⚠️ Attempt {attempt}/{max_attempts}: model output didn't satisfy "
                 f"schema ({type(e).__name__})."
@@ -607,7 +629,8 @@ async def error_handling_example(client: VeniceClient, model: str) -> bool:
             temperature=0.1,
         )
     except ValidationError as e:
-        print(f"   ❌ Pydantic ValidationError: model output didn't satisfy schema:\n{e}")
+        if not _cut_off(e):
+            print(f"   ❌ Pydantic ValidationError: model output didn't satisfy schema:\n{e}")
         return False
     except VeniceError as e:
         print(f"   ❌ Venice API call failed ({type(e).__name__}): {e}")
@@ -687,8 +710,10 @@ async def main() -> int:
             "   • chat.completions.parse(response_format=ModelClass) returns ParsedChatCompletion[T]"
         )
         print("   • parsed.parsed is a typed instance — no manual json.loads needed")
+        print("   • Output cut off at the cap raises ValidationError (EOF), so parse() returns")
+        print("     nothing to inspect: don't pay to retry it at the same cap")
         print("   • Check finish_reason AND completion tokens against the cap: some models")
-        print("     report a truncated response as 'stop', and it is not a valid result")
+        print("     report reaching the cap as 'stop', and it is not a valid result")
         print("   • Schema validation checks shape, not truth: verify content in code")
         print("   • Put reasoning fields before answer fields in the schema")
         print("   • Pydantic raises ValidationError on schema violations; request")

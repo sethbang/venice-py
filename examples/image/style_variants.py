@@ -12,11 +12,18 @@ that changes between them. How closely a modifier is followed depends on the
 model.
 
 Each returned image's format and pixel size are read from its bytes and
-checked against the 512x512 request. Outputs are written to
-``examples/results/`` with a ``style_`` prefix.
+checked against the 512x512 request.
+
+Generation costs real money, so by default this example only resolves the model
+(free), prints what it would run and exits 77 ("skipped"). Opt in to make the
+10 paid generations and write the outputs to ``examples/results/`` with a
+``style_`` prefix::
+
+    VENICE_RUN_PAID_IMAGES=1
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -24,13 +31,15 @@ from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
 from venice_ai.types.api import ImageGenerationResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import SKIPPED, image_dimensions  # noqa: E402
+from _helpers import SKIPPED, catalog_price_usd, format_price, image_dimensions  # noqa: E402
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
 WIDTH = HEIGHT = 512
+
+RUN_PAID = os.environ.get("VENICE_RUN_PAID_IMAGES") == "1"
 
 SECTIONS: list[tuple[str, str, str, int, list[tuple[str, str]]]] = [
     (
@@ -146,10 +155,16 @@ async def main() -> int:
     """Run all style variation examples.
 
     Returns ``0`` only if every render succeeded, ``1`` if any failed, and
-    ``77`` if no catalog image model is sized by width/height.
+    ``77`` if ``VENICE_RUN_PAID_IMAGES`` is unset or no catalog image model is
+    sized by width/height.
     """
     print("🚀 Venice AI Image Style Variations Examples")
     print("=" * 50)
+    total_paid = sum(len(section[4]) for section in SECTIONS)
+    if RUN_PAID:
+        print(f"💸 VENICE_RUN_PAID_IMAGES=1 — this run makes {total_paid} paid generations.")
+    else:
+        print("🧪 Preview only (default). Set VENICE_RUN_PAID_IMAGES=1 to generate images.")
 
     written: list[Path] = []
     sections: list[tuple[str, list[tuple[str, bool, str | None]]]] = []
@@ -163,6 +178,18 @@ async def main() -> int:
             print(f"SKIPPED: no image model in the catalog takes width/height ({e})")
             return SKIPPED
         print(f"📍 Using image model: {image_model}")
+
+        if not RUN_PAID:
+            spec = (await client.models.get(image_model)).model_spec
+            print(f"\n🧾 This run would make {total_paid} paid generations:")
+            for title, _prefix, subject, _seed, variants in SECTIONS:
+                names = ", ".join(name for name, _modifier in variants)
+                print(f"   - {title}: '{subject}' as {names}")
+            print(f"💰 Catalog price per image: {format_price(catalog_price_usd(spec))}")
+            print("⏭️  Not generated: set VENICE_RUN_PAID_IMAGES=1 to generate (incurs this cost).")
+            print("SKIPPED: VENICE_RUN_PAID_IMAGES is not set, so no image was generated")
+            return SKIPPED
+
         for title, prefix, subject, seed, variants in SECTIONS:
             results = await render_section(
                 client, image_model, title, prefix, subject, seed, variants, written

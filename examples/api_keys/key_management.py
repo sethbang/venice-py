@@ -8,6 +8,13 @@ This example demonstrates how to manage API keys in the Venice AI SDK:
 - Understanding API key metadata and usage statistics
 - Monitoring rate limits and consumption patterns
 - Managing key lifecycle (creation should be done carefully in production)
+- Running that lifecycle live: creating a real INFERENCE key with a one-day
+  expiry and a $1 lifetime spend cap, sending one small billed chat request with
+  it, then deleting it and confirming it is gone
+
+Requires an ADMIN key in VENICE_API_KEY. Listing, creating and deleting keys are
+admin-only, so with any other valid key the example prints ``SKIPPED:`` and exits
+77 without creating anything.
 """
 
 import asyncio

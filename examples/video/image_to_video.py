@@ -19,7 +19,8 @@ Venice AI SDK's **image-to-video (I2V)** capabilities. You supply an
     2. ``client.video.quote(...)`` — estimate the cost.
     3. ``client.video.run(..., image_url=...)`` — submit and receive a
        :class:`venice_ai.VideoJob`.
-    4. ``async with job:`` — releases the finished job's stored media on exit.
+    4. ``async with job:`` — releases the finished job's stored media on a clean
+       exit; an error raised through the block keeps it.
     5. ``await job.wait(on_progress=...)`` — polls until completion (raises
        :class:`VideoGenerationError` on failure or ``TimeoutError`` on
        poll exhaustion).
@@ -39,7 +40,9 @@ prompt *"gentle ripples spread across the water as a breeze picks up"*.
 When the catalog has no model a section asks for, the resolver raises
 :class:`venice_ai.NoMatchingModelError` and the section is skipped; when
 models exist but every quote fails it raises
-:class:`venice_ai.ModelQuotesUnavailableError`, and the section fails.
+:class:`venice_ai.ModelQuotesUnavailableError`, and the section fails. A model
+whose quote fails while others succeed is left out of the comparison; it is
+listed, and a paid run declines to queue, since the pick may not be the cheapest.
 
 Generation costs real money, so by default this example only quotes (free),
 skips the generation and exits 77 ("skipped"). Opt in to queue, wait for and
@@ -47,6 +50,11 @@ download one short clip on the cheapest I2V model at its shortest duration
 and lowest resolution, and check the clip against the request::
 
     VENICE_RUN_PAID_VIDEO=1
+
+A queue call that ends in a 5xx, a read timeout or a dropped connection may
+still have queued and billed a job, and the example says so. A file that is not
+a video keeps the job's stored copy. A clip that is the wrong length or size is
+still a delivered video, so it is saved and released, and the example exits 1.
 """
 
 import asyncio
@@ -57,8 +65,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import aiohttp
+
 from venice_ai import (
-    APITimeoutError,
     ModelQuotesUnavailableError,
     NoMatchingModelError,
     VeniceClient,
@@ -74,11 +83,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _helpers import (  # noqa: E402
     NOT_PAID,
     Outcome,
+    UnplayableVideoError,
     check_video,
+    download_video,
     duration_seconds,
     exit_code,
     print_progress,
+    print_recovery,
+    read_playable_video,
     read_video_listing,
+    report_uncertain_queue,
     unrecognised_durations,
 )
 
@@ -127,9 +141,18 @@ async def _constraints(client: VeniceClient, model: str) -> VideoModelConstraint
 async def _wait_and_save(job: VideoJob, output_path: Path, request: dict[str, Any]) -> bool:
     """Wait for completion, save to disk and check the clip against ``request``."""
     print(f"⏳ Polling for completion (queue_id={job.queue_id}) ...")
+    # The handlers sit outside the block: leaving it cleanly releases a finished
+    # job's stored video, so a failed download has to raise through it.
     try:
-        status = await job.wait(on_progress=print_progress)
-        saved = await job.download(output_path, status)
+        async with job:
+            status = await job.wait(on_progress=print_progress)
+            saved = await download_video(job, output_path, status)
+            data = read_playable_video(saved)
+    except UnplayableVideoError as e:
+        WRITTEN.append(output_path)
+        print(f"❌ {output_path} is not a usable video: {e} (queue_id={job.queue_id})")
+        print_recovery(job)
+        return False
     except VideoGenerationError as e:
         code = f" (code={e.error_code})" if e.error_code else ""
         print(f"❌ Generation failed: {e}{code}")
@@ -137,14 +160,20 @@ async def _wait_and_save(job: VideoJob, output_path: Path, request: dict[str, An
     except TimeoutError as e:
         # wait() ran out of polls; the job is still queued or running.
         print(f"❌ {e} (queue_id={job.queue_id})")
+        print_recovery(job)
         return False
-    except APITimeoutError as e:
-        # One status or download request timed out; the job itself may still
-        # finish and be billed, so keep its queue_id.
-        print(f"❌ A status or download request timed out (queue_id={job.queue_id}): {e}")
+    except aiohttp.ClientResponseError as e:
+        # Only the status: the error's text contains the link, which grants access.
+        print(f"❌ The download answered HTTP {e.status} (queue_id={job.queue_id})")
+        print_recovery(job)
+        return False
+    except VeniceError as e:
+        # A status request failed, or every download attempt did. That does not
+        # cancel the job: it may still finish, and it is billed either way.
+        print(f"❌ Video request failed (queue_id={job.queue_id}): {e}")
+        print_recovery(job)
         return False
 
-    data = saved.read_bytes()
     WRITTEN.append(saved)
     print(f"💾 Saved to {saved} ({len(data):,} bytes)")
     # Most I2V models list no aspect ratio and follow the source image's, so
@@ -206,14 +235,19 @@ async def _generate(
     if not await asyncio.to_thread(_image_reachable, SAMPLE_IMAGE_URL):
         return False
     try:
-        async with await client.video.run(
-            model=model,
-            prompt=prompt,
-            image_url=SAMPLE_IMAGE_URL,
-            **params,
-        ) as job:
-            print(f"📨 Queued — queue_id: {job.queue_id}")
-            return await _wait_and_save(job, output_path, params)
+        try:
+            job = await client.video.run(
+                model=model,
+                prompt=prompt,
+                image_url=SAMPLE_IMAGE_URL,
+                **params,
+            )
+        except (VeniceError, ValueError) as e:
+            if not report_uncertain_queue(e):
+                _report_error(e)
+            return False
+        print(f"📨 Queued — queue_id: {job.queue_id}")
+        return await _wait_and_save(job, output_path, params)
     except (VeniceError, ValueError) as e:
         _report_error(e)
         return False
@@ -257,6 +291,19 @@ async def basic_image_to_video(client: VeniceClient) -> Outcome:
     print(f"📝 Prompt (motion): {prompt}")
     print(f"💵 Quoted cost: ${pick.quote_usd:.4f}")
     print("ℹ️  image_url must be publicly accessible (http://, https://, or data: URI)")
+    # ``skipped`` also lists models that cannot serve the request at all; those
+    # do not make the pick any less the cheapest.
+    quote_failures = {
+        m: reason for m, reason in pick.skipped.items() if reason.startswith("quote failed")
+    }
+    for model_id, reason in quote_failures.items():
+        print(f"⚠️  Not compared: {model_id} ({reason})")
+    if quote_failures and RUN_PAID:
+        print(
+            f"❌ Not queued: {len(quote_failures)} models could not be priced, and any of them "
+            "may be cheaper than this pick."
+        )
+        return False
 
     return await _generate(
         client, pick.model, pick.request_params, prompt, RESULTS_DIR / "i2v_basic.mp4"
@@ -463,13 +510,17 @@ async def main() -> int:
         return code
 
     print("\n✨ Image-to-video examples completed!")
+    # Reaching this line means the basic generation passed; the rest may have been skipped.
+    passed = {name for name, outcome in results if outcome is True}
     print("\n💡 Key concepts demonstrated:")
     print("   - image_url switches run() to I2V mode")
     print("   - resolve_cheapest_video(): cheapest plain I2V model plus its quoted parameters")
-    print("   - video_input_mode(): plain I2V vs reference / transition models")
+    if "model_discovery" in passed:
+        print("   - video_input_mode(): plain I2V vs reference / transition models")
     print("   - Prompt describes desired motion, not image content")
     print("   - Clip checked against its request: duration and resolution")
-    print("   - Cost estimation with quote()")
+    if "cost_estimation" in passed:
+        print("   - Cost estimation with quote()")
     return 0
 
 

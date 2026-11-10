@@ -3,8 +3,22 @@
 Venice AI SDK - Production API Key Management
 ==============================================
 
-This example demonstrates production-ready API key management patterns.
-Learn how to securely handle and rotate API keys in production environments.
+This example demonstrates patterns for loading, validating and rotating API keys,
+and lists what a production deployment has to add around them. The code here keeps
+one key string in memory: its format check only looks at the length, it writes no
+audit log, and rotation does not reach a client that is already built (a
+``VeniceClient`` keeps the key it was created with, so build a new one).
+
+Least privilege: give each service its own key with the narrowest settings it can
+run on. The key guide recommends an INFERENCE key (``apiKeyType``) for anything that
+only calls model endpoints, plus an expiry (``expiresAt``) and a spend cap
+(``consumptionLimit`` with ``limitPeriod``) for temporary, shared or higher-risk use.
+``ipAllowlist`` and ``modelPrivacy`` are also available to narrow a key further.
+Creating a key needs an ADMIN key; see examples/api_keys/key_management.py.
+
+Exit status: ``0`` when every demo passed, ``1`` when one failed or VENICE_API_KEY
+is not set (the demos that need no key still print), ``77`` when the catalog has
+no model of the kind the live client demo needs.
 """
 
 import asyncio
@@ -38,32 +52,32 @@ def key_fingerprint(key: str) -> str:
 
 
 async def test_key(api_key: str) -> bool:
-    """Return True if Venice accepts ``api_key``.
+    """Return True if Venice accepts ``api_key`` and permits it inference access.
 
     The check must call an endpoint that requires authentication: ``/models``
     is public, so listing models succeeds with any key at all. Reading the
     key's rate limits is authenticated, free, and works for both admin and
-    inference keys. A 403 (``PermissionDeniedError``) also counts as a
-    rejection: a key that cannot pass the check is not rotated in.
+    inference keys. A 200 alone is not enough: ``accessPermitted`` says whether
+    the key may use the inference APIs. A 403 (``PermissionDeniedError``) also
+    counts as a rejection: a key that cannot pass the check is not rotated in.
     """
     async with VeniceClient(api_key=api_key) as client:
         try:
-            await client.api_keys.get_rate_limits()
+            limits = await client.api_keys.get_rate_limits()
         except (AuthenticationError, PermissionDeniedError):
             return False
-    return True
+    return limits.data.accessPermitted
 
 
 class SecureKeyManager:
     """
-    Production-ready API key manager with secure storage and rotation.
+    Holds one API key loaded from the environment or a 0600 file, and swaps it
+    for a new one once Venice accepts that key.
 
-    Best Practices:
+    Practices it shows:
     - Never hardcode API keys
-    - Use environment variables or secret managers
-    - Support key rotation without downtime
-    - Log key usage for audit trails
-    - Validate keys before use
+    - Load keys from the environment or a restricted file
+    - Test a new key against the API before switching to it
     """
 
     def __init__(self, env_var: str = "VENICE_API_KEY"):
@@ -143,6 +157,9 @@ class SecureKeyManager:
         """
         Rotate to a new API key, keeping the current key unless the new one works.
 
+        This swaps the string this manager holds. A client built from the old
+        key keeps using it, so build new clients from :meth:`get_key` afterwards.
+
         In production:
         1. Validate the new key's format
         2. Test the new key against the API
@@ -154,7 +171,7 @@ class SecureKeyManager:
             return False
 
         if not await test_key(new_key):
-            print("🛑 Venice rejected the new key; keeping the current key")
+            print("🛑 Venice rejected the new key or denied it access; keeping the current key")
             return False
 
         old_key = self._key
@@ -171,11 +188,10 @@ class SecureKeyManager:
         return True
 
 
-async def environment_variable_pattern() -> bool:
+async def environment_variable_pattern() -> bool | None:
     """Demonstrate loading API key from environment variables.
 
-    Returns ``True`` always — a missing env var is an expected local skip, not
-    the code failure this example demonstrates.
+    Returns ``True`` when the key loaded, ``None`` (skipped) when it is not set.
     """
     print("🔐 Environment Variable Pattern")
     print("-" * 40)
@@ -204,18 +220,20 @@ async def environment_variable_pattern() -> bool:
         print(f"   Metadata: {json.dumps(manager._key_metadata, indent=2)}")
     else:
         print("ℹ️  No key in environment (set VENICE_API_KEY to demonstrate)")
+        return None
 
     return True
 
 
-async def key_rotation_pattern() -> bool:
+async def key_rotation_pattern() -> bool | None:
     """Demonstrate key rotation, both accepted and refused.
 
     First rotates to a key Venice accepts (the current key stands in for a
     freshly created one), which must pass the live check and be swapped in.
     Then loads a stand-in key that does not exist from a 0600 file; the live
     check must reject it and the manager must keep the current key. Returns
-    ``False`` if either step behaves differently.
+    ``False`` if either step behaves differently, and ``None`` (skipped) when
+    VENICE_API_KEY is not set.
     """
     print("\n🔄 Key Rotation Pattern")
     print("-" * 40)
@@ -232,10 +250,10 @@ async def key_rotation_pattern() -> bool:
     print("   async def test_key(api_key: str) -> bool:")
     print("       async with VeniceClient(api_key=api_key) as client:")
     print("           try:")
-    print("               await client.api_keys.get_rate_limits()")
+    print("               limits = await client.api_keys.get_rate_limits()")
     print("           except (AuthenticationError, PermissionDeniedError):")
     print("               return False")
-    print("       return True")
+    print("       return limits.data.accessPermitted")
     print("   ```")
     print("   Do not test with client.models.list(): /models is public and accepts any key.")
     print()
@@ -247,14 +265,14 @@ async def key_rotation_pattern() -> bool:
     print()
     print("4. Revoke the old key after confirmation:")
     print("   - Verify all services use the new key")
-    print("   - Delete the old key (client.api_keys.delete) or disable it in the dashboard")
+    print("   - Delete the old key (client.api_keys.delete)")
     print("   - Record the rotation in your audit log")
 
     manager = SecureKeyManager()
     current = manager.load_key()
     if not current:
         print("\nℹ️  No key in environment (set VENICE_API_KEY to run the live rotation demo)")
-        return True
+        return None
 
     print("\n🧪 Live demo 1: rotating to a key Venice accepts")
     print("   (the current key stands in for a newly created one)")
@@ -305,16 +323,17 @@ async def multi_environment_pattern() -> bool:
     print("Development:")
     print("   - Use .env files (not in git)")
     print("   - Separate dev API key")
-    print("   - Lower rate limits acceptable")
+    print("   - Low consumptionLimit with a limitPeriod, and an expiresAt")
     print()
     print("Staging:")
     print("   - Use secret manager (AWS Secrets, Vault)")
-    print("   - Production-like key with limits")
+    print("   - Same key settings as production, with a smaller consumptionLimit")
     print("   - Test rotation procedures")
     print()
     print("Production:")
     print("   - Use secret manager (required)")
-    print("   - Dedicated high-limit key")
+    print("   - Dedicated INFERENCE key per service, capped with consumptionLimit")
+    print("   - ipAllowlist and modelPrivacy where they fit the service")
     print("   - Automated rotation")
     print("   - Comprehensive monitoring")
     print()
@@ -352,7 +371,8 @@ async def security_best_practices() -> bool:
     print()
     print("2. ✅ Use environment-specific keys")
     print("   - Separate keys per environment")
-    print("   - Limit permissions by environment")
+    print("   - INFERENCE type unless the service manages keys or reads billing")
+    print("   - Set expiresAt and a consumptionLimit with a limitPeriod")
     print("   - Easy to rotate if compromised")
     print()
     print("3. ✅ Implement key rotation")
@@ -391,8 +411,8 @@ async def testing_with_keys() -> bool:
     print()
     print("1. Use Test Keys:")
     print("   - Dedicated test API keys")
-    print("   - Lower rate limits")
-    print("   - Separate billing")
+    print("   - Low consumptionLimit with a limitPeriod, so a runaway test stops early")
+    print("   - A short expiresAt")
     print()
     print("2. Mock in Unit Tests:")
     print("   ```python")
@@ -416,11 +436,12 @@ async def testing_with_keys() -> bool:
     return True
 
 
-async def production_client_pattern() -> bool:
-    """Demonstrate production-ready client initialization.
+async def production_client_pattern() -> bool | None:
+    """Demonstrate building a client from a loaded key.
 
-    Returns ``True`` on success (or a clean no-key skip), ``False`` if the live
-    API call failed — so a real failure surfaces instead of being swallowed.
+    Returns ``True`` on success, ``None`` (skipped) when VENICE_API_KEY is not
+    set, and ``False`` if the live API call failed — so a real failure surfaces
+    instead of being swallowed.
     """
     print("\n🏭 Production Client Pattern")
     print("-" * 40)
@@ -431,7 +452,7 @@ async def production_client_pattern() -> bool:
 
     if not api_key:
         print("ℹ️  No API key available — skipping live client demo")
-        return True
+        return None
 
     try:
         async with VeniceClient(api_key=api_key) as client:
@@ -468,14 +489,15 @@ async def main() -> int:
     """Run all API key management examples.
 
     Returns ``0`` only if every demo succeeded, ``1`` otherwise, so a real API
-    failure surfaces as a non-zero process exit instead of being masked by the
-    success banner.
+    failure or a missing key surfaces as a non-zero process exit instead of
+    being masked by the success banner.
     """
     print("=" * 60)
     print("Venice AI SDK - Production API Key Management")
     print("=" * 60)
 
-    results: list[tuple[str, bool]] = [
+    # None marks a demo skipped because VENICE_API_KEY is not set.
+    results: list[tuple[str, bool | None]] = [
         ("environment_variable_pattern", await environment_variable_pattern()),
         ("key_rotation_pattern", await key_rotation_pattern()),
         ("multi_environment_pattern", await multi_environment_pattern()),
@@ -484,12 +506,15 @@ async def main() -> int:
         ("production_client_pattern", await production_client_pattern()),
     ]
 
-    failed = [name for name, ok in results if not ok]
+    failed = [name for name, ok in results if ok is False]
+    skipped = [name for name, ok in results if ok is None]
 
     print("\n" + "=" * 60)
     if failed:
         print(f"⚠️ {len(failed)} of {len(results)} demos failed: {', '.join(failed)}")
-    else:
+    if skipped:
+        print(f"⚠️ {len(skipped)} of {len(results)} demos skipped: {', '.join(skipped)}")
+    if not failed and not skipped:
         print("✅ All examples completed!")
     print("=" * 60)
     print()
@@ -500,7 +525,12 @@ async def main() -> int:
     print("   4. Monitor and audit key usage")
     print("   5. Have a key compromise response plan")
 
-    return 1 if failed else 0
+    if skipped:
+        print(
+            "\nERROR: VENICE_API_KEY is not set. Export it (e.g. via .env) and rerun.",
+            file=sys.stderr,
+        )
+    return 1 if failed or skipped else 0
 
 
 if __name__ == "__main__":

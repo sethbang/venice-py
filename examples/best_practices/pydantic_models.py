@@ -81,10 +81,25 @@ OWN_PROMPT_ONLY = VeniceParameters(include_venice_system_prompt=False)
 # on an easy request before they answer; a tight cap cuts the answer off.
 TOOL_CALL_MAX_TOKENS = 16384
 
+# Completion budget for the one-word reply in the response section.
+RESPONSE_MAX_TOKENS = 60
+
 
 def finish_reason_of(response: ChatCompletionResponse) -> str | None:
     """Return the first choice's finish_reason (``"length"`` means truncated)."""
     return response.choices[0].finish_reason if response.choices else None
+
+
+def may_be_truncated(response: ChatCompletionResponse, max_tokens: int) -> bool:
+    """``True`` when a reply may have stopped at the token cap.
+
+    Some backends report ``finish_reason="stop"`` at the cap, so a reply that
+    used all of *max_tokens*, or has no usage to check, counts as well.
+    """
+    usage = response.usage
+    if usage is None or usage.completion_tokens >= max_tokens:
+        return True
+    return finish_reason_of(response) == "length"
 
 
 # =============================================================================
@@ -140,10 +155,7 @@ async def example_message_models_correct():
             TextContent(type="text", text="What do you see in this image?"),
             ImageContent(
                 type="image_url",
-                image_url=ImageUrl(
-                    url="https://example.com/image.jpg"
-                    # Note: ImageUrl only has 'url' parameter
-                ),
+                image_url=ImageUrl(url="https://example.com/image.jpg"),
             ),
         ]
     )
@@ -300,7 +312,7 @@ async def example_response_access_correct() -> bool:
             response = await client.chat.completions.create(
                 model=model,
                 messages=[UserMessage(content="Say 'Hello!' in exactly one word.")],
-                max_completion_tokens=60,
+                max_completion_tokens=RESPONSE_MAX_TOKENS,
                 venice_parameters=OWN_PROMPT_ONLY,
             )
 
@@ -355,7 +367,7 @@ async def example_response_access_correct() -> bool:
             print(f"\n❌ Error: {type(e).__name__}: {e}")
             return False
 
-    if finish_reason_of(response) == "length" or not response.text:
+    if may_be_truncated(response, RESPONSE_MAX_TOKENS) or not response.text:
         print("\n❌ Response was truncated or empty")
         return False
     return True
@@ -498,7 +510,10 @@ _OPERATORS = {
 
 
 def safe_calculate(expression: str) -> float:
-    """Evaluate a basic arithmetic expression without ``eval``."""
+    """Evaluate a basic arithmetic expression without ``eval``.
+
+    Raises ``ValueError`` for anything else, including text that does not parse.
+    """
 
     def walk(node: ast.AST) -> float:
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
@@ -509,7 +524,11 @@ def safe_calculate(expression: str) -> float:
             return _OPERATORS[type(node.op)](walk(node.operand))
         raise ValueError(f"Unsupported expression: {expression!r}")
 
-    return walk(ast.parse(expression.replace("×", "*"), mode="eval").body)
+    try:
+        tree = ast.parse(expression.replace("×", "*"), mode="eval")
+    except (SyntaxError, MemoryError) as e:  # MemoryError: too deeply nested to parse
+        raise ValueError(f"Not an arithmetic expression: {expression!r}") from e
+    return walk(tree.body)
 
 
 async def example_tool_calling_correct() -> bool:
@@ -585,12 +604,16 @@ async def example_tool_calling_correct() -> bool:
                 print(f"   Call ID: {tool_call.id}")
                 print(f"   Arguments (JSON string): {func_args_str}")
 
-                # ✅ CORRECT: Parse arguments from the JSON string
+                # ✅ CORRECT: Parse and validate the arguments. A model can send
+                # anything here, so a bad call becomes an error result it can read.
                 try:
-                    args = json.loads(func_args_str)
-                    result = safe_calculate(args["expression"])
+                    args = json.loads(func_args_str)  # JSONDecodeError is a ValueError
+                    expression = args.get("expression") if isinstance(args, dict) else None
+                    if not isinstance(expression, str):
+                        raise ValueError("arguments need a string 'expression'")
+                    result = safe_calculate(expression)
                     content = str(int(result)) if result == int(result) else str(result)
-                except (json.JSONDecodeError, KeyError, ValueError, ZeroDivisionError) as e:
+                except (ValueError, ZeroDivisionError, OverflowError, RecursionError) as e:
                     content = f"error: {e}"
                 print(f"   Tool result: {content}")
 
@@ -818,14 +841,15 @@ async def example_request_config_correct() -> bool:
     in one streaming request. The run checks that usage arrives on the stream
     and that the output parses against the schema.
 
-    Returns True on success, False if the request failed or a setting had no
-    visible effect.
+    Returns True on success, False if the request failed, no usage arrived or
+    the output missed the schema.
     """
     print("\n" + "=" * 70)
     print("Section 5: Request Configuration - CORRECT Patterns")
     print("=" * 70)
 
-    # ✅ StreamOptions: ask for token usage on the final stream chunk
+    # ✅ StreamOptions: shown here for its validation. The SDK requests usage on
+    # every stream with or without it, so usage arriving proves nothing about it.
     stream_opts = StreamOptions(include_usage=True)
     print("\n✅ StreamOptions created:")
     print(f"   include_usage: {stream_opts.include_usage}")
@@ -921,10 +945,10 @@ async def example_request_config_correct() -> bool:
         ok = False
 
     if usage is None:
-        print("   ❌ No usage chunk arrived despite include_usage=True")
+        print("   ❌ No usage chunk arrived on the stream")
         ok = False
     else:
-        # include_usage=True puts token counts on the stream's final chunk.
+        # The SDK requests usage on every stream; it arrives on the final chunk.
         print(f"   Usage: {usage.prompt_tokens} prompt + {usage.completion_tokens} completion")
 
     print("\n💡 Requests also accept plain dicts for these fields; the models")
@@ -1057,7 +1081,10 @@ def common_pitfalls_reference():
 
 15. TRUNCATED ANSWERS
     ❌ print(response.text)   # may be cut off mid-sentence
-    ✅ if response.choices[0].finish_reason == 'length':
+    ⚠️ if response.choices[0].finish_reason == 'length':   # some backends say 'stop' at the cap
+    ✅ usage = response.usage
+       if (usage is None or usage.completion_tokens >= max_completion_tokens
+               or response.choices[0].finish_reason == 'length'):
            # raise max_completion_tokens or shorten the task
 """
 

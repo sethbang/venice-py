@@ -37,6 +37,15 @@ never printed or submitted, so it cannot move funds.
 Requirements for the paid flow: ``pip install 'venice-py[x402]'`` and a wallet
 key in ``VENICE_X402_TEST_PRIVATE_KEY`` (or ``X402_WALLET_PRIVATE_KEY``) whose
 wallet holds at least the top-up amount in USDC on Base.
+
+With a wallet key set, no API key is needed: ``VeniceClient(api_key="", auth=auth)``
+authenticates with the wallet alone. Without one, discovery runs on
+``VENICE_API_KEY``. With neither, the example skips.
+
+If the opted-in submit times out, drops or gets a 5xx or an unreadable reply, the
+payment may still have settled, and each run signs a fresh payment, so a re-run
+can pay again. The example reports that as an unknown outcome, apart from errors
+raised before anything was signed.
 """
 
 import asyncio
@@ -49,14 +58,14 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from venice_ai import VeniceClient
-from venice_ai.exceptions import PaymentRequiredError, VeniceError
+from venice_ai.exceptions import APIError, PaymentRequiredError, VeniceError
 
 if TYPE_CHECKING:
     from venice_ai.auth.x402 import X402Auth
 
 # Exit codes: 0 = discovery and the signing check (or the opted-in top-up)
-# verified, 1 = a failure, 77 = skipped because the x402 extra or a wallet key
-# is missing, so only discovery ran.
+# verified, 1 = a failure or an unknown settlement outcome, 77 = skipped because
+# the x402 extra or a wallet key is missing, so at most discovery ran.
 EXIT_SKIPPED = 77
 
 TOPUP_AMOUNT_USDC = 5.0  # Venice's documented minimum
@@ -84,7 +93,56 @@ def _wallet_private_key() -> tuple[str, str] | None:
     return None
 
 
-async def discover_payment_requirements() -> list[dict[str, Any]] | None:
+def _load_wallet() -> "tuple[X402Auth, list[bool]] | None":
+    """Build the wallet from the environment, or say why there is none.
+
+    Returns the wallet and a list that gains an entry each time the wallet signs
+    a payment, or ``None`` when the x402 extra or a wallet key is missing.
+    """
+    try:
+        from venice_ai.auth.x402 import X402Auth
+    except ImportError:
+        print("ℹ️ No wallet: the x402 extra is not installed (pip install 'venice-py[x402]')")
+        return None
+
+    found = _wallet_private_key()
+    if found is None:
+        print(f"ℹ️ No wallet: set {' or '.join(WALLET_KEY_ENV_VARS)} to a test wallet's key")
+        return None
+
+    signed: list[bool] = []
+
+    class RecordingAuth(X402Auth):
+        """Note each signed payment: ``top_up_with`` probes, signs and submits in one call."""
+
+        def build_payment_header(self, *args: Any, **kwargs: Any) -> str:
+            header = super().build_payment_header(*args, **kwargs)
+            signed.append(True)
+            return header
+
+    env_name, private_key = found
+    auth = RecordingAuth(private_key=private_key)
+    print(f"🔑 Wallet: {auth.wallet_address} (from {env_name})")
+    return auth, signed
+
+
+def _report_top_up_error(e: Exception, signed: bool) -> None:
+    """Print a failed top-up by what it means for the funds.
+
+    Before signing, nothing can have been spent. After signing, a 4xx is the
+    server refusing the payment, and anything else may have settled.
+    """
+    if not signed:
+        print(f"   ❌ Nothing was signed or spent ({type(e).__name__}): {e}")
+    elif isinstance(e, APIError) and e.status_code is not None and 400 <= e.status_code < 500:
+        print(f"   ❌ The server rejected the signed payment ({type(e).__name__}): {e}")
+    else:
+        print(f"   ⚠️ {type(e).__name__}: {e}")
+        print("      Outcome unknown, check balance.py and transactions.py before retrying:")
+        print("      the payment may have settled, and a re-run signs a new one.")
+
+
+async def discover_payment_requirements(auth: "X402Auth | None") -> list[dict[str, Any]] | None:
     """Empty POST — the server answers 402 with the payment requirements.
 
     Returns the ``accepts`` list, or ``None`` if discovery failed.
@@ -92,7 +150,8 @@ async def discover_payment_requirements() -> list[dict[str, Any]] | None:
     print("🔍 Discover x402 Payment Requirements")
     print("-" * 40)
 
-    async with VeniceClient() as client:
+    # api_key="" signs in with the wallet alone, even when VENICE_API_KEY is set.
+    async with VeniceClient(api_key="" if auth else None, auth=auth) as client:
         try:
             result = await client.x402.top_up()
         except PaymentRequiredError as e:
@@ -236,28 +295,12 @@ def sign_without_submitting(auth: "X402Auth", requirement: dict[str, Any]) -> bo
     return all(checks.values())
 
 
-async def top_up_from_wallet(accepts: list[dict[str, Any]]) -> bool | None:
-    """Sign locally (dry run) or, opted in, settle a real USDC top-up on Base.
-
-    Returns ``None`` when the x402 extra or a wallet key is missing.
-    """
+async def top_up_from_wallet(
+    auth: "X402Auth", signed: list[bool], accepts: list[dict[str, Any]]
+) -> bool:
+    """Sign locally (dry run) or, opted in, settle a real USDC top-up on Base."""
     print("\n💳 Top Up From a Wallet (USDC on Base)")
     print("-" * 40)
-
-    try:
-        from venice_ai.auth.x402 import X402Auth
-    except ImportError:
-        print("SKIPPED: the x402 extra is not installed (pip install 'venice-py[x402]')")
-        return None
-
-    found = _wallet_private_key()
-    if found is None:
-        print(f"SKIPPED: set {' or '.join(WALLET_KEY_ENV_VARS)} to a test wallet's key")
-        return None
-
-    env_name, private_key = found
-    auth = X402Auth(private_key=private_key)
-    print(f"   Wallet: {auth.wallet_address} (from {env_name})")
 
     base = next((o for o in accepts if o.get("network") == BASE_MAINNET), None)
     if base is None:
@@ -280,7 +323,7 @@ async def top_up_from_wallet(accepts: list[dict[str, Any]]) -> bool | None:
         return True
 
     print(f"\n   💸 Submitting a ${TOPUP_AMOUNT_USDC:.2f} top-up (real funds)…")
-    async with VeniceClient() as client:
+    async with VeniceClient(api_key="", auth=auth) as client:
         try:
             result = await client.x402.top_up_with(
                 auth=auth,
@@ -288,7 +331,7 @@ async def top_up_from_wallet(accepts: list[dict[str, Any]]) -> bool | None:
                 max_amount_usdc=TOPUP_AMOUNT_USDC,  # refuse to sign for more than this
             )
         except (VeniceError, ValueError, RuntimeError) as e:
-            print(f"   ❌ Top-up failed ({type(e).__name__}): {e}")
+            _report_top_up_error(e, bool(signed))
             return False
 
     data = result.data
@@ -297,6 +340,17 @@ async def top_up_from_wallet(accepts: list[dict[str, Any]]) -> bool | None:
     print(f"      Credited:    ${data.amountCredited:,.4f}")
     print(f"      New balance: ${data.newBalance:,.4f}")
     print(f"      Payment ID:  {data.paymentId}")
+    checks = {
+        "a positive amount was credited": data.amountCredited > 0,
+        # EVM addresses compare without case: the capitals are only a checksum.
+        "the credit went to this wallet": data.walletAddress.lower() == auth.wallet_address.lower(),
+    }
+    for label, passed in checks.items():
+        print(f"      {'✅' if passed else '❌'} {label}")
+    if not all(checks.values()):
+        print("   ❌ The top-up settled, but the reply does not show this wallet credited.")
+        print("      Do not re-run: a re-run pays again. Check balance.py and transactions.py.")
+        return False
     return True
 
 
@@ -304,17 +358,22 @@ async def main() -> int:
     print("🚀 Venice AI x402 — Top-Up Example")
     print("=" * 50)
 
-    accepts = await discover_payment_requirements()
+    wallet = _load_wallet()
+    if wallet is None and not os.environ.get("VENICE_API_KEY"):
+        print("SKIPPED: discovery needs a wallet key or VENICE_API_KEY")
+        return EXIT_SKIPPED
+
+    accepts = await discover_payment_requirements(wallet[0] if wallet else None)
     if accepts is None:
         print("\n❌ Payment-requirement discovery failed.")
         return 1
 
-    outcome = await top_up_from_wallet(accepts)
-    if outcome is None:
-        print("   Discovery succeeded; the signing step needs the extra and a wallet key.")
+    if wallet is None:
+        print("\nSKIPPED: discovery succeeded; the signing step needs the extra and a wallet key")
         return EXIT_SKIPPED
-    if not outcome:
-        print("\n❌ Top-up failed.")
+
+    if not await top_up_from_wallet(*wallet, accepts):
+        print("\n❌ Top-up example failed.")
         return 1
 
     print("\n✨ Done.")

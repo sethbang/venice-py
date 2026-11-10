@@ -18,6 +18,12 @@ This example demonstrates:
 - Hitting ``max_output_tokens`` on purpose: ``status="incomplete"`` plus
   ``incomplete_details`` explain why the text stops early
 - Inspecting the ``usage`` token block on the result
+- ``text.format``: structured output that follows a JSON Schema
+- ``instructions``: system instructions kept apart from ``input``
+- ``stream=True``: text deltas, then the full response on the terminal event
+- A function-tool round trip: ``function_call`` block in, ``function_call_output``
+  back, with the conversation resent because the endpoint stores nothing
+- ``web_search=True``: a search, read back from the output blocks
 
 ``status`` is the Responses API's equivalent of ``finish_reason``: only
 ``"completed"`` means the model finished its answer.
@@ -29,23 +35,39 @@ a ``Section skipped:`` line. The basic call is the core of the example: when it
 cannot run, the script prints ``SKIPPED:`` and exits 77, otherwise it exits 0
 only if every demo that ran passed.
 
+Cost: about $0.015 per run. The ``web_search`` demo accounts for most of that:
+Venice's pricing page lists web search at $10 per 1,000 requests (about $0.01 a
+request), on top of its token charges. Every other demo is a fraction of a cent
+in tokens. The basic, structured-input, reasoning and truncation demos use the
+catalog's default ranking, so their price follows that pick; the others use the
+cheapest suitable model that does not reason.
+
 Prerequisites:
 - Install: pip install venice-py
 - Set API key: export VENICE_API_KEY="your-api-key"
 """
 
 import asyncio
+import json
+import re
 import sys
+from typing import Any
+
+from pydantic import ValidationError
 
 from venice_ai import NoMatchingModelError, VeniceClient
 from venice_ai.exceptions import PermissionDeniedError, VeniceError
+from venice_ai.types.api import TextModelSpec
 from venice_ai.types.api.requests import VeniceParameters
+from venice_ai.types.api.requests.common import Tool, ToolFunction
 from venice_ai.types.api.responses import (
+    ResponsesFunctionCallOutput,
     ResponsesMessageOutput,
     ResponsesOutputText,
     ResponsesReasoningOutput,
     ResponsesReasoningSummaryText,
     ResponsesResponse,
+    ResponsesWebSearchCallOutput,
 )
 
 # Leave out Venice's default system prompt. A model's own prompt template can
@@ -55,6 +77,35 @@ NO_SYSTEM_PROMPT = VeniceParameters(include_venice_system_prompt=False)
 #: Exit code for "skipped": no chat model in the catalog, or the account has
 #: no access to the Responses API.
 EXIT_SKIPPED = 77
+
+#: Strict structured output: every property required, no others allowed.
+ORDER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "order_id": {"type": "integer"},
+        "quantity": {"type": "integer"},
+        "city": {"type": "string"},
+    },
+    "required": ["order_id", "quantity", "city"],
+    "additionalProperties": False,
+}
+EXPECTED_ORDER = {"order_id": 1842, "quantity": 3, "city": "Oslo"}
+
+#: An invented value: an answer that states it can only have come from the tool.
+LOCKER_CODE = "QX-7319"
+
+LOCKER_TOOL = Tool(
+    type="function",
+    function=ToolFunction(
+        name="lookup_locker_code",
+        description="Look up the locker code of a gym member.",
+        parameters={
+            "type": "object",
+            "properties": {"member": {"type": "string", "description": "The member's name."}},
+            "required": ["member"],
+        },
+    ),
+)
 
 
 def extract_text(response: ResponsesResponse) -> str:
@@ -211,7 +262,7 @@ async def structured_input_responses(client: VeniceClient, model: str) -> bool:
     return True
 
 
-async def reasoning_output_blocks(client: VeniceClient) -> bool | None:
+async def reasoning_output_blocks(client: VeniceClient, e2ee_models: list[str]) -> bool | None:
     """Read the ``reasoning`` block a reasoning model returns before its answer.
 
     The model comes from the resolver's default ranking for reasoning models,
@@ -219,13 +270,14 @@ async def reasoning_output_blocks(client: VeniceClient) -> bool | None:
     ``reasoning`` block on ``/responses`` even when it bills reasoning tokens;
     the check below tells that case apart from a model that did not reason.
 
-    Returns ``None`` (section skipped) when the catalog has no reasoning model.
+    Returns ``None`` (section skipped) when the catalog has no reasoning model,
+    or the chosen backend reasons without returning the block.
     """
     print("\n🧠 Reasoning Output Blocks")
     print("-" * 40)
 
     try:
-        model = await client.models.resolve_chat(require_reasoning=True)
+        model = await client.models.resolve_chat(require_reasoning=True, exclude_models=e2ee_models)
     except NoMatchingModelError as e:
         print(f"Section skipped: no reasoning model in the catalog ({e})")
         return None
@@ -274,11 +326,12 @@ async def reasoning_output_blocks(client: VeniceClient) -> bool | None:
     details = response.usage.output_tokens_details if response.usage else None
     reasoning_tokens = (details.reasoning_tokens or 0) if details else 0
     if not reasoning and reasoning_tokens:
+        # The SDK parsed what came back; this backend does not send the block.
         print(
-            f"\n❌ {model} billed {reasoning_tokens} reasoning tokens but /responses "
-            "returned no reasoning block (a server-side gap, not an SDK parse issue)"
+            f"Section skipped: {model} billed {reasoning_tokens} reasoning tokens but "
+            "/responses returned no reasoning block"
         )
-        return False
+        return None
     if not reasoning:
         print("\n❌ The reasoning model returned no reasoning block and no reasoning tokens")
         return False
@@ -323,6 +376,333 @@ async def truncated_response(client: VeniceClient, model: str) -> bool:
     return True
 
 
+async def text_format_structured_output(
+    client: VeniceClient, e2ee_models: list[str]
+) -> bool | None:
+    """Ask for JSON that follows a schema through ``text.format``.
+
+    The JSON comes back as a string in the message text, so it is parsed here.
+    A model without structured output support answers with a 400, which is why
+    the catalog is filtered on it. Returns ``None`` when no model qualifies.
+    """
+    print("\n📐 Structured Output (text.format)")
+    print("-" * 40)
+
+    try:
+        model = await client.models.resolve_chat(
+            require_response_schema=True,
+            exclude_reasoning=True,
+            exclude_models=e2ee_models,
+            prefer="cheapest",
+        )
+    except NoMatchingModelError as e:
+        print(f"Section skipped: no non-reasoning model supports structured output ({e})")
+        return None
+    print(f"🤖 Using model: {model}")
+
+    max_output_tokens = 256
+    response = await client.responses.create(
+        model=model,
+        input="Extract the order details: order 1842 ships 3 lanterns to Oslo.",
+        max_output_tokens=max_output_tokens,
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "order",
+                "schema": ORDER_SCHEMA,
+                "strict": True,
+            }
+        },
+        venice_parameters=NO_SYSTEM_PROMPT,
+    )
+
+    text = extract_text(response)
+    print(f"🗣️ Raw message text: {text}")
+    if not finished(response, text, max_output_tokens):
+        return False
+    try:
+        order = json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"\n❌ The message text is not valid JSON: {e}")
+        return False
+    if order != EXPECTED_ORDER:
+        print(f"\n❌ Expected {EXPECTED_ORDER}, got {order}")
+        return False
+    print("✅ Parsed JSON matches the schema and the order in the prompt")
+    return True
+
+
+async def instructions_parameter(client: VeniceClient, e2ee_models: list[str]) -> bool | None:
+    """Pass system instructions through ``instructions`` instead of ``input``.
+
+    Returns ``None`` when the catalog has no suitable model.
+    """
+    print("\n📜 Instructions")
+    print("-" * 40)
+
+    try:
+        model = await client.models.resolve_chat(
+            exclude_reasoning=True, exclude_models=e2ee_models, prefer="cheapest"
+        )
+    except NoMatchingModelError as e:
+        print(f"Section skipped: no non-reasoning chat model in the catalog ({e})")
+        return None
+    print(f"🤖 Using model: {model}")
+
+    max_output_tokens = 64
+    response = await client.responses.create(
+        model=model,
+        input="What is the capital of Japan?",
+        instructions="Reply with only the city name, in uppercase letters.",
+        max_output_tokens=max_output_tokens,
+        venice_parameters=NO_SYSTEM_PROMPT,
+    )
+
+    text = extract_text(response)
+    print(f"🗣️ Assistant: {text}")
+    if not finished(response, text, max_output_tokens):
+        return False
+    # Left to itself a model writes the name in mixed case, so the capitals show
+    # the instructions were applied. Some models still wrap the word in a sentence.
+    if "TOKYO" not in text or "Tokyo" in text:
+        print("\n❌ Expected TOKYO in capitals, as the instructions ask")
+        return False
+    return True
+
+
+async def streaming_response(client: VeniceClient, e2ee_models: list[str]) -> bool | None:
+    """Stream a response: text deltas, then the full response on the last event.
+
+    Events share one model and keep their payload as extra fields, so they are
+    read from ``event.model_extra``. A stream ends with ``response.completed``,
+    ``response.incomplete`` or ``response.failed``, whose ``response`` field
+    holds the same object a non-streaming call returns, usage included.
+
+    Returns ``None`` when the catalog has no suitable model.
+    """
+    print("\n🌊 Streaming")
+    print("-" * 40)
+
+    try:
+        model = await client.models.resolve_chat(
+            exclude_reasoning=True, exclude_models=e2ee_models, prefer="cheapest"
+        )
+    except NoMatchingModelError as e:
+        print(f"Section skipped: no non-reasoning chat model in the catalog ({e})")
+        return None
+    print(f"🤖 Using model: {model}")
+
+    max_output_tokens = 128
+    stream = await client.responses.create(
+        model=model,
+        input="Name the three primary colors of light in one sentence.",
+        max_output_tokens=max_output_tokens,
+        venice_parameters=NO_SYSTEM_PROMPT,
+        stream=True,
+    )
+
+    deltas: list[str] = []
+    event_count = 0
+    last_type: str | None = None
+    payload: object = None
+    print("🗣️ Assistant: ", end="", flush=True)
+    async for event in stream:
+        event_count += 1
+        extra = event.model_extra or {}
+        if event.type == "response.output_text.delta":
+            delta = extra.get("delta")
+            if isinstance(delta, str):
+                print(delta, end="", flush=True)
+                deltas.append(delta)
+        elif event.type in ("response.completed", "response.incomplete", "response.failed"):
+            last_type = event.type
+            payload = extra.get("response")
+    print(f"\n   📦 {event_count} events, {len(deltas)} text deltas, ended with {last_type}")
+
+    if last_type != "response.completed":
+        print("\n❌ The stream did not end with response.completed")
+        return False
+    try:
+        response = ResponsesResponse.model_validate(payload)
+    except ValidationError as e:
+        print(f"\n❌ response.completed carried no readable response: {e}")
+        return False
+
+    text = extract_text(response)
+    print_usage(response)
+    if not finished(response, text, max_output_tokens):
+        return False
+    if "".join(deltas).strip() != text:
+        print("\n❌ The text deltas do not add up to the text of the final response")
+        return False
+    if not all(color in text.lower() for color in ("red", "green", "blue")):
+        print("\n❌ Expected the answer to name red, green and blue")
+        return False
+    return True
+
+
+async def function_tool_round_trip(client: VeniceClient, e2ee_models: list[str]) -> bool | None:
+    """Call a function tool and send its result back for a final answer.
+
+    The endpoint stores nothing, so the second request resends the whole
+    conversation: the user's message, the output blocks of the first response
+    as dicts, and one ``function_call_output`` per call, matched on ``call_id``.
+
+    Returns ``None`` when the catalog has no suitable model.
+    """
+    print("\n🔧 Function Tool Round Trip")
+    print("-" * 40)
+
+    try:
+        model = await client.models.resolve_chat(
+            require_function_calling=True,
+            exclude_reasoning=True,
+            exclude_models=e2ee_models,
+            prefer="cheapest",
+        )
+    except NoMatchingModelError as e:
+        print(f"Section skipped: no non-reasoning model supports function calling ({e})")
+        return None
+    print(f"🤖 Using model: {model}")
+
+    max_output_tokens = 256
+    conversation: list[dict[str, Any]] = [
+        {"role": "user", "content": "What is the locker code of the member named Ada?"}
+    ]
+    first = await client.responses.create(
+        model=model,
+        input=conversation,
+        tools=[LOCKER_TOOL],
+        tool_choice="auto",
+        max_output_tokens=max_output_tokens,
+        venice_parameters=NO_SYSTEM_PROMPT,
+    )
+    summarize_output_blocks(first)
+
+    # A call cut off at the cap would carry truncated JSON arguments.
+    if first.status != "completed" or reached_cap(first, max_output_tokens):
+        print(f"\n❌ The tool-calling turn did not finish: status={first.status}")
+        return False
+    calls = [block for block in first.output if isinstance(block, ResponsesFunctionCallOutput)]
+    if not calls:
+        print(f"\n❌ The model answered without calling the tool: {extract_text(first)!r}")
+        return False
+
+    conversation.extend(block.model_dump(exclude_none=True) for block in first.output)
+    for call in calls:
+        try:
+            arguments = json.loads(call.arguments)
+        except json.JSONDecodeError as e:
+            print(f"\n❌ {call.name} arguments are not valid JSON: {e}")
+            return False
+        print(f"   🔧 {call.name}({arguments})  call_id={call.call_id}")
+        if call.name != "lookup_locker_code" or not isinstance(arguments, dict):
+            print("\n❌ Unexpected tool call")
+            return False
+        if "ada" not in str(arguments.get("member", "")).lower():
+            print("\n❌ Expected the call to ask about Ada")
+            return False
+        conversation.append(
+            {"type": "function_call_output", "call_id": call.call_id, "output": LOCKER_CODE}
+        )
+
+    final = await client.responses.create(
+        model=model,
+        input=conversation,
+        tools=[LOCKER_TOOL],
+        max_output_tokens=max_output_tokens,
+        venice_parameters=NO_SYSTEM_PROMPT,
+    )
+    text = extract_text(final)
+    print(f"🗣️ Assistant: {text}")
+    if not finished(final, text, max_output_tokens):
+        return False
+    # Models may write the hyphen as a typographic one, such as U+2011.
+    if LOCKER_CODE not in re.sub(r"[\u2010-\u2015\u2212]", "-", text):
+        print(f"\n❌ Expected the answer to state the tool's result, {LOCKER_CODE}")
+        return False
+    return True
+
+
+async def web_search_response(client: VeniceClient, e2ee_models: list[str]) -> bool | None:
+    """Let the model search the web with ``web_search=True``.
+
+    The search is billed on top of the tokens, and the results it brings in may
+    add input tokens. Returns ``None`` when no model supports web search.
+    """
+    print("\n🌐 Web Search")
+    print("-" * 40)
+
+    try:
+        model = await client.models.resolve_chat(
+            require_web_search=True,
+            exclude_reasoning=True,
+            exclude_models=e2ee_models,
+            prefer="cheapest",
+        )
+    except NoMatchingModelError as e:
+        print(f"Section skipped: no non-reasoning model supports web search ({e})")
+        return None
+    print(f"🤖 Using model: {model}")
+    print("💸 This section is billed extra: about $0.01 per search request, on top of tokens")
+
+    max_output_tokens = 512
+    response = await client.responses.create(
+        model=model,
+        input="In one or two sentences, what is the latest stable release of Python?",
+        web_search=True,
+        max_output_tokens=max_output_tokens,
+        # VeniceParameters defaults enable_web_search to "off" and
+        # enable_web_citations to False, and sends both, so an instance passed
+        # alongside web_search=True has to set them as well.
+        venice_parameters=VeniceParameters(
+            enable_web_search="on",
+            enable_web_citations=True,
+            include_venice_system_prompt=False,
+        ),
+    )
+    summarize_output_blocks(response)
+
+    text = extract_text(response)
+    print(f"🗣️ Assistant: {text}")
+    print_usage(response)
+
+    searches = [
+        block for block in response.output if isinstance(block, ResponsesWebSearchCallOutput)
+    ]
+    for search in searches:
+        print(f"   🔍 web_search_call: status={search.status}, action={search.action}")
+    annotations = [
+        annotation
+        for block in response.output
+        if isinstance(block, ResponsesMessageOutput)
+        for item in block.content
+        if isinstance(item, ResponsesOutputText)
+        for annotation in item.annotations or []
+    ]
+    print(f"   📎 {len(annotations)} annotation(s) on the answer")
+
+    if not finished(response, text, max_output_tokens):
+        return False
+    # An answer alone cannot show that a search ran; a model can answer this
+    # from memory.
+    if not searches and not annotations:
+        print("\n❌ No web_search_call block or annotation shows that a search ran")
+        return False
+    return True
+
+
+async def list_e2ee_models(client: VeniceClient) -> list[str]:
+    """Return the IDs of the catalog's end-to-end encrypted chat models."""
+    catalog = await client.models.list(type="text")
+    specs = ((model.id, model.model_spec) for model in catalog.data)
+    return [
+        model_id
+        for model_id, spec in specs
+        if isinstance(spec, TextModelSpec) and spec.capabilities and spec.capabilities.supportsE2EE
+    ]
+
+
 async def main() -> int:
     """Run all Responses API demos.
 
@@ -340,9 +720,11 @@ async def main() -> int:
         # The default ranking (not prefer="cheapest") is used here: the
         # truncation demo needs a backend that reports status="incomplete" at
         # the cap, and not every one does (the demo detects that case). The
-        # default ranking never selects E2EE models, which /responses rejects.
+        # default ranking can select E2EE models, which /responses rejects, so
+        # they are excluded by ID.
+        e2ee_models = await list_e2ee_models(client)
         try:
-            model = await client.models.resolve_chat()
+            model = await client.models.resolve_chat(exclude_models=e2ee_models)
         except NoMatchingModelError as e:
             print(f"SKIPPED: no chat model in the catalog ({e})")
             return EXIT_SKIPPED
@@ -351,8 +733,16 @@ async def main() -> int:
         sections = [
             ("basic_responses_create", lambda: basic_responses_create(client, model)),
             ("structured_input_responses", lambda: structured_input_responses(client, model)),
-            ("reasoning_output_blocks", lambda: reasoning_output_blocks(client)),
+            ("reasoning_output_blocks", lambda: reasoning_output_blocks(client, e2ee_models)),
             ("truncated_response", lambda: truncated_response(client, model)),
+            (
+                "text_format_structured_output",
+                lambda: text_format_structured_output(client, e2ee_models),
+            ),
+            ("instructions_parameter", lambda: instructions_parameter(client, e2ee_models)),
+            ("streaming_response", lambda: streaming_response(client, e2ee_models)),
+            ("function_tool_round_trip", lambda: function_tool_round_trip(client, e2ee_models)),
+            ("web_search_response", lambda: web_search_response(client, e2ee_models)),
         ]
         for name, section in sections:
             try:
@@ -360,6 +750,10 @@ async def main() -> int:
             except PermissionDeniedError as e:
                 # The Responses API is beta; a model or account may still
                 # reject it. That is an access condition, not a failure.
+                if name == "basic_responses_create":
+                    # The other demos would be billed attempts at the same endpoint.
+                    print(f"\nSKIPPED: this account has no access to the Responses API (beta): {e}")
+                    return EXIT_SKIPPED
                 print(f"\nSection skipped: {name} is not available on this account: {e}")
                 skipped.append(name)
                 continue
@@ -377,9 +771,6 @@ async def main() -> int:
         print(f"\n❌ {len(failed)} of {len(results)} demos failed: {', '.join(failed)}")
         return 1
 
-    if "basic_responses_create" in skipped:
-        print("\nSKIPPED: this account has no access to the Responses API (beta)")
-        return EXIT_SKIPPED
     if skipped:
         print(f"\n✅ {len(results)} demos passed, {len(skipped)} skipped: {', '.join(skipped)}")
         return 0
@@ -391,6 +782,11 @@ async def main() -> int:
     print("   - Reading typed output blocks (reasoning and message)")
     print("   - status / incomplete_details when max_output_tokens is reached")
     print("   - Inspecting the usage token block")
+    print("   - text.format structured output, parsed and checked")
+    print("   - instructions kept apart from input")
+    print("   - stream=True: text deltas and the final response")
+    print("   - A function tool round trip with function_call_output")
+    print("   - web_search=True, read back from the output blocks")
     return 0
 
 

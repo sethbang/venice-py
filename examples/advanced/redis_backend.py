@@ -44,6 +44,7 @@ import importlib.util
 import os
 import sys
 from typing import cast
+from urllib.parse import urlsplit
 
 # Exit code for "a prerequisite is missing", so a test runner can tell a skip
 # from a failure.
@@ -92,19 +93,34 @@ def resolve_redis_url() -> str:
     return DEFAULT_REDIS_URL
 
 
+def redis_endpoint(redis_url: str) -> str:
+    """Where a Redis URL points, for printing: host and port, or a socket path.
+
+    The URL itself can carry a password, so it is never printed.
+    """
+    try:
+        parts = urlsplit(redis_url)
+        if parts.scheme == "unix":
+            return parts.path
+        return f"{parts.hostname or 'localhost'}:{parts.port or 6379}"
+    except ValueError:
+        return "an unparseable URL"
+
+
 def assert_redis_reachable(redis_url: str) -> redis.Redis:
     """Ping Redis up-front; exit with a SKIPPED message if it is unreachable.
 
     Returns a sync ``redis.Redis`` client used later to inspect the keys the
     SDK wrote.
     """
-    print(f"Checking Redis connectivity at {redis_url} ...")
+    endpoint = redis_endpoint(redis_url)
+    print(f"Checking Redis connectivity at {endpoint} ...")
     client = redis.Redis.from_url(redis_url, socket_connect_timeout=2.0)
     try:
         client.ping()
     except RedisError as exc:
         print(
-            f"\nSKIPPED: cannot reach Redis at {redis_url}: {exc}\n"
+            f"\nSKIPPED: cannot reach Redis at {endpoint}: {exc}\n"
             "\nStart a local Redis (Docker):\n"
             "    docker run -d --name venice-redis -p 6379:6379 redis:7-alpine\n"
             f"\nOr point one of {', '.join(REDIS_URL_ENV_VARS)} at a reachable instance."
@@ -151,7 +167,9 @@ async def run_redis_backed_request(redis_url: str, verifier: redis.Redis) -> boo
         print(f"   WARNING: {warning}")
     if validation.errors:
         for err in validation.errors:
-            print(f"   ERROR: {err}", file=sys.stderr)
+            # A validator message can quote the URL, password included.
+            message = str(err).replace(redis_url, redis_endpoint(redis_url))
+            print(f"   ERROR: {message}", file=sys.stderr)
         return False
 
     client = VeniceClientFactory.create_client(

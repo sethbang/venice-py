@@ -38,6 +38,9 @@ from venice_ai.middleware import create_retry_middleware
 # Bill only the prompts shown here, not the system prompt Venice adds by default.
 OWN_PROMPT_ONLY = VeniceParameters(include_venice_system_prompt=False)
 
+# Completion budget for each "count from 1 to n" request.
+COUNT_MAX_TOKENS = 32
+
 PRODUCTION_SNIPPET = """\
 import os
 from venice_ai import VeniceClientFactory, create_production_config
@@ -80,10 +83,16 @@ def connection_pooling_optimization() -> bool:
     return True
 
 
-def check_completion(label: str, response: ChatCompletionResponse) -> bool:
-    """Fail a non-streaming response that was truncated or came back empty."""
+def check_completion(label: str, response: ChatCompletionResponse, max_tokens: int) -> bool:
+    """Fail a non-streaming response that was truncated or came back empty.
+
+    Some backends report ``finish_reason="stop"`` at the token cap, so a reply
+    that used all of *max_tokens*, or has no usage to check, counts as truncated.
+    """
     finish = response.choices[0].finish_reason
-    if finish == "length" or not (response.text or "").strip():
+    usage = response.usage
+    capped = usage is None or usage.completion_tokens >= max_tokens
+    if capped or finish == "length" or not (response.text or "").strip():
         print(f"   ❌ {label}: truncated or empty (finish_reason={finish})")
         return False
     return True
@@ -91,7 +100,7 @@ def check_completion(label: str, response: ChatCompletionResponse) -> bool:
 
 def check_count(label: str, response: ChatCompletionResponse, n: int) -> bool:
     """Fail a "count from 1 to n" answer that is cut off or counts wrongly."""
-    if not check_completion(label, response):
+    if not check_completion(label, response, COUNT_MAX_TOKENS):
         return False
     digits = re.findall(r"\d", response.text or "")
     if digits != [str(i) for i in range(1, n + 1)]:
@@ -184,7 +193,7 @@ async def concurrent_requests_pattern() -> bool:
             return await client.chat.completions.create(
                 model=chat_model,
                 messages=[UserMessage(content=f"Count from 1 to {index}, digits only.")],
-                max_completion_tokens=32,
+                max_completion_tokens=COUNT_MAX_TOKENS,
                 venice_parameters=OWN_PROMPT_ONLY,
             )
 
@@ -328,7 +337,7 @@ async def streaming_for_large_responses() -> bool:
         print(f"   Time to first token: {ns_total:.2f}s (== time to complete)")
         print(f"   Characters returned: {len(response.text or '')}")
         print(f"   finish_reason:       {ns_finish}")
-        ok = check_completion("non-streaming", response)
+        ok = check_completion("non-streaming", response, max_tokens)
 
         print("\n2. Streaming (progressive updates):")
         start = time.perf_counter()

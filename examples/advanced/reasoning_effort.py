@@ -35,9 +35,11 @@ checked on any model (``"none"`` and ``enabled=False`` turn thinking off,
 every thinking tier thinks and answers correctly) and reports the reasoning
 tokens each tier used as a measurement rather than asserting an order.
 
-Answers and reasoning traces are reported separately. A truncated answer
-(``finish_reason == "length"``) or an empty one fails its section, and the
-script exits 1 if any section failed.
+Answers and reasoning traces are reported separately. A truncated answer or an
+empty one fails its section, and the script exits 1 if any section failed. Some
+backends report ``finish_reason="stop"`` at the token cap, so a reply counts as
+truncated if it reports ``"length"``, used the whole ``MAX_TOKENS`` budget or
+carries no usage to check.
 """
 
 import asyncio
@@ -112,10 +114,12 @@ class Outcome:
     reasoning: str
     completion_tokens: int
     reasoning_tokens: int | None
+    capped: bool
+    has_trace: bool
 
     @property
     def ok(self) -> bool:
-        return self.finish_reason != "length" and bool(self.answer.strip())
+        return not self.capped and self.finish_reason != "length" and bool(self.answer.strip())
 
     @property
     def thought(self) -> bool:
@@ -136,6 +140,8 @@ def outcome(label: str, response: ChatCompletionResponse, elapsed: float) -> Out
         reasoning=str(message.reasoning_content or ""),
         completion_tokens=usage.completion_tokens if usage else 0,
         reasoning_tokens=getattr(details, "reasoning_tokens", None),
+        capped=usage is None or usage.completion_tokens >= MAX_TOKENS,
+        has_trace=bool(response.thinking_blocks),
     )
 
 
@@ -413,6 +419,14 @@ async def combining_with_venice_parameters(
         )
     if "<think>" in visible.answer or "<think>" in stripped.answer:
         log("   A <think> block appeared inside an answer.")
+
+    # The API documents only the removal of <think> blocks from the text. This
+    # check is stricter: a model that still returns reasoning_content fails too.
+    if stripped.has_trace:
+        log("   ❌ A reasoning trace is still present despite strip_thinking_response=True")
+        ok = False
+    else:
+        log("   ✅ No reasoning trace in the stripped response")
 
     log("\n💡 Key distinctions:")
     log("   • reasoning_effort asks the model for a thinking depth")

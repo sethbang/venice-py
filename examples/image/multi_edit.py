@@ -21,6 +21,8 @@ lanterns) and reused by every demo.
 ``multi_edit()`` returns raw image **bytes**; the examples save them with the
 extension detected from the bytes. Outputs are written to
 ``examples/results/``.
+
+Each run makes 6 paid calls: 3 generations for the inputs and 3 multi-image edits.
 """
 
 import asyncio

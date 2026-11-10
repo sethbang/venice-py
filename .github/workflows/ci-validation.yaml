@@ -314,6 +314,11 @@ jobs:
       - name: Run pyright on src/
         run: poetry run pyright src/
 
+      # examples.yml runs only when examples/ changes, so this is what catches
+      # an SDK change that breaks an example.
+      - name: Run pyright on examples/
+        run: poetry run pyright examples/
+
   # ---------------------------------------------------------------------------
   # sbom — CycloneDX JSON SBOM as 90-day artifact
   # ---------------------------------------------------------------------------

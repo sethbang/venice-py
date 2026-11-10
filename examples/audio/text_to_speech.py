@@ -12,6 +12,9 @@ voices come from ``model_spec.voices`` and formats from
 model ``resolve_tts(prefer="cheapest")`` returns. Each file is checked for the
 container signature of the format that was requested (``_helpers.matches_format``,
 shared with the other audio examples).
+
+With no TTS model in the catalog the example skips and exits 77. With no ASR model
+to transcribe it back, only the multi-language demo is skipped.
 """
 
 import asyncio
@@ -22,7 +25,7 @@ import time
 import wave
 from pathlib import Path
 
-from venice_ai import VeniceClient
+from venice_ai import NoMatchingModelError, VeniceClient
 from venice_ai.exceptions import VeniceError
 from venice_ai.types.api import TtsModelSpec
 
@@ -61,6 +64,9 @@ NATIVE_TEXT: dict[str, tuple[str, str]] = {
     "Italian": ("it", "Ciao, come stai oggi? Ti auguro una buona giornata."),
     "Portuguese": ("pt", "Olá, como você está hoje? Espero que tenha um bom dia."),
 }
+
+#: Exit status for a run that skipped because a prerequisite is missing.
+EXIT_SKIPPED = 77
 
 #: Paths written by this run, listed at the end on success.
 WRITTEN: list[Path] = []
@@ -353,7 +359,7 @@ async def multilingual_speech(client: VeniceClient, tts: TtsModel) -> bool | Non
     speech in the target language.
 
     Returns ``None`` when the model has no voice in a language this demo has
-    sample text for.
+    sample text for, or the catalog has no ASR model to transcribe it back.
     """
     print("\n🌍 Multi-lingual TTS with a native voice")
     print("-" * 40)
@@ -375,6 +381,8 @@ async def multilingual_speech(client: VeniceClient, tts: TtsModel) -> bool | Non
     print("ℹ️ The catalog does not say which models read the hint; here the voice sets the language")
     print(f"📝 Text: {text}")
     try:
+        # Before the speech is billed, since the check depends on it.
+        asr_model = await client.models.resolve_asr(prefer="cheapest")
         response = await client.audio.create_speech(
             model=tts.id,
             input=text,
@@ -389,8 +397,10 @@ async def multilingual_speech(client: VeniceClient, tts: TtsModel) -> bool | Non
         WRITTEN.append(filename)
         print(f"✅ Saved: {filename} ({len(response.content)} bytes)")
 
-        asr_model = await client.models.resolve_asr(prefer="cheapest")
         transcript = await client.audio.transcribe(file=filename, model=asr_model, language=code)
+    except NoMatchingModelError as e:
+        print(f"Section skipped: multilingual speech: no ASR model to check it with ({e})")
+        return None
     except VeniceError as e:
         print(f"❌ Error generating multi-lingual speech: {e}")
         return False
@@ -410,13 +420,18 @@ async def main() -> int:
     """Run all text-to-speech examples.
 
     Returns ``0`` only if every demo succeeded or was skipped for lack of a
-    matching voice, ``1`` otherwise.
+    matching voice or ASR model, ``77`` when the catalog has no TTS model, and
+    ``1`` otherwise.
     """
     print("🚀 Venice AI Text-to-Speech Examples")
     print("=" * 60)
 
     async with VeniceClient() as client:
-        tts = await load_tts_model(client)
+        try:
+            tts = await load_tts_model(client)
+        except NoMatchingModelError as e:
+            print(f"\nSKIPPED: no TTS model to generate speech with ({e})")
+            return EXIT_SKIPPED
         print(f"📍 Using TTS model: {tts.id}")
         print(f"🎭 {len(tts.spec.voices or [])} voices, default format {tts.default_format!r}\n")
 

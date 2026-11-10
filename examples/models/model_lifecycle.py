@@ -3,7 +3,7 @@
 Venice AI SDK - Model Lifecycle & Capability Metadata
 =====================================================
 
-Newer fields on the model catalog let you inspect a model's *lifecycle* and
+Fields on the model catalog let you inspect a model's *lifecycle* and
 *capability envelope* without a trial-and-error API call. This example reads
 them straight off ``client.models.list(...)`` and the per-model lookups
 ``client.models.get(...)`` / ``client.models.get_capabilities(...)``:

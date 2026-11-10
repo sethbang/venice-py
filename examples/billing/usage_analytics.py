@@ -14,15 +14,19 @@ This example demonstrates how to retrieve and analyze billing data using the Ven
 - Working with cursor pagination by hand (client.billing.get_usage_history)
 - Exporting a ledger window as CSV pages (client.billing.iter_usage_history_csv)
 
+Requires an ADMIN key in VENICE_API_KEY. Billing endpoints are admin-only, so with
+any other valid key the example prints ``SKIPPED:`` and exits 77.
+
 Ledger conventions worth knowing before you add anything up:
 - usage-history is returned in ASCENDING timestamp order, so the newest entries
   are at the END of the walk, not the start.
 - Debits (spend) are negative amounts; credits (top-ups, grants, refunds) are
   positive. Summing both together gives a net figure, not your spend.
-- Entries come in three currencies. USD and BUNDLED_CREDITS are both
-  USD-denominated (bundled credits are spent before USD), DIEM is separate.
-  A "USD spend" figure that only sums ``currency == "USD"`` misses the
-  bundled-credit share.
+- Entries come in several currencies: USD, BUNDLED_CREDITS, DIEM and
+  EARNED_CREDITS, plus VCU on historical rows. USD and BUNDLED_CREDITS are both
+  USD-denominated (bundled credits are spent before USD); the others are
+  reported on their own lines here. A "USD spend" figure that only sums
+  ``currency == "USD"`` misses the bundled-credit share.
 - Usage analytics reports gross USD-denominated spend: USD plus
   bundled-credit debits, with refunds not netted out. The ledger's debits in
   those two currencies add up to it; its credits are a separate figure.
@@ -162,12 +166,37 @@ def _spend_by_currency(entries: list[BillingUsageEntry]) -> dict[str, float]:
     return dict(spend)
 
 
+def _other_currencies(by_currency: dict[str, float]) -> list[str]:
+    """Currencies in ``by_currency`` that no USD-denominated figure includes."""
+    return sorted(set(by_currency) - set(USD_DENOMINATED))
+
+
 def _request_ids(entries: list[BillingUsageEntry]) -> set[str]:
     return {
         e.inferenceDetails.requestId
         for e in entries
         if e.inferenceDetails is not None and e.inferenceDetails.requestId
     }
+
+
+def _request_spend(
+    entries: list[BillingUsageEntry], currencies: tuple[str, ...]
+) -> tuple[float, int]:
+    """Inference debits in ``currencies`` and how many requests those debits belong to.
+
+    Both figures come from the same lines, so dividing them gives an average per
+    charged request. Debits with no request id and requests paid in other
+    currencies are in neither.
+    """
+    lines = [
+        e
+        for e in entries
+        if e.currency in currencies
+        and e.amount < 0
+        and e.inferenceDetails is not None
+        and e.inferenceDetails.requestId
+    ]
+    return -sum(e.amount for e in lines), len(_request_ids(lines))
 
 
 def get_recent_usage(entries: list[BillingUsageEntry]) -> bool:
@@ -194,8 +223,8 @@ def get_recent_usage(entries: list[BillingUsageEntry]) -> bool:
         print(f"      of which {currency}: ${by_currency.get(currency, 0.0):,.4f}")
     print(f"   💳 Credits (top-ups, refunds): ${credits:,.4f}")
     print(f"   ⚖️ Net change:        {_usd(credits - spend)}")
-    if by_currency.get("DIEM"):
-        print(f"   💎 DIEM spend: {by_currency['DIEM']:,.4f} DIEM")
+    for currency in _other_currencies(by_currency):
+        print(f"   🪙 Spend in {currency}: {by_currency[currency]:,.4f} {currency}")
     print(f"   🧾 Distinct inference requests: {len(_request_ids(entries)):,}")
 
     sku_spend: dict[str, float] = defaultdict(float)
@@ -219,7 +248,10 @@ def get_recent_usage(entries: list[BillingUsageEntry]) -> bool:
     for i, entry in enumerate(reversed(entries[-5:]), 1):
         print(f"\n   {i}. {entry.timestamp}")
         print(f"      🏷️ SKU: {entry.sku}")
-        print(f"      💰 Amount: {_usd(entry.amount, 6)} {entry.currency}")
+        amount = (
+            _usd(entry.amount, 6) if entry.currency in USD_DENOMINATED else f"{entry.amount:+,.6f}"
+        )
+        print(f"      💰 Amount: {amount} {entry.currency}")
         print(f"      📊 Units: {entry.units:,.6g} @ ${entry.pricePerUnitUsd:,.6g}/unit")
         if entry.notes:
             print(f"      📝 Notes: {entry.notes}")
@@ -277,14 +309,20 @@ def analyze_inference_details(entries: list[BillingUsageEntry]) -> bool:
         assert details is not None
         tokens_in = int(details.promptTokens or 0)
         tokens_out = int(details.completionTokens or 0)
-        cost = -sum(line.amount for line in lines if line.currency in USD_DENOMINATED)
+        # A request can be charged in any ledger currency, or split across several.
+        costs: dict[str, float] = defaultdict(float)
+        for line in lines:
+            costs[line.currency] -= line.amount
         print(f"\n   {i}. {lines[-1].timestamp}  ({rid})")
         print(f"      🧾 Ledger lines: {', '.join(line.sku for line in lines)}")
         print(f"      📥 Input tokens:  {tokens_in:,}")
         print(f"      📤 Output tokens: {tokens_out:,}")
-        print(f"      💰 Request cost:  ${cost:,.6f} USD")
-        if tokens_in + tokens_out:
-            print(f"      💱 Cost per 1M tokens: ${cost / (tokens_in + tokens_out) * 1e6:,.4f}")
+        charged = " + ".join(f"{amount:,.6f} {currency}" for currency, amount in costs.items())
+        print(f"      💰 Request cost:  {charged}")
+        if len(costs) == 1 and tokens_in + tokens_out:
+            currency, cost = next(iter(costs.items()))
+            rate = cost / (tokens_in + tokens_out) * 1e6
+            print(f"      💱 Cost per 1M tokens: {rate:,.4f} {currency}")
 
     return True
 
@@ -442,12 +480,24 @@ def cost_analysis_by_timeframe(entries: list[BillingUsageEntry], end: datetime) 
             continue
 
         spend = _usd_spend(window)
-        n_requests = len(_request_ids(window))
         print(f"   💸 USD-denominated spend: ${spend:,.4f}  ({len(window):,} ledger lines)")
-        print(f"   🧾 Distinct inference requests: {n_requests:,}")
-        if n_requests:
-            print(f"   📊 Average spend per request: ${spend / n_requests:,.6f}")
+        print(f"   🧾 Distinct inference requests: {len(_request_ids(window)):,}")
+        usd_requests_spend, usd_requests = _request_spend(window, USD_DENOMINATED)
+        if usd_requests:
+            print(
+                f"   📊 Average USD-denominated spend per charged request: "
+                f"${usd_requests_spend / usd_requests:,.6f}  (across {usd_requests:,} request(s))"
+            )
         print(f"   📊 Daily average: ${spend / days:,.4f}")
+        by_currency = _spend_by_currency(window)
+        for currency in _other_currencies(by_currency):
+            print(f"   🪙 Spend in {currency}: {by_currency[currency]:,.4f} {currency}")
+            other_spend, other_requests = _request_spend(window, (currency,))
+            if other_requests:
+                print(
+                    f"      Average per charged request: {other_spend / other_requests:,.6f} "
+                    f"{currency}  (across {other_requests:,} request(s))"
+                )
 
     return True
 
@@ -455,10 +505,12 @@ def cost_analysis_by_timeframe(entries: list[BillingUsageEntry], end: datetime) 
 async def show_balance() -> BillingBalanceResponse | None:
     """Display the account's balance as ``billing.get_balance()`` reports it.
 
-    This hits the stable ``GET /billing/balance`` endpoint and reports the USD
-    and DIEM balances plus the DIEM epoch allocation. Every field on
-    :class:`BillingBalanceResponse` is optional, so guard before dereferencing.
-    Returns the response, or ``None`` when the request failed.
+    This hits the stable ``GET /billing/balance`` endpoint and reports the USD,
+    DIEM, bundled-credit and earned-credit balances plus the DIEM epoch
+    allocation. Every field on :class:`BillingBalanceResponse` is optional, so
+    guard before dereferencing. The two credit balances are not typed fields on
+    the model, so they are read from ``model_extra``. Returns the response, or
+    ``None`` when the request failed.
 
     This is the ACCOUNT balance. ``client.api_keys.get_rate_limits().data.balances``
     and the ``x-venice-balance-usd`` response header (``response.balance_info``)
@@ -495,6 +547,14 @@ async def show_balance() -> BillingBalanceResponse | None:
             print(
                 f"   💎 DIEM credit left this epoch: {balance.balances.diem:,.4f} DIEM (1 DIEM = $1)"
             )
+        extra = balance.balances.model_extra or {}
+        for label, field in (
+            ("Bundled credits", "bundledCredits"),
+            ("Earned credits", "earnedCredits"),
+        ):
+            amount = extra.get(field)
+            if isinstance(amount, int | float):
+                print(f"   🎁 {label} left: {amount:,.4f}")
     else:
         print("   ℹ️ No per-currency balance breakdown returned")
 

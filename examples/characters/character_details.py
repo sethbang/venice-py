@@ -24,9 +24,9 @@ programmatic requests.
 The live chat in the integration section is the only billed call here.
 
 Exit status: ``0`` when every demo passed, ``1`` otherwise. If the catalog has
-no chat model to fall back on, the live chat prints ``Section skipped:``, the
-free lookups still decide the result, and the closing summary lists only what
-actually ran.
+no chat model to fall back on within budget, the live chat prints
+``Section skipped:``, the free lookups still decide the result, and the closing
+summary lists only what actually ran.
 """
 
 import asyncio
@@ -49,17 +49,18 @@ ADULT_TAGS = {"adult", "nsfw", "18"}
 #: Room for reasoning models, which spend part of the budget thinking.
 MAX_COMPLETION_TOKENS = 1500
 
-#: The most this demo will spend on its one chat request, in USD: one cent, a
-#: demo-sized budget set by policy rather than by any one model's price. A
-#: character can name any catalog model, so the request is priced with
-#: ``estimate_cost()`` (prompt plus a full ``MAX_COMPLETION_TOKENS`` reply)
-#: before it is sent; over budget, the demo chats on the cheapest model
-#: instead. At this token cap one cent covers models listing up to about $6.67
-#: per million output tokens, and the run prints how many routable catalog
-#: models the budget admits for this exact request, so its reach is visible.
-#: The character's persona prompt is added server-side; the estimate's
-#: allowance for Venice's system prompt covers it, and the billed prompt
-#: tokens are printed next to the estimate to show that.
+#: The estimated budget for this demo's one chat request, in USD: one cent, a
+#: demo-sized figure set by policy rather than by any one model's price. It is
+#: an estimated budget, not a guarantee, because the persona's real size is only
+#: known once the request is billed. A character can name any catalog model, so
+#: the request is priced before it is sent, with every prompt token from
+#: ``estimate_cost()`` at the model's full input rate (see :func:`request_budget_usd`)
+#: plus a full ``MAX_COMPLETION_TOKENS`` reply. Over budget, the demo chats on the
+#: cheapest model instead, and does not chat if that is over budget too. At this
+#: token cap one cent cannot cover a model listing more than about $6.67 per
+#: million output tokens, and the run prints how many routable catalog models
+#: the budget admits for this exact request, so its reach is visible. The billed
+#: prompt tokens are printed next to the estimate, to show how close it came.
 MAX_REQUEST_USD = Decimal("0.01")
 
 
@@ -219,6 +220,27 @@ def _list_price(entry: ModelResponse, key: str) -> Decimal | None:
     return Decimal(str(usd)) if isinstance(usd, int | float) else None
 
 
+def _full_rate_usd(prompt_tokens: int, entry: ModelResponse) -> Decimal | None:
+    """``prompt_tokens`` at the listed input rate plus a full reply, if the model lists both."""
+    input_usd, output_usd = _list_price(entry, "input"), _list_price(entry, "output")
+    if input_usd is None or output_usd is None:
+        return None
+    return (prompt_tokens * input_usd + MAX_COMPLETION_TOKENS * output_usd) / 10**6
+
+
+def request_budget_usd(estimate: ChatCostEstimate, entry: ModelResponse) -> Decimal:
+    """The figure a request is compared with ``MAX_REQUEST_USD`` by.
+
+    ``estimate_cost()`` prices its system-prompt allowance at the cached rate,
+    which suits Venice's shared system prompt. A character's persona is added
+    server-side and bills at the full input rate, so the allowance is priced
+    that way here. The larger figure is kept because
+    ``estimate_cost()`` also applies any higher rate tier for long prompts.
+    """
+    full_rate = _full_rate_usd(estimate.prompt_tokens, entry)
+    return estimate.total_cost_usd if full_rate is None else max(estimate.total_cost_usd, full_rate)
+
+
 def budget_reach(estimate: ChatCostEstimate, text_models: dict[str, ModelResponse]) -> str:
     """How many routable, priced text models fit ``MAX_REQUEST_USD`` for this request.
 
@@ -227,13 +249,12 @@ def budget_reach(estimate: ChatCostEstimate, text_models: dict[str, ModelRespons
     """
     fits = priced = 0
     for model_id, entry in text_models.items():
-        input_usd, output_usd = _list_price(entry, "input"), _list_price(entry, "output")
         if model_status(model_id, text_models) is not None:
             continue
-        if input_usd is None or output_usd is None:
+        cost = _full_rate_usd(estimate.prompt_tokens, entry)
+        if cost is None:
             continue
         priced += 1
-        cost = (estimate.prompt_tokens * input_usd + MAX_COMPLETION_TOKENS * output_usd) / 10**6
         fits += cost <= MAX_REQUEST_USD
     return f"${MAX_REQUEST_USD} admits {fits} of {priced} routable priced text models"
 
@@ -243,19 +264,18 @@ async def choose_chat_model(
     char: Character,
     text_models: dict[str, ModelResponse],
     messages: list[UserMessage],
-) -> tuple[str, str, ChatCostEstimate | None]:
+) -> tuple[str, str, ChatCostEstimate]:
     """Pick the model for a character chat and say why.
 
     The character's own model is used when the catalog serves it and the
-    request's worst-case estimate fits ``MAX_REQUEST_USD``. Otherwise the
-    cheapest chat model is used. Returns ``(model, reason, estimate)``, where
-    ``estimate`` prices the character's own model when it could be priced.
+    request's estimated cost fits ``MAX_REQUEST_USD``. Otherwise the cheapest
+    chat model is used, under the same budget. Returns ``(model, reason,
+    estimate)``, where ``estimate`` prices the returned model.
 
     Raises:
         NoMatchingModelError: The fallback is needed and the catalog has no
-            chat model that answers directly.
+            chat model that answers directly, or that model is over budget too.
     """
-    estimate: ChatCostEstimate | None = None
     status = model_status(char.modelId, text_models)
     if status is not None:
         reason = f"its modelId is {status}"
@@ -269,12 +289,27 @@ async def choose_chat_model(
         except ValueError as e:  # the catalog has no token price for it
             reason = f"its modelId cannot be priced ({e})"
         else:
-            cost = estimate.total_cost_usd
+            cost = request_budget_usd(estimate, text_models[char.modelId])
             if cost <= MAX_REQUEST_USD:
-                return char.modelId, f"its own modelId, estimated ≤ ${cost:.4f}", estimate
-            reason = f"its modelId would cost up to ${cost:.4f}, over ${MAX_REQUEST_USD}"
+                return char.modelId, f"its own modelId, estimated at ${cost:.4f}", estimate
+            reason = f"its modelId is estimated at ${cost:.4f}, over ${MAX_REQUEST_USD}"
     fallback = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
-    return fallback, f"cheapest direct-answer model instead: {reason}", estimate
+    fallback_estimate = await client.chat.completions.estimate_cost(
+        model=fallback,
+        messages=messages,
+        expected_completion_tokens=MAX_COMPLETION_TOKENS,
+    )
+    entry = text_models.get(fallback)
+    cost = (
+        fallback_estimate.total_cost_usd
+        if entry is None
+        else request_budget_usd(fallback_estimate, entry)
+    )
+    if cost > MAX_REQUEST_USD:
+        raise NoMatchingModelError(
+            f"{fallback} is estimated at ${cost:.4f}, over ${MAX_REQUEST_USD}"
+        )
+    return fallback, f"cheapest direct-answer model instead: {reason}", fallback_estimate
 
 
 @dataclass
@@ -282,10 +317,8 @@ class IntegrationResult:
     """What the integration demo did, so the summary claims only what ran."""
 
     ok: bool
-    #: The live character chat was sent and checked.
+    #: The live character chat was priced, sent and checked.
     chat_ran: bool = False
-    #: The chat request was priced with ``estimate_cost()`` before sending.
-    priced: bool = False
 
 
 async def advanced_character_integration(client: VeniceClient) -> IntegrationResult:
@@ -304,7 +337,7 @@ async def advanced_character_integration(client: VeniceClient) -> IntegrationRes
         return IntegrationResult(ok=False)
 
     ok = True
-    chat_ran = priced = False
+    chat_ran = False
 
     # Pattern 1: chat on the character's own model, checked against the catalog
     # and priced before the request is sent.
@@ -313,7 +346,6 @@ async def advanced_character_integration(client: VeniceClient) -> IntegrationRes
     messages = [UserMessage(content="In two sentences, what can you help me with?")]
     try:
         model, why, estimate = await choose_chat_model(client, char, text_models, messages)
-        priced = estimate is not None
         # Only the character is set. include_venice_system_prompt=False is not
         # sent: in a character chat the billed prompt is the same with or
         # without it, and the persona is kept either way.
@@ -339,21 +371,19 @@ async def advanced_character_integration(client: VeniceClient) -> IntegrationRes
         print(f"   Character: {char.name} ({char.slug})")
         print(f"   Model:     {model} ({price_note})")
         print(f"   Why:       {why}")
-        if estimate is not None:
-            print(f"   Budget:    {budget_reach(estimate, text_models)}")
+        print(f"   Budget:    {budget_reach(estimate, text_models)}")
         print(f"   finish_reason: {finish}")
         if usage is not None:
             print(f"   Usage:     {usage}")
-            if estimate is not None and model == estimate.model:
-                # The persona is added server-side, so compare what was billed.
-                print(
-                    f"   Prompt:    estimated {estimate.prompt_tokens} tokens, "
-                    f"billed {usage.prompt_tokens}"
-                )
-                if usage.prompt_tokens > estimate.prompt_tokens:
-                    print("   ❌ The billed prompt exceeded the estimate, so the budget")
-                    print("      check above understated this request.")
-                    ok = False
+            # The persona is added server-side, so compare what was billed.
+            print(
+                f"   Prompt:    estimated {estimate.prompt_tokens} tokens, "
+                f"billed {usage.prompt_tokens}"
+            )
+            if usage.prompt_tokens > estimate.prompt_tokens:
+                print("   ❌ The billed prompt exceeded the estimate, so the budget")
+                print("      check above understated this request.")
+                ok = False
         if response.cost is not None and response.cost.usd is not None:
             print(f"   Billed:    ${response.cost.usd:.6f}")
         print(f"   Reply: {reply}")
@@ -397,14 +427,14 @@ async def advanced_character_integration(client: VeniceClient) -> IntegrationRes
         missing = await safe_character_access(client, missing_slug)
     except VeniceError as e:
         print(f"   ❌ Lookup failed for a reason other than a missing slug: {e}")
-        return IntegrationResult(ok=False, chat_ran=chat_ran, priced=priced)
+        return IntegrationResult(ok=False, chat_ran=chat_ran)
     print(f"   {char.slug!r} → {'found' if found else 'missing'}")
     print(f"   {missing_slug!r} → {'found' if missing else 'missing (NotFoundError handled)'}")
     if found is None or missing is not None:
         print("   ❌ Lookup results were not what the demo expected.")
         ok = False
 
-    return IntegrationResult(ok=ok, chat_ran=chat_ran, priced=priced)
+    return IntegrationResult(ok=ok, chat_ran=chat_ran)
 
 
 async def main() -> int:
@@ -436,9 +466,8 @@ async def main() -> int:
     print("   - Individual character access via GET /characters/{slug}")
     print("   - Character metadata fields (photoUrl, shareUrl, modelId, stats)")
     print("   - Validating a character's modelId against the live catalog")
-    if integration.chat_ran and integration.priced:
-        print("   - Pricing a request with estimate_cost() before sending it")
     if integration.chat_ran:
+        print("   - Pricing a request with estimate_cost() before sending it")
         print("   - A live character chat, checked for a complete reply")
     else:
         print("   ℹ️ The live character chat did not run (see 'Section skipped:' above)")

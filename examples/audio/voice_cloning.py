@@ -20,8 +20,16 @@ synthesis call. The output format also comes from that model's catalog entry
 **Treat the handle as a secret.** It encodes a link to the uploaded voice
 sample, so this example never prints it.
 
-The sample at ``examples/voice-to-clone.wav`` is used as input. A clean 5–10s
-speech recording works best. Output is written to ``examples/results/``.
+**Only clone a voice you have consent to use.** By default the sample is a neutral
+sentence synthesized with Venice TTS when the example runs. To clone your own
+voice, or that of someone who agreed to it, set ``VENICE_VOICE_SAMPLE_PATH`` to a
+clean recording; 5–10s of speech works best. The containers each model accepts and
+its recommended minimum length are in its catalog entry (``voice_cloning``).
+
+Everything free runs first, so a catalog with no cloning model or no ASR model to
+check the result skips (exit 77) before any charge. Then each run pays for the
+sample's TTS call (unless you supply a recording), the clone, the new speech and
+the transcription that checks it. Output is written to ``examples/results/``.
 
 Handles expire after the model's retention window (``voice_cloning.retention_days``
 in its catalog entry).
@@ -30,16 +38,16 @@ in its catalog entry).
 import asyncio
 import re
 import sys
+import wave
 from pathlib import Path
 
-from venice_ai import VeniceClient
+from venice_ai import NoMatchingModelError, VeniceClient
 from venice_ai.exceptions import PermissionDeniedError, VeniceError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import tts_default_format, tts_formats, tts_spec  # noqa: E402
+from _helpers import tts_default_format, tts_formats, tts_spec, voice_sample  # noqa: E402
 
-# Resolve sample + results dir relative to this file's location.
-SAMPLE_PATH = Path(__file__).resolve().parent.parent / "voice-to-clone.wav"
+# Resolve results dir relative to this file's location.
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -58,42 +66,61 @@ def word_overlap(expected: str, actual: str) -> float:
     return sum(w in got for w in want) / len(want) if want else 0.0
 
 
-async def clone_and_speak() -> bool | None:
-    """Clone the sample voice, then synthesize a new line in it.
+async def clone_and_speak() -> bool | str:
+    """Clone a sample voice, then synthesize a new line in it.
 
     Returns ``True`` on success, ``False`` if the result fails its check, and
-    ``None`` when voice cloning is not enabled for the account (HTTP 403).
+    the reason when skipped: no cloning or ASR model in the catalog, no TTS model
+    to make the sample with, or voice cloning not enabled for the account
+    (HTTP 403).
     """
     print("🎙️  Voice cloning")
     print("-" * 40)
 
-    if not SAMPLE_PATH.exists():
-        raise FileNotFoundError(
-            f"Voice sample not found at {SAMPLE_PATH}. Drop a short WAV recording there."
-        )
-
     async with VeniceClient() as client:
+        # Free lookups first, so a run that cannot finish pays for nothing.
+        catalog = await client.models.list(type="tts")
+        specs = {m.id: tts_spec(m.model_spec, m.id) for m in catalog.data}
+        limits = [s.voice_cloning for s in specs.values() if s.voice_cloning is not None]
+        if not limits:
+            return "no TTS model in the catalog offers voice cloning to this key"
+        try:
+            asr_model = await client.models.resolve_asr(prefer="cheapest")
+        except NoMatchingModelError as e:
+            return f"no ASR model to check the result with ({e})"
+
+        # The upload names no model, so the API picks one: the sample has to suit
+        # every model that can clone.
+        listed = [set(c.accepted_formats) for c in limits if c.accepted_formats]
+        accepted = set.intersection(*listed) if listed else None
+        min_seconds = max(c.min_sample_seconds or 0.0 for c in limits)
+        try:
+            sample = await voice_sample(
+                client, RESULTS_DIR, accepted_formats=accepted, min_seconds=min_seconds
+            )
+        except NoMatchingModelError as e:
+            return f"no TTS model can synthesize the sample ({e})"
+
         # Step 1 — clone. Omitting model lets the API pick its default and
         # report it back on voice.model.
-        print(f"   Uploading sample: {SAMPLE_PATH.name}")
+        print(f"   Uploading sample: {sample.name}")
         try:
-            voice = await client.audio.create_voice(file=SAMPLE_PATH)
+            voice = await client.audio.create_voice(file=sample)
         except PermissionDeniedError as e:
             # Voice cloning is a gated capability. A 403 is an entitlement
             # condition, not a code error; any other error still propagates.
             print("   ⏭️  Voice cloning is not enabled on this account.")
             print(f"      ({e})")
             print("      Contact support@venice.ai to request access.")
-            return None
+            return "voice cloning is not enabled on this account (HTTP 403)"
         print(f"   ✅ Cloned handle created ({voice.id[:3]}… — kept private)")
         print(f"      paired model: {voice.model}")
 
         # Read the paired model's catalog entry for its output format and the
         # cloning limits it advertises.
-        catalog = await client.models.list(type="tts")
-        spec = tts_spec(
-            next(m.model_spec for m in catalog.data if m.id == voice.model), voice.model
-        )
+        spec = specs.get(voice.model)
+        if spec is None:
+            raise LookupError(f"{voice.model} is not in the TTS catalog")
         fmt = tts_default_format(spec, voice.model)
         print(f"      output format: {fmt} (supported: {', '.join(tts_formats(spec) or [fmt])})")
         cloning = spec.voice_cloning
@@ -115,7 +142,6 @@ async def clone_and_speak() -> bool | None:
 
         # Check the result says the line (whether it *sounds* like the sample
         # is for your ears to judge).
-        asr_model = await client.models.resolve_asr(prefer="cheapest")
         transcript = await client.audio.transcribe(file=saved, model=asr_model, language="en")
         overlap = word_overlap(LINE, transcript.text)
         print(f"   🔁 Transcribed back ({asr_model}): {transcript.text}")
@@ -129,9 +155,9 @@ async def clone_and_speak() -> bool | None:
 async def main() -> int:
     """Run the voice-cloning example.
 
-    Returns ``0`` on success, ``77`` when cloning is not enabled for the
-    account, and ``1`` on any failure. The success banner prints only after a
-    real clone.
+    Returns ``0`` on success, ``77`` when a catalog model it needs is missing or
+    cloning is not enabled for the account, and ``1`` on any failure. The success
+    banner prints only after a real clone.
     """
     print("🚀 Venice AI Voice Cloning")
     print("=" * 50)
@@ -141,9 +167,12 @@ async def main() -> int:
     except VeniceError as e:
         print(f"\n❌ API error: {e}", file=sys.stderr)
         ok = False
+    except (OSError, LookupError, ValueError, wave.Error, EOFError) as e:
+        print(f"\n❌ {type(e).__name__}: {e}", file=sys.stderr)
+        ok = False
 
-    if ok is None:
-        print("\nSKIPPED: voice cloning is not enabled on this account (HTTP 403).")
+    if isinstance(ok, str):
+        print(f"\nSKIPPED: {ok}.")
         return EXIT_SKIPPED
     if not ok:
         print("\n⚠️ Voice cloning failed.")

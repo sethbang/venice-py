@@ -16,6 +16,13 @@ Shared helpers for Venice AI video examples.
   instead of looking like a model kind the catalog lacks.
   ``duration_seconds`` reads a duration tier (``"5s"`` -> ``5``).
 - ``print_progress`` renders ``VideoJob.wait`` progress updates.
+- ``download_video`` saves a finished video, retrying a dropped transfer, and
+  ``print_recovery`` says how to reach a job that was not released.
+- ``read_playable_video`` raises ``UnplayableVideoError`` for a saved file that
+  is not an MP4 with a video track. Call it inside the job's ``async with``
+  block, so that a bad delivery keeps the stored video instead of releasing it.
+- ``report_uncertain_queue`` tells a queue call the server may have accepted
+  from one it refused or never received, and says what that means for the bill.
 - ``SKIPPED`` is the exit code an example returns when an optional
   prerequisite is missing (paid generation not enabled, no matching model);
   it prints a line starting with ``SKIPPED:`` first.
@@ -26,13 +33,19 @@ Shared helpers for Venice AI video examples.
   Other skipped sections print a ``Section skipped:`` line.
 """
 
+import asyncio
 import struct
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+import aiohttp
+
+from venice_ai.exceptions import APIConnectionError, APIError, APITimeoutError, VeniceError
+from venice_ai.resources.video import VideoJob
 from venice_ai.types.api.models import ModelResponse, VideoModelConstraints, VideoModelSpec
-from venice_ai.types.api.video import VideoProcessingStatus
+from venice_ai.types.api.video import VideoCompletedStatus, VideoProcessingStatus
 
 #: Exit code for "skipped": a missing optional prerequisite, not a failure.
 SKIPPED = 77
@@ -43,6 +56,12 @@ Outcome = bool | str
 
 #: Skip reason for generation sections when paid runs are not enabled.
 NOT_PAID = "VENICE_RUN_PAID_VIDEO is not set, so no video was generated"
+
+#: Skip reason for paid sections after a queue call whose outcome is unknown.
+QUEUE_UNCERTAIN = "an earlier queue call may have been billed, so no further job was queued"
+
+#: Tries a finished video's download gets before the last error is raised.
+DOWNLOAD_ATTEMPTS = 3
 
 # Allowed gap between the requested and the delivered clip length, in
 # seconds. Encoders round to whole frames, so a 4s request comes back as
@@ -204,6 +223,39 @@ def meets_tier(width: int, height: int, tier_height: int) -> bool:
     return min(width, height) >= lines or width * height >= lines * lines * 16 / 9
 
 
+class UnplayableVideoError(Exception):
+    """A delivered file is not an MP4 with a video track."""
+
+
+def _require_video_track(data: bytes) -> tuple[list[Mp4Track], Mp4Track]:
+    """Return an MP4's tracks and its video track.
+
+    Raises :class:`UnplayableVideoError` when ``data`` has neither.
+    """
+    if data[4:8] != b"ftyp":
+        raise UnplayableVideoError(f"Not an MP4 file (header {data[:12]!r})")
+    try:
+        tracks = mp4_tracks(data)
+    except (struct.error, IndexError) as e:
+        raise UnplayableVideoError(f"Malformed MP4 ({e})") from e
+    video = next((t for t in tracks if t.handler == "vide" and t.width and t.height), None)
+    if video is None:
+        raise UnplayableVideoError(f"No video track found (tracks: {tracks})")
+    return tracks, video
+
+
+def read_playable_video(path: Path) -> bytes:
+    """Read a saved video, raising :class:`UnplayableVideoError` if it cannot be one.
+
+    A download can succeed with the wrong bytes, such as an HTML page answering
+    200. Call this inside the job's ``async with`` block: leaving the block
+    cleanly releases the stored video, and this raises through it to keep it.
+    """
+    data = path.read_bytes()
+    _require_video_track(data)
+    return data
+
+
 def check_video(data: bytes, request: Mapping[str, Any], *, expect_audio: bool | None) -> bool:
     """Check a downloaded clip against the request that produced it.
 
@@ -212,13 +264,10 @@ def check_video(data: bytes, request: Mapping[str, Any], *, expect_audio: bool |
     ``expect_audio`` says whether a sound track must be present (``True``),
     absent (``False``) or is not checked (``None``).
     """
-    if data[4:8] != b"ftyp":
-        print(f"❌ Not an MP4 file (header {data[:12]!r})")
-        return False
-    tracks = mp4_tracks(data)
-    video = next((t for t in tracks if t.handler == "vide" and t.width and t.height), None)
-    if video is None:
-        print(f"❌ No video track found (tracks: {tracks})")
+    try:
+        tracks, video = _require_video_track(data)
+    except UnplayableVideoError as e:
+        print(f"❌ {e}")
         return False
     has_audio = any(t.handler == "soun" for t in tracks)
     ok = True
@@ -307,3 +356,61 @@ def exit_code(results: list[tuple[str, Outcome]], core: str | None) -> int:
     )
     print(f"\nSKIPPED: {reason}")
     return SKIPPED
+
+
+async def download_video(job: VideoJob, output_path: Path, status: VideoCompletedStatus) -> Path:
+    """Save a finished video, retrying a dropped transfer.
+
+    A model that returns a ``download_url`` hands the link out once, at queue
+    time, and only this job object holds it, so this process is the one chance
+    to save the billed video. The link is short-lived but survives a few
+    retries, and fetching it costs nothing. The last failure is raised.
+    """
+    for attempt in range(1, DOWNLOAD_ATTEMPTS):
+        try:
+            return await job.download(output_path, status)
+        except (APITimeoutError, APIConnectionError) as e:
+            print(f"⚠️  Download attempt {attempt} of {DOWNLOAD_ATTEMPTS} failed: {e}")
+            await asyncio.sleep(2 * attempt)
+    return await job.download(output_path, status)
+
+
+def queue_outcome_unknown(e: Exception) -> bool:
+    """True if a failed ``video.run()`` may still have queued, and billed, a job.
+
+    A job is billed when it is queued, and the SDK does not resend a queue
+    request the server may have processed. A 5xx, a read timeout, a dropped
+    connection or an unreadable success body can all come after the job was
+    accepted. A ``ValueError`` is raised before anything is sent, a 4xx is the
+    server refusing the job, and a connection that was never made sent nothing.
+    """
+    if not isinstance(e, VeniceError):
+        return False
+    if isinstance(e, APIError) and e.status_code is not None and 400 <= e.status_code < 500:
+        return False
+    return not (
+        isinstance(e, APIConnectionError | APITimeoutError)
+        and isinstance(
+            e.original_error, aiohttp.ClientConnectorError | aiohttp.ConnectionTimeoutError
+        )
+    )
+
+
+def report_uncertain_queue(e: Exception) -> bool:
+    """Say so if a failed queue call may have been billed; ``True`` if it was printed."""
+    if not queue_outcome_unknown(e):
+        return False
+    print(f"⚠️  {type(e).__name__}: {e}")
+    print("   Outcome unknown: the job may be queued and billed. Check your usage before")
+    print("   re-running this example, because a re-run pays for a new job.")
+    return True
+
+
+def print_recovery(job: VideoJob) -> None:
+    """Say how to reach a job that left its block with an error, so was not released."""
+    print(
+        "   Its stored video was not released. Fetch it with "
+        f"client.video.retrieve(model={job.model!r}, queue_id={job.queue_id!r}); a model "
+        "that gives its download link only at queue time cannot be fetched once this "
+        "process exits."
+    )

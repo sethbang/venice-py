@@ -6,8 +6,14 @@ Venice AI SDK - Advanced Error Recovery
 This example demonstrates advanced error recovery patterns.
 Learn how to build resilient applications with retry strategies and error handling patterns.
 
-Every error this script talks about is triggered for real, and none of them
-is billed:
+Nothing here is billed. Only two errors come from the real API, because they
+are free to provoke:
+
+- an unknown model name, classified as ``NotFoundError`` and not retried;
+- an invalid API key on an authenticated endpoint, classified as
+  ``AuthenticationError`` and not retried.
+
+The rest never leave this machine:
 
 - a connection failure against a closed local port, retried by the SDK's retry
   middleware (the retries are observed through ``RetryOptions.on_retry``);
@@ -17,9 +23,18 @@ is billed:
 - a response that stalls past the client's timeout, from the same local
   server, which arrives as ``APITimeoutError`` with or without a rate limiter
   in front;
-- an unknown model name, classified as ``NotFoundError`` and not retried;
-- an invalid API key on an authenticated endpoint, classified as
-  ``AuthenticationError`` and not retried.
+- 429 and 503 responses from a scripted local server, driven by a table of
+  expected outcomes: what ``RateLimitError.retry_after_seconds`` reads, what a
+  rate limiter does with a 429, and which requests a 503 resends.
+
+A stand-in shows what the SDK does with a response. It cannot show when Venice
+sends one, or that a real 429 or 503 carries these exact headers. Other error
+classes, such as 402, 409, 410 and 422, are not triggered at all.
+
+Cost: free. The live requests are catalog reads and the two failures above.
+
+Exit status: ``0`` when every section passed, ``1`` when any failed, ``77`` (with
+a ``SKIPPED:`` line) when the catalog has no chat model to use.
 
 Retry classes
 -------------
@@ -64,10 +79,12 @@ from venice_ai import (
     APIError,
     APITimeoutError,
     AuthenticationError,
+    CreateApiKeyRequest,
     NoMatchingModelError,
     NotFoundError,
     RateLimitError,
     RetryOptions,
+    ServiceUnavailableError,
     SimpleRateLimiter,
     UserMessage,
     VeniceClient,
@@ -532,6 +549,274 @@ async def timeout_errors() -> bool:
     return ok
 
 
+@dataclasses.dataclass(frozen=True)
+class ScriptedReply:
+    """One response from the scripted stand-in; the last in a script repeats."""
+
+    status: int
+    headers: dict[str, str] = dataclasses.field(default_factory=dict)
+    body: dict[str, object] = dataclasses.field(
+        default_factory=lambda: {"error": "stand-in failure"}
+    )
+
+
+@contextlib.asynccontextmanager
+async def scripted_api(replies: tuple[ScriptedReply, ...]) -> AsyncIterator[tuple[str, list[str]]]:
+    """Run a local server that answers every POST from a script.
+
+    Yields its base URL and the path of each POST it received, in order.
+    """
+    received: list[str] = []
+
+    async def answer(request: web.Request) -> web.Response:
+        reply = replies[min(len(received), len(replies) - 1)]
+        received.append(request.path)
+        return web.json_response(reply.body, status=reply.status, headers=reply.headers)
+
+    app = web.Application()
+    app.router.add_post("/api/v1/{tail:.*}", answer)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    try:
+        yield f"http://127.0.0.1:{port}/api/v1", received
+    finally:
+        await runner.cleanup()
+
+
+CHAT_OK = ScriptedReply(
+    200,
+    body={
+        "id": "chatcmpl-local",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "stand-in-chat-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "recovered"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+    },
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class FailureCase:
+    """A scripted failure and the outcome the SDK must produce for it."""
+
+    label: str
+    call: Callable[[VeniceClient], Awaitable[object]]
+    replies: tuple[ScriptedReply, ...]
+    attempts: int
+    error: type[VeniceError] | None = None
+    # What the RateLimitError must carry, when ``error`` is RateLimitError.
+    retry_after_seconds: int | None = None
+    custom_message: str | None = None
+    is_error_budget: bool = False
+    # Retry delays the middleware must report, when a header sets them.
+    delays: tuple[float, ...] | None = None
+    # Put a SimpleRateLimiter in front, and how long the call must then take.
+    limiter: bool = False
+    min_seconds: float = 0.0
+
+
+def _chat(client: VeniceClient) -> Awaitable[object]:
+    return client.chat.completions.create(
+        model="stand-in-chat-model", messages=[UserMessage(content="Hello")]
+    )
+
+
+def _image(client: VeniceClient) -> Awaitable[object]:
+    return client.image.create(model="stand-in-image-model", prompt="a lighthouse")
+
+
+def _new_key(client: VeniceClient) -> Awaitable[object]:
+    return client.api_keys.create(
+        api_key_request=CreateApiKeyRequest(apiKeyType="INFERENCE", description="stand-in")
+    )
+
+
+# Every case runs under RetryOptions(max_attempts=2), so "3 attempts" means the
+# SDK retried as often as the policy allows.
+FAILURE_CASES: tuple[FailureCase, ...] = (
+    FailureCase(
+        "chat, 429 with Retry-After (retried by a rate limiter, not by RetryOptions)",
+        _chat,
+        (ScriptedReply(429, {"Retry-After": "7"}),),
+        attempts=1,
+        error=RateLimitError,
+        retry_after_seconds=7,
+    ),
+    FailureCase(
+        "chat, 429 without Retry-After (use your own backoff)",
+        _chat,
+        (ScriptedReply(429),),
+        attempts=1,
+        error=RateLimitError,
+    ),
+    FailureCase(
+        "chat, 429 from an error budget (a fast retry would trip it again)",
+        _chat,
+        (
+            ScriptedReply(
+                429,
+                {"x-ratelimit-resets": "1"},
+                {"error": "stand-in failure", "customMessage": "Too many failed requests"},
+            ),
+        ),
+        attempts=1,
+        error=RateLimitError,
+        custom_message="Too many failed requests",
+        is_error_budget=True,
+    ),
+    FailureCase(
+        "chat, 429 then OK, with SimpleRateLimiter (waits out Retry-After, succeeds)",
+        _chat,
+        (ScriptedReply(429, {"Retry-After": "1"}), CHAT_OK),
+        attempts=2,
+        limiter=True,
+        min_seconds=1.0,
+    ),
+    FailureCase(
+        "chat, 503 (INFERENCE: retried, then surfaces)",
+        _chat,
+        (ScriptedReply(503),),
+        attempts=3,
+        error=ServiceUnavailableError,
+    ),
+    FailureCase(
+        "chat, 503 then OK (INFERENCE: retried, succeeds)",
+        _chat,
+        (ScriptedReply(503), CHAT_OK),
+        attempts=2,
+    ),
+    FailureCase(
+        "image generate, 503 (PAID, but this path's 503 means at capacity: retried)",
+        _image,
+        (ScriptedReply(503),),
+        attempts=3,
+        error=ServiceUnavailableError,
+    ),
+    FailureCase(
+        "key creation, 503 (PAID, may follow processing: not resent)",
+        _new_key,
+        (ScriptedReply(503),),
+        attempts=1,
+        error=ServiceUnavailableError,
+    ),
+    FailureCase(
+        "key creation, 503 with retry-after-ms (the header makes it safe: retried at that delay)",
+        _new_key,
+        (ScriptedReply(503, {"retry-after-ms": "200"}),),
+        attempts=3,
+        error=ServiceUnavailableError,
+        delays=(0.2, 0.2),
+    ),
+    FailureCase(
+        "key creation, 503 with Retry-After above max_retry_after (surfaces, no long wait)",
+        _new_key,
+        (ScriptedReply(503, {"Retry-After": "120"}),),
+        attempts=1,
+        error=ServiceUnavailableError,
+    ),
+)
+
+
+def _failure_case_problems(
+    case: FailureCase,
+    raised: VeniceError | None,
+    attempts: int,
+    delays: list[float],
+    elapsed: float,
+) -> list[str]:
+    """Return every way this outcome differs from what the case expects."""
+    problems = []
+    if attempts != case.attempts:
+        problems.append(f"{attempts} attempt(s), expected {case.attempts}")
+    if case.error is None:
+        if raised is not None:
+            problems.append(f"{type(raised).__name__} instead of success")
+    elif not isinstance(raised, case.error):
+        got = type(raised).__name__ if raised else "success"
+        problems.append(f"{got}, expected {case.error.__name__}")
+    if isinstance(raised, RateLimitError):
+        expected_fields = {
+            "retry_after_seconds": case.retry_after_seconds,
+            "custom_message": case.custom_message,
+            "is_error_budget": case.is_error_budget,
+        }
+        for field, expected in expected_fields.items():
+            actual = getattr(raised, field)
+            if actual != expected:
+                problems.append(f"{field}={actual!r}, expected {expected!r}")
+    if case.delays is not None and delays != list(case.delays):
+        problems.append(f"retry delays {delays}, expected {list(case.delays)}")
+    if elapsed < case.min_seconds:
+        problems.append(f"took {elapsed:.2f}s, expected at least {case.min_seconds}s")
+    return problems
+
+
+async def rate_limits_and_unavailable() -> bool:
+    """Run ``FAILURE_CASES`` and compare each outcome with what the table expects.
+
+    Each case gets its own scripted server and client. The server counts the
+    attempts, so a case fails if the SDK resent a request it should not have (or
+    gave up too soon), raised the wrong error, or read a header wrongly. Nothing
+    here reaches Venice, so nothing is billed.
+    """
+    print("\n🚦 Rate Limits and Unavailability (429 and 503)")
+    print("-" * 40)
+
+    ok = True
+    for case in FAILURE_CASES:
+        print(f"\n▶ {case.label}")
+        recorder = RetryRecorder()
+        policy = RetryOptions(max_attempts=2, base_delay=0.05, jitter_factor=0.0, on_retry=recorder)
+        raised: VeniceError | None = None
+        async with (
+            scripted_api(case.replies) as (base_url, received),
+            # A placeholder key: the real one is never sent to a non-Venice URL.
+            VeniceClient(
+                api_key="placeholder-key",
+                base_url=base_url,
+                retry_options=policy,
+                rate_limiter=SimpleRateLimiter(max_retries=1) if case.limiter else None,
+            ) as client,
+        ):
+            start = time.perf_counter()
+            try:
+                await case.call(client)
+            except RateLimitError as e:
+                # A long Retry-After is the caller's to act on: this is the wait
+                # to schedule, or None when the server did not say.
+                print(
+                    f"   RateLimitError: retry_after_seconds={e.retry_after_seconds}, "
+                    f"is_error_budget={e.is_error_budget}, custom_message={e.custom_message!r}"
+                )
+                raised = e
+            except VeniceError as e:
+                print(f"   {type(e).__name__}: {e}")
+                raised = e
+            elapsed = time.perf_counter() - start
+
+        problems = _failure_case_problems(
+            case, raised, len(received), [delay for _, delay, _ in recorder.retries], elapsed
+        )
+        ok = ok and not problems
+        for problem in problems:
+            print(f"   ❌ {problem}")
+        if not problems:
+            outcome = case.error.__name__ if case.error else "success"
+            print(f"   ✓ {outcome} after {len(received)} attempt(s)")
+
+    return ok
+
+
 async def classify(
     label: str, call: Callable[[], Awaitable[object]], expected: type[Exception]
 ) -> bool:
@@ -627,7 +912,8 @@ def error_recovery_best_practices() -> bool:
     print("   Check before resending: APITimeoutError and 504 on a paid or inference")
     print("   call, since the server may have finished (and billed) the work")
     print("   APITimeoutError is a VeniceError, not a TimeoutError: catch it by name")
-    print("   Back off first: RateLimitError (429); honor its Retry-After")
+    print("   Back off first: RateLimitError (429); wait e.retry_after_seconds when it is")
+    print("   set, your own backoff when it is None")
     print("   Fix, don't retry: AuthenticationError, InvalidRequestError,")
     print("   PermissionDeniedError, NotFoundError")
     print()
@@ -670,6 +956,7 @@ async def main() -> int:
         ("scoped_retry_override", await scoped_retry_override()),
         ("retry_classes", await retry_classes()),
         ("timeout_errors", await timeout_errors()),
+        ("rate_limits_and_unavailable", await rate_limits_and_unavailable()),
         ("comprehensive_error_handling", await comprehensive_error_handling(chat_model)),
         ("error_recovery_best_practices", error_recovery_best_practices()),
     ]

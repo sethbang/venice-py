@@ -4,7 +4,7 @@ Venice AI SDK - Voice Options Demonstration
 ===========================================
 
 This example demonstrates the various voice options available in the Venice AI SDK.
-Learn how to use different voices, discover available voices, and customize speech characteristics.
+Learn how to discover the available voices and use different ones, by language, gender and accent.
 
 Voices are taken from the model's catalog entry, never from a fixed list.
 ``client.audio.get_voices()`` adds language, accent and gender metadata for
@@ -12,6 +12,9 @@ voice IDs that follow the ``<region><gender>_<name>`` convention, and this
 example picks a TTS model whose voices carry that metadata. Every voice is
 given text in its own language: a Japanese voice reading English text does
 not produce accented English, it produces garbled speech.
+
+With no TTS model that carries that metadata, or no ASR model to check the clips,
+the example skips and exits 77.
 """
 
 import asyncio
@@ -20,7 +23,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from venice_ai import VeniceClient
+from venice_ai import NoMatchingModelError, VeniceClient
 from venice_ai.exceptions import VeniceError
 from venice_ai.types.api.audio import VoiceDetail
 
@@ -60,6 +63,9 @@ CHECKED_LANGUAGES: dict[str, str] = {
 MIN_OVERLAP = 0.6
 
 GENDER_ICONS = {"female": "♀️", "male": "♂️"}
+
+#: Exit status for a run that skipped because a prerequisite is missing.
+EXIT_SKIPPED = 77
 
 #: Paths written by this run, listed at the end on success.
 WRITTEN: list[Path] = []
@@ -160,7 +166,9 @@ async def choose_model(client: VeniceClient) -> tuple[str, str, list[VoiceDetail
         if voice.language and voice.gender in GENDER_ICONS:
             tagged[voice.model_id].append(voice)
     if not tagged:
-        raise RuntimeError("No TTS model in the catalog lists voices with language metadata")
+        raise NoMatchingModelError(
+            "No TTS model in the catalog lists voices with language metadata", resource_type="tts"
+        )
 
     resolved = await client.models.resolve_tts(prefer="cheapest")
     model_id = resolved if resolved in tagged else max(tagged, key=lambda m: len(tagged[m]))
@@ -249,8 +257,11 @@ async def english_accent_showcase(demo: VoiceDemo) -> bool:
 
 
 async def voice_personality_showcase(demo: VoiceDemo) -> bool:
-    """Different English voices reading lines written for different tones."""
-    print("\n✨ Voice Personality Showcase")
+    """Different English voices reading lines written for different tones.
+
+    Only the words and the voice change: nothing here asks a voice for a tone.
+    """
+    print("\n✨ Different Voices, Lines Written for Different Tones")
     print("-" * 40)
 
     personality_tests = [
@@ -268,7 +279,7 @@ async def voice_personality_showcase(demo: VoiceDemo) -> bool:
     ]
     english = demo.by_language().get("English", [])
     if not english:
-        print(f"Section skipped: personality showcase: {demo.model_id} has no English voices")
+        print(f"Section skipped: voices showcase: {demo.model_id} has no English voices")
         return True
 
     ok = True
@@ -276,20 +287,28 @@ async def voice_personality_showcase(demo: VoiceDemo) -> bool:
     stride = max(1, len(english) // len(personality_tests))
     picks = [english[(i * stride) % len(english)] for i in range(len(personality_tests))]
     for (personality, text), voice in zip(personality_tests, picks):
-        print(f"\n🎭 {personality}: {text}")
+        print(f"\n🎭 Line written as {personality}: {text}")
         stem = "personality_" + personality.lower().replace(" & ", "_").replace(" ", "_")
         ok = await demo.speak(voice, text, stem) and ok
     return ok
 
 
 async def main() -> int:
-    """Run all voice option examples. Returns ``0`` only if every demo succeeded."""
+    """Run all voice option examples.
+
+    Returns ``0`` only if every demo succeeded, ``77`` when the catalog lacks a
+    model the demos need, and ``1`` otherwise.
+    """
     print("🚀 Venice AI Voice Options Examples")
     print("=" * 60)
 
     async with VeniceClient() as client:
-        model_id, fmt, voices = await choose_model(client)
-        asr_model = await client.models.resolve_asr(prefer="cheapest")
+        try:
+            model_id, fmt, voices = await choose_model(client)
+            asr_model = await client.models.resolve_asr(prefer="cheapest")
+        except NoMatchingModelError as e:
+            print(f"\nSKIPPED: the catalog lacks a model this example needs ({e})")
+            return EXIT_SKIPPED
         print(f"📍 TTS model: {model_id} ({len(voices)} voices with language metadata, {fmt})")
         print(f"🎤 ASR model for checking clips: {asr_model}\n")
         demo = VoiceDemo(client, model_id, fmt, voices, asr_model)
@@ -311,7 +330,7 @@ async def main() -> int:
     print("   - Voice discovery with get_voices() and its model/gender filters")
     print("   - Female and male voices per language, each given native text")
     print("   - English accent variations")
-    print("   - Voice personality and tone")
+    print("   - Different voices reading lines written for different tones")
     checked = ", ".join(sorted(lang for lang in TRANSCRIBED if lang))
     if checked:
         print(f"   - Transcription round-trip for {checked} clips")

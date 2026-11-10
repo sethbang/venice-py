@@ -9,6 +9,8 @@ examples/
 ├── README.md                     # This file
 ├── basic/                        # Simple getting started examples
 │   ├── quick_start.py           # Minimal setup and usage
+│   ├── sync_client.py           # Blocking calls with SyncVeniceClient: chat, a stream and a paged list, and what still needs VeniceClient
+│   ├── offline_testing.py       # Test your own code with no network, API key or spend, using a real client against a local stand-in
 │   ├── client_setup.py          # Ways to configure the client; reads back the API root, connection_limits and retry_options (production section needs Redis)
 │   └── error_handling.py        # Live SDK exceptions, APITimeoutError, billing-aware retries (paid requests never resent once processed), fallbacks
 ├── chat/                        # Chat completion examples
@@ -17,6 +19,8 @@ examples/
 │   ├── streaming_chat.py        # Real-time streaming responses
 │   ├── tee_e2ee.py              # TEE confidential-compute client-side E2EE chat
 │   ├── tool_calling.py          # Hand-driven tool round trip, parallel calls, tool_choice, tool errors; answers checked against the tool output
+│   ├── streaming_tools.py       # Stream with tools=: read assembled calls from final_response, complete the round trip; answer checked against the tool output
+│   ├── video_audio_input.py     # Video by public URL and audio as base64 in chat; catalog filtered on supportsVideoInput/supportsAudioInput; billed
 │   ├── structured_output.py     # Typed JSON-schema responses via parse(); values checked in code, one re-sample on a validation failure
 │   ├── multi_turn_conversation.py # Context preservation
 │   ├── model_feature_suffixes.py # Model feature suffixes (model:key=val) and build_model_id()
@@ -28,7 +32,7 @@ examples/
 │   ├── passthrough_fields.py    # OpenAI-compat store/text/include/metadata; prompt_cache_retention tiers, with cache reads reported per tier
 │   └── agent_loop.py            # Agent loop via run_with_tools (auto tool dispatch); answer checked against the tool results
 ├── responses/                   # OpenAI-style Responses API (beta)
-│   └── responses_api.py         # responses.create — typed output blocks, reasoning text, truncated (incomplete) responses
+│   └── responses_api.py         # responses.create — typed output blocks, reasoning text, truncated (incomplete) responses, text.format, instructions, streaming, function-tool round trip, web_search (billed extra)
 ├── decisions/                   # Decision ("System One") models (Beta)
 │   └── ticket_routing.py        # Typed noul/choice/score judgments, checked against a calm control ticket; low confidence escalates
 ├── embeddings/                  # Text embedding examples
@@ -43,10 +47,9 @@ examples/
 │   ├── batch_generation.py      # Multiple image creation
 │   ├── background_removal.py    # Remove image backgrounds
 │   ├── image_editing.py         # Edit and modify images (resolution + timeout)
-│   ├── multi_edit.py            # Multi-layer image editing
+│   ├── multi_edit.py            # Edit from several input images and one prompt
 │   ├── quality_control.py       # Native quality tiers (low/medium/high)
 │   └── web_search.py            # Image generation with web search context
-├── voice-to-clone.wav           # Sample recording used by audio/voice_cloning.py
 ├── audio/                       # Audio examples
 │   ├── _helpers.py              # Shared helpers: audio container detection, format checks
 │   ├── text_to_speech.py        # Basic TTS generation
@@ -60,7 +63,8 @@ examples/
 │   ├── text_to_video.py         # Generate video from text prompts
 │   ├── image_to_video.py        # Animate images into video
 │   ├── advanced_fields.py       # Reference images/audio, transitions, elements (R2V)
-│   └── upscale.py               # Upscale a source video (model from resolve_video_upscale)
+│   ├── upscale.py               # Upscale a source video (model from resolve_video_upscale)
+│   └── resume_job.py            # Resume a paid job from its saved model and queue_id: retrieve, save, check, release; never submits
 ├── augment/                     # Document and web augmentation examples
 │   ├── scrape.py                # Scrape a short page and a long docs page to markdown; a blocked domain raises
 │   ├── search.py                # Structured web search, Brave vs Google, chat answer whose quotes are checked against the cited sources
@@ -73,7 +77,7 @@ examples/
 ├── advanced/                    # Advanced configuration and features
 │   ├── custom_configuration.py  # Advanced client setup
 │   ├── redis_backend.py         # Redis-backed rate limiter wiring, verified in Redis (needs Redis)
-│   ├── error_recovery.py        # Retry and recovery patterns, each error triggered locally for free
+│   ├── error_recovery.py        # Retry and recovery patterns, 429 and 503 on a local stand-in, plus free 404 and 401 from the real API
 │   ├── performance_optimization.py # Sequential vs concurrent requests, streaming time to first token
 │   ├── prompt_caching.py        # prompt_cache_key, cache_control and cached-token usage
 │   └── reasoning_effort.py      # Controlling reasoning effort levels
@@ -97,7 +101,8 @@ examples/
 │   ├── balance.py               # Read prepaid USDC balance (SIWE auth)
 │   ├── transactions.py          # Transaction history
 │   ├── top_up.py                # EVM/Base top-up flow
-│   └── solana_settlement.py     # Solana USDC top-up (SolanaX402Auth)
+│   ├── solana_settlement.py     # Solana USDC top-up (SolanaX402Auth); payment signed and verified locally, nothing sent by default
+│   └── wallet_inference.py      # Keyless inference paid from the prepaid ledger; api_key="" trap checked locally; paid call is opt-in
 ├── best_practices/              # SDK best practices and patterns
 │   └── pydantic_models.py       # Type-safe model usage guide
 ├── music/                       # Async music generation
@@ -125,6 +130,13 @@ Before running these examples, ensure you have:
 4. **Environment variable** set: `export VENICE_API_KEY="your-api-key"`
 5. **Optional**: some examples need an extra (`e2ee`, `x402`, `x402-solana`), a wallet key, or a
    Redis server; each script's docstring lists what it needs
+6. **Admin key, for two examples**: `api_keys/key_management.py` and
+   `billing/usage_analytics.py` need an ADMIN key in `VENICE_API_KEY`. With any other valid key
+   they print `SKIPPED:` and exit `77`. `key_management.py` creates, uses and deletes a real
+   INFERENCE key with a $1 lifetime cap, and makes one small billed chat
+
+The x402 examples (`x402/balance.py`, `transactions.py`, `top_up.py`, `solana_settlement.py`,
+`wallet_inference.py`) authenticate with the wallet, so they need a wallet key and no API key.
 
 ## 🔧 Running Examples
 
@@ -153,7 +165,7 @@ Every example checks its own results and reports them through its exit code:
 | --- | --- |
 | `0` | Passed: the example ran and verified what it demonstrates |
 | `1` | Failed: an API error, or a result that did not pass the example's checks |
-| `77` | Skipped: an optional prerequisite is missing (an extra not installed, an environment variable, wallet or Redis server not set up, an endpoint the account is not entitled to, or no catalog model of the kind needed) |
+| `77` | Skipped: an optional prerequisite is missing (an extra not installed, an environment variable, wallet or Redis server not set up, an endpoint the account is not entitled to, or no catalog model of the kind needed), or a job still processing |
 
 A whole-example skip prints a line starting with `SKIPPED:` that says what was
 missing, and exits `77`. That prefix is reserved for this case.
@@ -173,10 +185,15 @@ models exist but every price quote failed, the resolver raises
 
 ### Cost
 
-Live examples spend credits on the key in `VENICE_API_KEY`. They pick the
+Live examples spend credits on the key in `VENICE_API_KEY`. Most pick the
 cheapest suitable model from the live catalog (`prefer="cheapest"`). That
 ranking includes reasoning models, so examples that need a short, direct answer
-pass `exclude_reasoning=True`. Chat requests that need nothing from Venice's
+pass `exclude_reasoning=True`. Some take the catalog's default ranking instead,
+which does not consider price: the basic, structured-input, reasoning and
+truncation demos in `responses/responses_api.py`,
+`chat/structured_output.py`, `best_practices/pydantic_models.py`,
+`production/cost_management.py`, `advanced/prompt_caching.py` and
+`chat/passthrough_fields.py` and `video/upscale.py`. Chat requests that need nothing from Venice's
 default system prompt send `include_venice_system_prompt=False`, so it is not
 billed on top of their own messages. Catalog, quote and model-listing calls are
 free.
@@ -185,25 +202,32 @@ free.
 
 | Variable | Read by | Effect |
 | --- | --- | --- |
-| `VENICE_API_KEY` | every live example | API key for all calls (required) |
+| `VENICE_API_KEY` | every live example except the wallet-authenticated x402 ones and `basic/offline_testing.py` | API key for all calls (required) |
 | `VENICE_API_BASE_URL` | every live example (read by the SDK) | API root, version path included (`https://api.venice.ai/api/v1`); a bare host gets `/api/v1` appended |
 | `VENICE_RUN_PAID_VIDEO=1` | `video/text_to_video.py`, `image_to_video.py`, `advanced_fields.py`, `upscale.py` | Queue and download paid video jobs; without it the video examples only quote |
 | `VENICE_UPSCALE_SOURCE_URL` | `video/upscale.py` | Source clip to upscale (HTTPS URL or `data:` URI) |
 | `VENICE_VIDEO_ELEMENTS_MODEL` | `video/advanced_fields.py` | Model to run the elements section on |
 | `VENICE_RUN_PAID_MUSIC=1` | `music/music_generation.py` | Also generate the `force_instrumental` clip (quoted for free on every run) |
 | `VENICE_BACKEND__REDIS__REDIS_URL`, `VENICE_REDIS_URL`, `REDIS_URL` | `basic/client_setup.py`, `advanced/redis_backend.py` | Redis for the shared rate-limit state. The first one set wins, in this order: `VENICE_BACKEND__REDIS__REDIS_URL` is the SDK's own setting (`VeniceAIConfig.backend.redis.redis_url`), `VENICE_REDIS_URL` is a convenience name the examples read, and `REDIS_URL` is the conventional fallback |
-| `VENICE_X402_TEST_PRIVATE_KEY` or `X402_WALLET_PRIVATE_KEY` | `x402/balance.py`, `transactions.py`, `top_up.py` | EVM wallet key for SIWE auth (use a test wallet) |
+| `VENICE_RUN_PAID_IMAGES=1` | `image/batch_generation.py`, `image/style_variants.py` | Make the 13 and 10 paid generations; without it they resolve the model, print the plan and catalog price, and exit `77` |
+| `VENICE_VOICE_SAMPLE_PATH` | `audio/voice_cloning.py`, `audio/voice_changer.py` | Your own recording to use as input (`voice_changer.py` needs PCM WAV). Clone only voices you have consent to clone. Without it, the examples synthesize a short clip with Venice TTS, which is one more billed call |
+| `VENICE_X402_TEST_PRIVATE_KEY` or `X402_WALLET_PRIVATE_KEY` | `x402/balance.py`, `transactions.py`, `top_up.py`, `wallet_inference.py` | EVM wallet key for SIWE auth (use a test wallet) |
 | `X402_DO_TOPUP=1` | `x402/top_up.py` | Submit the real, irreversible USDC top-up on Base; without it the flow is signed but not sent |
+| `X402_RUN_INFERENCE=1` | `x402/wallet_inference.py` | Pay for one short chat from the wallet's prepaid USDC ledger; without it the sign-in envelope is signed locally, nothing is sent for inference, and the example exits `77` |
+| `VENICE_VIDEO_RESUME_MODEL`, `VENICE_VIDEO_RESUME_QUEUE_ID` | `video/resume_job.py` | The job to collect and release. Spends nothing new; without a queue ID the example sends nothing and exits `77` |
+| `VENICE_VIDEO_RESUME_DOWNLOAD_URL` | `video/resume_job.py` | The job's `download_url`, for models that return one. It grants access on its own, so treat it as a secret |
 | `VENICE_X402_SOLANA_TEST_PRIVATE_KEY` | `x402/solana_settlement.py` | Solana wallet key (use a test wallet) |
 | `VENICE_X402_SOLANA_RPC_URL` | `x402/solana_settlement.py` | Solana RPC endpoint for the on-chain balance read |
 | `X402_SOLANA_DO_TOPUP=1` | `x402/solana_settlement.py` | Submit the real Solana USDC top-up |
 
 `music/music_generation.py` makes two paid generations on the cheapest model on
-every run; only the `force_instrumental` generation waits for the opt-in.
+every run; only the `force_instrumental` generation waits for the opt-in. The
+image examples other than `batch_generation.py` and `style_variants.py` also
+spend on every run.
 
 ### Paid video runs
 
-Every video example only quotes by default, which is free, and then exits `77`
+The generation examples only quote by default, which is free, and then exit `77`
 because nothing was generated. Set `VENICE_RUN_PAID_VIDEO=1` to queue, wait and
 download; `text_to_video.py` and `image_to_video.py` then generate short clips
 at the lowest resolution and duration the resolved model lists. `upscale.py` takes a custom source clip from
@@ -218,7 +242,7 @@ refunded.
 
 ## 💡 Key Features Demonstrated
 
-- **Async/Await Patterns**: All examples use proper async programming
+- **Async/Await Patterns**: Examples use async programming, except `basic/sync_client.py`, which shows the blocking client
 - **Error Handling**: Comprehensive error catching and recovery
 - **Type Safety**: Full type hints and Pydantic model usage
 - **Best Practices**: Production-ready patterns and configurations

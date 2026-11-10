@@ -47,12 +47,23 @@ import urllib.request
 from pathlib import Path
 from typing import Literal
 
+import aiohttp
+
 from venice_ai import NoMatchingModelError, VeniceClient, VideoGenerationError
 from venice_ai.exceptions import VeniceError
 from venice_ai.types.api.models import VideoModelSpec
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import SKIPPED, mp4_tracks, print_progress  # noqa: E402
+from _helpers import (  # noqa: E402
+    SKIPPED,
+    UnplayableVideoError,
+    download_video,
+    mp4_tracks,
+    print_progress,
+    print_recovery,
+    read_playable_video,
+    report_uncertain_queue,
+)
 
 RUN_PAID = os.environ.get("VENICE_RUN_PAID_VIDEO") == "1"
 
@@ -146,31 +157,49 @@ async def upscale_job(client: VeniceClient, model: str, factor: UpscaleFactor) -
 
     output_path = RESULTS_DIR / f"upscaled_x{factor}.mp4"
     try:
-        async with await client.video.run(
+        job = await client.video.run(
             model=model,
             video_url=SOURCE_VIDEO_URL,
             upscale_factor=factor,
-        ) as job:
-            print(f"📨 Queued — queue_id: {job.queue_id}")
+        )
+    except VeniceError as e:
+        if not report_uncertain_queue(e):
+            print(f"❌ Upscale request rejected: {e}")
+        return False
+    print(f"📨 Queued — queue_id: {job.queue_id}")
+
+    # The handlers sit outside the block: leaving it cleanly releases a finished
+    # job's stored video, so a failed download has to raise through it.
+    try:
+        async with job:
             status = await job.wait(on_progress=print_progress)
-            saved = await job.download(output_path, status)
+            saved = await download_video(job, output_path, status)
+            data = read_playable_video(saved)
+    except UnplayableVideoError as e:
+        print(f"❌ {output_path} is not a usable video: {e} (queue_id={job.queue_id})")
+        print_recovery(job)
+        return False
     except VideoGenerationError as e:
         code = f" (code={e.error_code})" if e.error_code else ""
         print(f"❌ Upscale failed: {e}{code}")
         return False
     except TimeoutError as e:
-        print(f"❌ {e}")
+        # wait() ran out of polls; the job is still queued or running.
+        print(f"❌ {e} (queue_id={job.queue_id})")
+        print_recovery(job)
+        return False
+    except aiohttp.ClientResponseError as e:
+        # Only the status: the error's text contains the link, which grants access.
+        print(f"❌ The download answered HTTP {e.status} (queue_id={job.queue_id})")
+        print_recovery(job)
         return False
     except VeniceError as e:
-        # Queueing was rejected, or a status/download request failed after
-        # the job was queued (a timeout there does not cancel the job).
-        print(f"❌ Upscale request failed: {e}")
+        # A status request failed, or every download attempt did. That does not
+        # cancel the job: it may still finish, and it is billed either way.
+        print(f"❌ Upscale request failed (queue_id={job.queue_id}): {e}")
+        print_recovery(job)
         return False
 
-    data = saved.read_bytes()
-    if data[4:8] != b"ftyp":
-        print(f"❌ {saved} is not an MP4 file (header {data[:12]!r})")
-        return False
     print(f"💾 Saved {saved} ({len(data):,} bytes)")
 
     # An upscale that silently returned the source size would still be a

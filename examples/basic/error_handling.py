@@ -17,7 +17,11 @@ which exception class the SDK raises:
   billing-aware, so a paid generation request is never resent once the server
   may have processed it (shown against a local stand-in server, so it costs
   nothing)
-- A fallback chain that skips an unavailable model
+- ``ModelGoneError`` from the 410 a retired model returns when Venice cannot
+  route it (shown against a local stand-in server)
+- A fallback chain that moves past a missing, retired, rate-limited, at-capacity
+  (503) or failing (5xx) model to a second real one; the 503 and 5xx branches are
+  shown against a local stand-in server
 - Logging request context when a call fails
 
 Exit status: ``0`` when every section behaved as described, ``1`` when any
@@ -32,7 +36,8 @@ import re
 import sys
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
 from itertools import pairwise
 
 from aiohttp import web
@@ -54,6 +59,7 @@ from venice_ai.exceptions import (
     ModelGoneError,
     NotFoundError,
     RateLimitError,
+    ServiceUnavailableError,
     VeniceError,
 )
 from venice_ai.types.api import ChatCompletionResponse, UserMessage
@@ -90,18 +96,38 @@ def cut_off(response: ChatCompletionResponse) -> bool:
     return bool(response.choices) and response.choices[0].finish_reason == "length"
 
 
-async def cheapest_direct_model(client: VeniceClient) -> str:
+async def cheapest_direct_model(client: VeniceClient, exclude: list[str] | None = None) -> str:
     """The cheapest chat model that answers directly, without a reasoning phase.
 
     The cheapest model overall can be a reasoning model, and these demos want
-    short, direct answers, hence ``exclude_reasoning=True``.
+    short, direct answers, hence ``exclude_reasoning=True``. Models in *exclude*
+    are not considered.
     """
-    return await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
+    return await client.models.resolve_chat(
+        prefer="cheapest", exclude_reasoning=True, exclude_models=exclude
+    )
 
 
 def missing_model_id(real_model: str) -> str:
     """A model ID that cannot exist, derived from a real one (a typo)."""
     return f"{real_model}-typo"
+
+
+@asynccontextmanager
+async def stand_in_server(
+    handler: Callable[[web.Request], Awaitable[web.Response]],
+) -> AsyncIterator[str]:
+    """Answer every request with *handler* on a local port; yield the API base URL."""
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    try:
+        yield f"http://127.0.0.1:{runner.addresses[0][1]}/api/v1"
+    finally:
+        await runner.cleanup()
 
 
 async def basic_error_handling(chat_model: str) -> bool:
@@ -167,28 +193,35 @@ async def basic_error_handling(chat_model: str) -> bool:
 async def removed_model_lifecycle(current_model: str) -> bool:
     """Show how to handle a model that has left the catalog.
 
-    A model's identifier moves through a lifecycle:
+    Venice's deprecation guide describes these stages:
 
-    1. **Active** — routable, returns ``200``.
-    2. **Deprecated** — still routable; Venice auto-routes to a replacement and
-       advertises the sunset via ``deprecation_info`` response headers.
-    3. **Retired (410 Gone)** — no longer routable but still *recognised*; the
-       SDK maps this to :class:`ModelGoneError`. This is the "migrate to a
-       replacement" signal.
-    4. **Removed (404 Not Found)** — dropped from the catalog entirely, now
-       indistinguishable from a model that never existed; the SDK maps this to
-       :class:`NotFoundError`.
+    1. **Active**: routable, returns ``200``.
+    2. **Deprecated (notice period)**: the model stays available, though possibly
+       with reduced capacity. Responses carry a deprecation warning, which the SDK
+       reads from the ``x-venice-model-deprecation-*`` headers into
+       ``response.deprecation_info``.
+    3. **Past its sunset date**: requests normally route to a model of similar
+       processing power at the same or lower price, so a stale ID can keep working
+       on a different model. Compare ``response.model`` with the ID you asked for if
+       that matters to you.
+    4. **Routing not possible (410 Gone)**: the SDK maps this to
+       :class:`ModelGoneError`. This is the "migrate to a replacement" signal.
 
-    Which stage a stale ID is in drifts over time, so production code should
-    handle both ``ModelGoneError`` and ``NotFoundError`` the same way: pick a
-    current model. There is no way to know a retired (410) model ahead of time,
-    so this run exercises stage 4 live; the 410 handler is identical in shape.
+    An ID Venice does not recognise at all, such as a typo, gets a ``404``, which
+    the SDK maps to :class:`NotFoundError`. Production code should handle both
+    errors the same way: pick a current model. To act before either fires, watch
+    the catalog: a model with a scheduled retirement has a ``deprecation`` object
+    in its ``model_spec``, with ``removesAt``, ``replacementModelId`` and
+    ``autoRemap`` (whether Venice may route the ID to that replacement).
+
+    This section exercises the 404 live; :func:`retired_model_gone` shows the 410
+    on a local stand-in server, since no retired model can be relied on here.
 
     Returns ``True`` if the stale ID surfaced as ModelGoneError or NotFoundError.
     """
     print("\n🪦 Removed-model lifecycle (410 Gone / 404 Not Found)")
     print("-" * 30)
-    print("   ℹ️  Exercises the 404 stage live; 410 needs a recently retired model")
+    print("   ℹ️  Exercises the 404 live; the 410 runs on a local stand-in server below")
 
     async with VeniceClient() as client:
         stale_model = missing_model_id(current_model)
@@ -210,6 +243,42 @@ async def removed_model_lifecycle(current_model: str) -> bool:
         )
         print(f"      currently returns {current_model}")
         return True
+
+
+async def retired_model_gone() -> bool:
+    """Show the 410 Venice returns for a retired model it cannot route.
+
+    A local stand-in server answers with the 410, so this runs without a retired
+    model to hand. A 410 is final: the SDK surfaces it without resending.
+
+    Returns ``True`` if the request raised ``ModelGoneError`` after being sent once.
+    """
+    print("\n🪦 Retired model, 410 Gone (local stand-in server, no charges)")
+    print("-" * 30)
+
+    attempts: Counter[str] = Counter()
+
+    async def gone(request: web.Request) -> web.Response:
+        attempts[request.path] += 1
+        return web.json_response({"error": "This model has been retired"}, status=410)
+
+    async with (
+        stand_in_server(gone) as base_url,
+        VeniceClient(api_key="sk-local-stand-in", base_url=base_url) as local,
+    ):
+        try:
+            await local.chat.completions.create(
+                model="stand-in-retired-model",
+                messages=[UserMessage(content="Hi")],
+                max_completion_tokens=10,
+            )
+            print("❌ Expected ModelGoneError but the request succeeded")
+            return False
+        except ModelGoneError as e:
+            sent = attempts["/api/v1/chat/completions"]
+            mark = "✓" if sent == 1 else "❌"
+            print(f"   {mark} ModelGoneError: status={e.status_code}, sent {sent}x: {e}")
+            return sent == 1
 
 
 async def retry_with_backoff(chat_model: str) -> bool:
@@ -449,12 +518,52 @@ async def billing_aware_retries() -> bool:
     return ok
 
 
+async def first_usable_answer(client: VeniceClient, models: Sequence[str]) -> str | None:
+    """Try *models* in order; return the one that gave a usable answer, or ``None``.
+
+    A reply only counts once it finished normally and actually answers the
+    question. By the time a 503 or other 5xx reaches this loop, the SDK's retry
+    policy for the request has already run, so the next model is the option left.
+    """
+    for model in models:
+        print(f"🔄 Trying model: {model}")
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[UserMessage(content="What is 2+2? Reply with just the number.")],
+                max_completion_tokens=MAX_TOKENS,
+                venice_parameters=NO_SYSTEM_PROMPT,
+            )
+        except (NotFoundError, ModelGoneError):
+            print("   ↪ Model not available, trying next...")
+            continue
+        except RateLimitError:
+            print("   ↪ Model rate limited, trying next...")
+            continue
+        except (ServiceUnavailableError, InternalServerError) as e:
+            print(f"   ↪ Server error ({type(e).__name__}, {e.status_code}), trying next...")
+            continue
+
+        content = (response.text or "").strip()
+        finish_reason = response.choices[0].finish_reason
+        if cut_off(response) or not re.search(r"\b4\b", content):
+            print(f"   ↪ Unusable reply (finish_reason={finish_reason}): {content!r}")
+            continue
+
+        print(f"✅ Answered by {model} (finish_reason={finish_reason})")
+        print(f"📝 Response: {content}")
+        return model
+
+    print("❌ Every model in the chain failed")
+    return None
+
+
 async def graceful_degradation(primary: str) -> bool:
     """Fall back through a chain of models until one gives a usable answer.
 
-    The chain starts with a model that does not exist, so the fallback path
-    runs every time. A reply only counts once it finished normally and
-    actually answers the question.
+    The chain starts with a model that does not exist, so the fallback path runs
+    every time. A second real model waits behind the primary, and is only called
+    if the primary fails.
 
     Returns ``True`` once a model in the chain answers correctly.
     """
@@ -463,35 +572,69 @@ async def graceful_degradation(primary: str) -> bool:
 
     async with VeniceClient() as client:
         models_to_try = [missing_model_id(primary), primary]
+        try:
+            models_to_try.append(await cheapest_direct_model(client, exclude=[primary]))
+        except NoMatchingModelError:
+            print("   ℹ️  The catalog has no second direct model; the chain ends at the primary")
 
-        for model in models_to_try:
-            print(f"🔄 Trying model: {model}")
-            try:
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[UserMessage(content="What is 2+2? Reply with just the number.")],
-                    max_completion_tokens=MAX_TOKENS,
-                    venice_parameters=NO_SYSTEM_PROMPT,
-                )
-            except (NotFoundError, ModelGoneError):
-                print("   ↪ Model not available, trying next...")
-                continue
-            except RateLimitError:
-                print("   ↪ Model rate limited, trying next...")
-                continue
+        return await first_usable_answer(client, models_to_try) is not None
 
-            content = (response.text or "").strip()
-            finish_reason = response.choices[0].finish_reason
-            if cut_off(response) or not re.search(r"\b4\b", content):
-                print(f"   ↪ Unusable reply (finish_reason={finish_reason}): {content!r}")
-                continue
 
-            print(f"✅ Answered by {model} (finish_reason={finish_reason})")
-            print(f"📝 Response: {content}")
-            return True
+async def fallback_past_server_errors() -> bool:
+    """Run the fallback chain against models that are at capacity or failing.
 
-        print("❌ Every model in the chain failed")
+    A local stand-in server answers by model: a 503 like the ``MODEL_AT_CAPACITY``
+    Venice sends, a 500, and then a good reply.
+
+    Returns ``True`` if the chain reached the last model, trying each one once.
+    """
+    print("\n🧯 Fallback past server errors (local stand-in server, no charges)")
+    print("-" * 30)
+
+    at_capacity, failing, healthy = "stand-in-at-capacity", "stand-in-failing", "stand-in-healthy"
+    attempts: Counter[str] = Counter()
+
+    async def by_model(request: web.Request) -> web.Response:
+        model = (await request.json())["model"]
+        attempts[model] += 1
+        if model == at_capacity:
+            return web.json_response(
+                {"error": "This model is at capacity", "code": "MODEL_AT_CAPACITY"}, status=503
+            )
+        if model == failing:
+            return web.json_response({"error": "simulated server error"}, status=500)
+        return web.json_response(
+            {
+                "id": "chatcmpl-stand-in",
+                "object": "chat.completion",
+                "created": 0,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "4"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+            }
+        )
+
+    async with (
+        stand_in_server(by_model) as base_url,
+        VeniceClient(api_key="sk-local-stand-in", base_url=base_url) as local,
+        # The SDK would otherwise back off and resend each error first, which
+        # only makes this demo slower.
+        local.with_retries(RetryOptions(max_attempts=0)),
+    ):
+        answered_by = await first_usable_answer(local, [at_capacity, failing, healthy])
+
+    expected = {at_capacity: 1, failing: 1, healthy: 1}
+    if answered_by != healthy or attempts != expected:
+        print(f"❌ Expected {healthy} to answer after one try each; got {dict(attempts)}")
         return False
+    print("   ✓ The 503 and the 500 each moved the chain on to the next model")
+    return True
 
 
 async def error_context_handling(chat_model: str) -> bool:
@@ -579,6 +722,8 @@ async def main() -> int:
         ("error_context_handling", error_context_handling),
     ]
     local_sections: list[tuple[str, Callable[[], Awaitable[bool]]]] = [
+        ("retired_model_gone", retired_model_gone),
+        ("fallback_past_server_errors", fallback_past_server_errors),
         ("request_timeout", request_timeout),
         ("billing_aware_retries", billing_aware_retries),
     ]

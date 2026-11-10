@@ -334,6 +334,11 @@ async def test_disable_thinking_parameter(client: VeniceClient, model: str) -> b
         if off_reasoning is not None:
             skipped = off_reasoning == 0 and (base_reasoning or 0) > 0
             evidence = f"reasoning_tokens {base_reasoning} -> {off_reasoning}"
+        elif baseline.thinking_blocks:
+            # Some models return a trace without counting it in usage, so the
+            # token totals barely move. The trace itself is the evidence.
+            skipped = not response.thinking_blocks
+            evidence = f"visible trace: yes -> {'yes' if response.thinking_blocks else 'no'}"
         elif base_completion and off_completion is not None:
             skipped = off_completion < base_completion / 2
             evidence = f"completion_tokens {base_completion} -> {off_completion}"
@@ -396,6 +401,7 @@ async def usage_breakdown_with_typed_access(client: VeniceClient) -> bool | None
         f"Total={usage.total_tokens}"
     )
 
+    reported = True
     if usage.completion_tokens_details is not None:
         details = usage.completion_tokens_details
         print(
@@ -405,14 +411,15 @@ async def usage_breakdown_with_typed_access(client: VeniceClient) -> bool | None
             f"image_tokens={details.image_tokens}"
         )
     else:
-        print("❌ This model reported no completion_tokens_details")
-        ok = False
+        # Not every backend reports this object; it is a reading, not a promise.
+        print("Section skipped: this model reports no completion_tokens_details")
+        reported = False
 
     print(
         f"💾 Prompt cache: cached_tokens={usage.cached_tokens}, "
         f"cache_write_tokens={usage.cache_write_tokens}"
     )
-    return ok
+    return ok if reported or not ok else None
 
 
 async def model_capability_exploration(client: VeniceClient) -> bool:

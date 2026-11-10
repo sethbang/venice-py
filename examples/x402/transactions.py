@@ -16,6 +16,9 @@ secure vault — never hardcode. This example reads
 ``VENICE_X402_TEST_PRIVATE_KEY`` (the same variable the ``venice-py health
 --wallet`` CLI uses), falling back to ``X402_WALLET_PRIVATE_KEY``. Use a
 dedicated test wallet when experimenting.
+
+No API key is needed: ``VeniceClient(api_key="", auth=auth)`` authenticates with
+the wallet alone.
 """
 
 import asyncio
@@ -77,7 +80,8 @@ async def list_transactions() -> bool | None:
     auth = X402Auth(private_key=private_key)
     print(f"🔑 Wallet: {auth.wallet_address} (from {env_name})")
 
-    async with VeniceClient() as client:
+    # api_key="" signs in with the wallet alone, even when VENICE_API_KEY is set.
+    async with VeniceClient(api_key="", auth=auth) as client:
         try:
             # One page, to show the response shape and its pagination block.
             result = await client.x402.transactions(auth=auth, limit=WALK_PAGE_SIZE)

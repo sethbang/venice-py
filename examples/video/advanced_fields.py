@@ -53,7 +53,9 @@ When the catalog has no model a section can use, the resolver raises
 :class:`venice_ai.NoMatchingModelError` and that section is skipped. When
 models exist but every quote fails, it raises
 :class:`venice_ai.ModelQuotesUnavailableError` and the section fails: that
-is an outage or a rejected request, not a gap in the catalog.
+is an outage or a rejected request, not a gap in the catalog. A model whose
+quote fails while others succeed is left out of the comparison; it is listed,
+and a paid run declines to queue, since the pick may not be the cheapest.
 
 Quote only by default
 ---------------------
@@ -84,6 +86,13 @@ Each saved clip is checked against its request: duration, aspect ratio,
 resolution tier, and a sound track present or absent as requested. A clip
 that passes shows the job honored the request; it does not show that the
 model used every advanced field, so watch the clips to judge the references.
+A file that is not a video keeps the job's stored copy. A clip that is the
+wrong length or size is still a delivered video, so it is saved and released,
+and the section fails.
+
+A queue call that ends in a 5xx, a read timeout or a dropped connection may
+still have queued and billed a job. The example says so, and the remaining paid
+sections do not queue.
 """
 
 import asyncio
@@ -95,12 +104,14 @@ import struct
 import sys
 import wave
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import aiohttp
+
 from venice_ai import (
-    APITimeoutError,
+    CheapestVideoResult,
     ModelQuotesUnavailableError,
     NoMatchingModelError,
     VeniceClient,
@@ -113,10 +124,25 @@ from venice_ai.exceptions import VeniceError
 from venice_ai.types.api.models import VideoModelConstraints, VideoModelSpec
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import NOT_PAID, Outcome, check_video, exit_code, print_progress  # noqa: E402
+from _helpers import (  # noqa: E402
+    NOT_PAID,
+    QUEUE_UNCERTAIN,
+    Outcome,
+    UnplayableVideoError,
+    check_video,
+    download_video,
+    exit_code,
+    print_progress,
+    print_recovery,
+    read_playable_video,
+    report_uncertain_queue,
+)
 
 RUN_PAID = os.environ.get("VENICE_RUN_PAID_VIDEO") == "1"
 ELEMENTS_ENV_VAR = "VENICE_VIDEO_ELEMENTS_MODEL"
+
+# Set once a queue call may have been billed; no further job is queued after that.
+_queue_uncertain = False
 
 # Resolve results dir relative to this file's location.
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
@@ -191,6 +217,9 @@ class Pick:
     params: dict[str, Any]
     quote_usd: float
     how: str  # why this model was chosen
+    # Candidates left out because a quote failed, with the reason. Any of them
+    # may be cheaper than this pick.
+    quote_failures: dict[str, str] = field(default_factory=dict)
 
 
 async def _load_catalog(client: VeniceClient) -> tuple[Catalog, dict[str, str]]:
@@ -228,6 +257,15 @@ def _lists_audio_input(constraints: VideoModelConstraints) -> bool:
     return bool((constraints.model_extra or {}).get("audio_input"))
 
 
+def _quote_failures(pick: CheapestVideoResult) -> dict[str, str]:
+    """The candidates the resolver dropped because their quote failed.
+
+    ``skipped`` also lists models that cannot serve the request at all; those
+    do not make the pick any less the cheapest.
+    """
+    return {m: reason for m, reason in pick.skipped.items() if reason.startswith("quote failed")}
+
+
 async def _cheapest(
     client: VeniceClient,
     catalog: Catalog,
@@ -261,6 +299,7 @@ async def _cheapest(
         pick.request_params,
         pick.quote_usd,
         f"cheapest of {len(pick.all_quotes)} {what} models quoted",
+        _quote_failures(pick),
     )
 
 
@@ -316,8 +355,9 @@ async def _cheapest_reference_video(client: VeniceClient, catalog: Catalog) -> P
     best.how = (
         f"cheapest of {checked} reference models re-quoted with the donor whose price rises with it"
     )
-    if failures:
-        best.how += f"; {len(failures)} donor quotes failed and were not compared"
+    best.quote_failures = _quote_failures(base) | {
+        model_id: f"donor quote failed: {e}" for model_id, e in failures.items()
+    }
     return best
 
 
@@ -384,10 +424,16 @@ async def _run_section(
     ``build(params)`` returns the full ``run()`` payload for the quoted
     ``params``. The saved clip is checked against those params. Returns
     ``True`` when the clip matched, ``False`` on any failure, and the skip
-    reason when no model fits or paid runs are not enabled.
+    reason when no model fits, paid runs are not enabled or an earlier queue
+    call may have been billed.
     """
+    global _queue_uncertain
     print(f"\n{title}")
     print("-" * 40)
+
+    if _queue_uncertain:
+        print(f"⏭️  Not queued: {QUEUE_UNCERTAIN}.")
+        return QUEUE_UNCERTAIN
 
     try:
         pick = await select()
@@ -415,44 +461,63 @@ async def _run_section(
     ]
     note = f" (not priced by the quote: {', '.join(unquoted)})" if unquoted else ""
     print(f"💵 Base quote: ${pick.quote_usd:.4f}{note}")
+    for model_id, reason in pick.quote_failures.items():
+        print(f"⚠️  Not compared: {model_id} ({reason})")
 
     if not RUN_PAID:
         print("🧪 Quoted only, not submitted: set VENICE_RUN_PAID_VIDEO=1 to generate it.")
         return NOT_PAID
+    if pick.quote_failures:
+        print(
+            f"❌ Not queued: {len(pick.quote_failures)} models could not be priced, and any of "
+            "them may be cheaper than this pick."
+        )
+        return False
 
     output_path = RESULTS_DIR / output_name
     headroom_before = await _headroom_usd(client)
     try:
         job = await client.video.run(**payload)
     except (VeniceError, ValueError) as e:
-        print(f"❌ Queue failed: {e}")
+        if report_uncertain_queue(e):
+            _queue_uncertain = True
+        else:
+            print(f"❌ Queue failed: {e}")
         return False
 
-    async with job:
-        print(f"📨 Queued — queue_id: {job.queue_id}")
-        try:
+    print(f"📨 Queued — queue_id: {job.queue_id}")
+    # The handlers sit outside the block: leaving it cleanly releases a finished
+    # job's stored video, so a failed download has to raise through it.
+    try:
+        async with job:
             status = await job.wait(on_progress=print_progress)
-            saved = await job.download(output_path, status)
-        except VideoGenerationError as e:
-            code = f" (code={e.error_code})" if e.error_code else ""
-            print(f"❌ Generation failed: {e}{code}")
-            return False
-        except TimeoutError as e:
-            # wait() ran out of polls; the job is still queued or running.
-            print(f"❌ {e} (queue_id={job.queue_id})")
-            return False
-        except APITimeoutError as e:
-            # One HTTP request timed out. The job itself may still finish and
-            # be billed.
-            print(f"❌ A status or download request timed out (queue_id={job.queue_id}): {e}")
-            return False
-        except VeniceError as e:
-            # The server can also reject a queued job while it is polled, for
-            # example when the provider's content policy refuses the inputs.
-            print(f"❌ Rejected after queueing (queue_id={job.queue_id}): {e}")
-            return False
+            saved = await download_video(job, output_path, status)
+            data = read_playable_video(saved)
+    except UnplayableVideoError as e:
+        print(f"❌ {output_path} is not a usable video: {e} (queue_id={job.queue_id})")
+        print_recovery(job)
+        return False
+    except VideoGenerationError as e:
+        code = f" (code={e.error_code})" if e.error_code else ""
+        print(f"❌ Generation failed: {e}{code}")
+        return False
+    except TimeoutError as e:
+        # wait() ran out of polls; the job is still queued or running.
+        print(f"❌ {e} (queue_id={job.queue_id})")
+        print_recovery(job)
+        return False
+    except aiohttp.ClientResponseError as e:
+        # Only the status: the error's text contains the link, which grants access.
+        print(f"❌ The download answered HTTP {e.status} (queue_id={job.queue_id})")
+        print_recovery(job)
+        return False
+    except VeniceError as e:
+        # A status or download request failed after the job was queued. That
+        # does not cancel the job: it may still finish and be billed.
+        print(f"❌ Video request failed (queue_id={job.queue_id}): {e}")
+        print_recovery(job)
+        return False
 
-    data = saved.read_bytes()
     print(f"💾 Saved {saved} ({len(data):,} bytes)")
     headroom_after = await _headroom_usd(client)
     if headroom_before is not None and headroom_after is not None:
@@ -625,6 +690,8 @@ async def main() -> int:
             label = "❌ failed"
         elif outcome == NOT_PAID:
             label = "🧪 quoted only"
+        elif outcome == QUEUE_UNCERTAIN:
+            label = "⏭️  not queued, an earlier queue call may have been billed"
         else:
             label = "⏭️  skipped, no model"
         print(f"   {label}: {name}")
