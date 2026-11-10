@@ -518,6 +518,55 @@ def test_an_interrupt_while_handing_the_call_to_the_loop_still_cancels_it(
     assert cancelled.wait(CANCEL_WAIT_S)
 
 
+def test_a_call_cancelled_before_it_starts_closes_its_coroutine(
+    client: SyncVeniceClient,
+) -> None:
+    """A call interrupted before the loop starts it never runs and leaves no warning.
+
+    The loop is held busy, so the interrupt cancels the call while it is still
+    queued. Every coroutine built for it must be closed, or Python warns that
+    it was never awaited.
+    """
+    ran: list[int] = []
+
+    async def fetch(index: int) -> _PageResult[int]:
+        ran.append(index)
+        return _PageResult(items=[], has_more=False)
+
+    loop = client._loop
+    real_call_soon_threadsafe = loop.call_soon_threadsafe
+    armed = [True]
+
+    def interrupting_call_soon_threadsafe(callback: Any, *args: Any, **kwargs: Any) -> Any:
+        handle = real_call_soon_threadsafe(callback, *args, **kwargs)
+        if armed[0] and threading.current_thread() is threading.main_thread():
+            armed[0] = False
+            raise KeyboardInterrupt
+        return handle
+
+    # Busy until shortly after the interrupt: the walk's cleanup waits on the loop.
+    loop_free = threading.Event()
+    real_call_soon_threadsafe(loop_free.wait, 10)
+    threading.Timer(0.3, loop_free.set).start()
+    client._async_client.characters.iter_all = lambda **_: Paginator(fetch)  # type: ignore[method-assign]
+    loop.call_soon_threadsafe = interrupting_call_soon_threadsafe  # type: ignore[method-assign]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                for _item in client.characters.iter_all():
+                    pass
+        finally:
+            loop.call_soon_threadsafe = real_call_soon_threadsafe  # type: ignore[method-assign]
+            loop_free.set()
+        client._run(asyncio.sleep(0))
+        gc.collect()
+
+    assert ran == []
+    never_awaited = [str(w.message) for w in caught if "never awaited" in str(w.message)]
+    assert never_awaited == []
+
+
 def test_interpreter_exit_with_a_walk_still_held_does_not_hang() -> None:
     script = textwrap.dedent(
         """
