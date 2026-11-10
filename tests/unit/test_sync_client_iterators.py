@@ -25,11 +25,17 @@ import pytest
 from aiohttp import web
 
 from venice_ai import SyncVeniceClient
+from venice_ai import _sync_client as sync_client_module
 from venice_ai._pagination import Paginator, _PageResult
 from venice_ai.middleware.retry import RetryOptions, _active_retry_options
 from venice_ai.types.api.characters import Character
 
 UNREACHABLE = "http://127.0.0.1:9/api/v1"
+
+# How long an interrupted fetch gets to see its cancellation. It stays well under
+# the per-request timeout in tests/unit/conftest.py, which cancels an orphaned
+# fetch on its own and would otherwise pass for the SDK doing it.
+CANCEL_WAIT_S = 2
 
 
 @pytest.fixture
@@ -423,7 +429,93 @@ def test_interrupting_a_blocked_fetch_cancels_it(client: SyncVeniceClient) -> No
         for _item in client.characters.iter_all():
             pass
 
-    assert cancelled.wait(5)
+    assert cancelled.wait(CANCEL_WAIT_S)
+
+
+def test_an_interrupt_just_after_scheduling_still_cancels_the_call(
+    client: SyncVeniceClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C between scheduling a call and waiting on it cancels the call too.
+
+    A signal can land on any bytecode, including the ones right after the call
+    is handed to the loop. Raising the interrupt as the hand-off returns puts it
+    there every time, which a real signal does only now and then.
+    """
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    async def fetch(_index: int) -> _PageResult[int]:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return _PageResult(items=[], has_more=False)
+
+    real_start_on_loop = sync_client_module._start_on_loop
+    armed = [True]
+
+    def start_then_interrupt(*args: Any) -> None:
+        real_start_on_loop(*args)
+        if armed[0]:
+            armed[0] = False
+            assert started.wait(5)
+            raise KeyboardInterrupt
+
+    client._async_client.characters.iter_all = lambda **_: Paginator(fetch)  # type: ignore[method-assign]
+    monkeypatch.setattr(sync_client_module, "_start_on_loop", start_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        for _item in client.characters.iter_all():
+            pass
+
+    assert cancelled.wait(CANCEL_WAIT_S)
+
+
+def test_an_interrupt_while_handing_the_call_to_the_loop_still_cancels_it(
+    client: SyncVeniceClient,
+) -> None:
+    """Ctrl-C inside the hand-off to the loop, after the call is queued, cancels it.
+
+    Waking the loop releases the GIL, so the loop can start the call while the
+    caller is still inside ``call_soon_threadsafe``: a signal handled there
+    escapes before the caller holds any handle on the call.
+    """
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    async def fetch(_index: int) -> _PageResult[int]:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return _PageResult(items=[], has_more=False)
+
+    loop = client._loop
+    real_call_soon_threadsafe = loop.call_soon_threadsafe
+    armed = [True]
+
+    def interrupting_call_soon_threadsafe(callback: Any, *args: Any, **kwargs: Any) -> Any:
+        handle = real_call_soon_threadsafe(callback, *args, **kwargs)
+        if armed[0] and threading.current_thread() is threading.main_thread():
+            armed[0] = False
+            assert started.wait(5)
+            raise KeyboardInterrupt
+        return handle
+
+    client._async_client.characters.iter_all = lambda **_: Paginator(fetch)  # type: ignore[method-assign]
+    loop.call_soon_threadsafe = interrupting_call_soon_threadsafe  # type: ignore[method-assign]
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            for _item in client.characters.iter_all():
+                pass
+    finally:
+        loop.call_soon_threadsafe = real_call_soon_threadsafe  # type: ignore[method-assign]
+
+    assert cancelled.wait(CANCEL_WAIT_S)
 
 
 def test_interpreter_exit_with_a_walk_still_held_does_not_hang() -> None:
