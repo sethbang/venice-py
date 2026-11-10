@@ -13,7 +13,9 @@ Two pages show the range: a short page comes back whole, and a long
 reference page comes back with its navigation and section structure as
 markdown headings. Each is checked by text from its body, not by length.
 
-**Pricing:** $0.01 per request.
+**Pricing:** $0.01 per request, so $0.02 per run for the two pages scraped here.
+The blocked request in the error-handling section is rejected without a charge:
+the key's spending room was unchanged after it when measured.
 
 **Note:** The Augment API is marked experimental in the Venice docs; request
 and response shapes may change without notice.
@@ -137,7 +139,7 @@ async def error_handling() -> bool:
     Venice rejects such domains (here X/Twitter) with HTTP 400, which the SDK raises as
     :class:`InvalidRequestError`. That rejection is the expected outcome here;
     a successful scrape or any other error (auth, 5xx, network) fails the
-    section.
+    section. The rejection is not billed.
     """
     print("\n⚠️  Error Handling")
     print("-" * 30)

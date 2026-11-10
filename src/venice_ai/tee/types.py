@@ -95,11 +95,15 @@ class TeeAttestation(VeniceBaseModel):
 
 
 class TeeReceiptEvent(VeniceBaseModel):
-    """A single entry in a TEE receipt's ``event_log``."""
+    """A single entry in a TEE receipt's ``event_log``.
+
+    Fields vary by provider: some entries carry a ``seq`` and some do not, and
+    event-specific fields such as ``target_route_id`` are kept in ``model_extra``.
+    """
 
     model_config = ConfigDict(extra="allow")
 
-    seq: int
+    seq: int | None = None
     type: str
     body_hash: str | None = None
 
@@ -128,7 +132,8 @@ class TeeReceipt(VeniceBaseModel):
     method: str | None = None
     served_at: int | None = None
     event_log: list[TeeReceiptEvent] = Field(default_factory=list)
-    signature: TeeReceiptSignature | None = None
+    #: A structured block from some providers, a bare hex string from others.
+    signature: TeeReceiptSignature | str | None = None
 
 
 class TeeSignatureVerification(VeniceBaseModel):

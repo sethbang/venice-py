@@ -3,6 +3,7 @@ Multi-image edit command (POST /image/multi-edit).
 """
 
 import asyncio
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -29,20 +30,22 @@ from ...utils import (
     "--image",
     "-i",
     required=True,
+    multiple=True,
     type=click.Path(exists=True),
-    help="Base image (first layer)",
+    help="Input image, repeatable. The first is the base; the rest are layered in order. "
+    "The limit is per model.",
 )
 @click.option(
     "--image-2",
     type=click.Path(exists=True),
     default=None,
-    help="Second layer image",
+    help="Layer image, sent after every --image",
 )
 @click.option(
     "--image-3",
     type=click.Path(exists=True),
     default=None,
-    help="Third layer image",
+    help="Layer image, sent after every --image and --image-2",
 )
 @click.option("--model", "-m", default=None, help="Edit model to use")
 @click.option("--output", "-o", default=None, help="Output file path")
@@ -75,7 +78,7 @@ from ...utils import (
 def multi_edit_image(
     ctx: click.Context,
     prompt: str,
-    image: str,
+    image: tuple[str, ...],
     image_2: str | None,
     image_3: str | None,
     model: str | None,
@@ -87,15 +90,18 @@ def multi_edit_image(
     quality: str | None,
     open_image: bool,
 ) -> None:
-    """Edit an image using up to 3 layered inputs
+    """Edit an image using several layered inputs
 
-    The first image is the base; additional images are layered on top.
+    The first image is the base; additional images are layered on top. Repeat
+    --image for each input. The limit is per model, and the API rejects too many.
 
     Examples:
 
         venice-py image multi-edit --prompt "combine these" --image base.png
 
         venice-py image multi-edit -p "blend" -i base.png --image-2 overlay.png
+
+        venice-py image multi-edit -p "blend" -i a.png -i b.png -i c.png -i d.png
     """
     asyncio.run(
         _multi_edit_async(
@@ -119,7 +125,7 @@ def multi_edit_image(
 async def _multi_edit_async(
     ctx: click.Context,
     prompt: str,
-    image: str,
+    image: str | Sequence[str],
     image_2: str | None = None,
     image_3: str | None = None,
     model: str | None = None,
@@ -134,7 +140,9 @@ async def _multi_edit_async(
     """Async implementation of multi-image editing"""
     plain = ctx.obj.get("plain", False) or is_plain_mode()
 
-    base_path = Path(image)
+    inputs = [image] if isinstance(image, str) else list(image)
+    inputs.extend(str(layer) for layer in (image_2, image_3) if layer is not None)
+    base_path = Path(inputs[0])
     save_path = Path(save_dir)
     save_path.mkdir(parents=True, exist_ok=True)
 
@@ -150,12 +158,8 @@ async def _multi_edit_async(
     # Build kwargs, only including provided values
     edit_kwargs: dict[str, Any] = {
         "prompt": prompt,
-        "image": str(base_path),
+        "images": inputs,
     }
-    if image_2 is not None:
-        edit_kwargs["image_2"] = str(image_2)
-    if image_3 is not None:
-        edit_kwargs["image_3"] = str(image_3)
     if model is not None:
         edit_kwargs["model"] = model
     if aspect_ratio:

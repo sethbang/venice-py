@@ -24,10 +24,7 @@ import sys
 from io import BytesIO
 from pathlib import Path
 
-from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import (  # noqa: E402
+from _helpers import (
     SKIPPED,
     alpha_coverage,
     generate_base_image,
@@ -35,6 +32,8 @@ from _helpers import (  # noqa: E402
     pillow_available,
     save_image,
 )
+
+from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).

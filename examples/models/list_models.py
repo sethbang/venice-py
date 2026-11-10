@@ -13,6 +13,8 @@ open string: compare it against ``KNOWN_MODEL_TYPES`` and treat anything outside
 that tuple as a type this SDK release predates.
 
 All of this is a read-only ``GET /models`` — running this example costs nothing.
+The catalog lists no video prices: ``client.video.quote(...)``, also free, prices a
+specific request.
 """
 
 import asyncio
@@ -20,6 +22,8 @@ import sys
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+
+from pydantic import BaseModel
 
 from venice_ai import NoMatchingModelError, VeniceClient
 from venice_ai.exceptions import VeniceError
@@ -42,7 +46,6 @@ from venice_ai.types.api import (
     TtsModelSpec,
     UpscaleModelSpec,
     VideoModelSpec,
-    VideoResolutionPricing,
 )
 
 
@@ -110,11 +113,43 @@ def _highlights(model: ModelResponse) -> str:
     return "—"
 
 
+def _tiered_prices(pricing: BaseModel) -> list[str]:
+    """Render the per-resolution, per-quality and per-image prices a model lists.
+
+    Image and inpaint models can list these on top of their typed fields, as
+    ``{"1K": {"usd": 0.07}}``, ``{"1K": {"low": {"usd": 0.05}}}`` and
+    ``{"additional": {"usd": 0.01}}``. ``model_dump()`` includes them either way.
+    """
+    prices = pricing.model_dump()
+    lines = []
+    resolutions = prices.get("resolutions")
+    if isinstance(resolutions, dict):
+        tiers = ", ".join(f"{res} ${tier['usd']}" for res, tier in resolutions.items())
+        lines.append(f"per resolution: {tiers}")
+    quality = prices.get("quality")
+    if isinstance(quality, dict):
+        for res, tiers_by_quality in quality.items():
+            tiers = ", ".join(f"{name} ${tier['usd']}" for name, tier in tiers_by_quality.items())
+            lines.append(f"at {res}: {tiers}")
+    input_images = prices.get("inputImages")
+    if isinstance(input_images, dict) and isinstance(input_images.get("additional"), dict):
+        included = input_images.get("included", 0)
+        extra = round(input_images["additional"]["usd"], 6)
+        lines.append(f"input images: {included} included, then ${extra} each")
+    return lines
+
+
 def _describe_pricing(model: ModelResponse) -> list[str]:
     """Render a model's pricing in the unit each pricing shape is billed in."""
     pricing = model.model_spec.pricing
+    if model.type == "video":
+        # Video prices depend on duration and resolution, so they come from a quote.
+        return ["not in the catalog; client.video.quote(...) prices a request for free"]
     if pricing is None:
         return ["(no pricing published)"]
+    if isinstance(pricing, LLMModelPricing) and model.type == "embedding":
+        # Embeddings produce no output tokens, whatever output price the catalog lists.
+        return [f"input: ${pricing.input.usd} per 1M tokens"]
     if isinstance(pricing, LLMModelPricing):
         lines = [
             f"input:  ${pricing.input.usd} per 1M tokens",
@@ -127,6 +162,7 @@ def _describe_pricing(model: ModelResponse) -> list[str]:
         lines = []
         if pricing.generation is not None:
             lines.append(f"generation: ${pricing.generation.usd} per image")
+        lines.extend(_tiered_prices(pricing))
         lines.append(
             f"upscale: ${pricing.upscale.x2.usd} (2x) / ${pricing.upscale.x4.usd} (4x) per image"
         )
@@ -136,10 +172,7 @@ def _describe_pricing(model: ModelResponse) -> list[str]:
     if isinstance(pricing, ASRModelPricing):
         return [f"audio: ${pricing.per_audio_second.usd} per second"]
     if isinstance(pricing, InpaintModelPricing):
-        return [f"edit: ${pricing.inpaint.usd} per operation"]
-    if isinstance(pricing, VideoResolutionPricing):
-        tiers = ", ".join(f"{res} ${tier.usd}" for res, tier in pricing.resolutions.items())
-        return [f"per resolution: {tiers}"]
+        return [f"edit: ${pricing.inpaint.usd} per operation", *_tiered_prices(pricing)]
     if isinstance(pricing, MusicModelPricing):
         if pricing.generation is not None:
             return [f"generation: ${pricing.generation.usd} per track"]
@@ -225,6 +258,10 @@ async def explore_model_details() -> bool | None:
             ("image", client.models.resolve_image),
             ("tts", client.models.resolve_tts),
             ("embedding", client.models.resolve_embedding),
+            ("asr", client.models.resolve_asr),
+            ("inpaint", client.models.resolve_inpaint),
+            ("music", client.models.resolve_music),
+            ("video", client.models.resolve_video),
         ]
         resolved_types: list[str] = []
         for label, resolve in resolvers:

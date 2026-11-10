@@ -48,8 +48,11 @@ import binascii
 import json
 import os
 import secrets
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+
+import aiohttp
 
 try:
     from solders.hash import Hash
@@ -132,8 +135,8 @@ _ASSOCIATED_TOKEN_PROGRAM_ID = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
 
 # USDC mint on Solana mainnet (the asset Venice's live 402 advertises). The
-# token program and decimals are read live from chain via getAccountInfo —
-# this constant is only the default/expected asset for validation.
+# token program and decimals are read live from chain via getAccountInfo;
+# this constant is the asset ``build_payment_header`` expects by default.
 USDC_SOLANA_MAINNET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 # SPL Token TransferChecked instruction discriminator.
@@ -250,6 +253,7 @@ class SolanaX402Auth:
         recent_blockhash: str,
         mint_decimals: int,
         token_program: str,
+        validate_asset: str | None = None,
         max_amount_units: int | None = None,
     ) -> str:
         """Build the base64 ``X-402-Payment`` v2 envelope (PURE, no I/O).
@@ -260,10 +264,17 @@ class SolanaX402Auth:
         supplies ``recent_blockhash``, ``mint_decimals`` and ``token_program``
         (fetched live via :func:`fetch_solana_tx_context`).
 
-        Validates ``network``/``asset``/``amount`` BEFORE signing — refuses to
-        sign payloads that deviate from expectations. This is a security
-        control: a misbehaving server could otherwise ask you to authorize a
-        transfer to an attacker-controlled address.
+        Checks the requirement BEFORE signing and refuses to sign on a mismatch:
+
+        * ``network`` must be Solana mainnet.
+        * ``asset`` must equal ``validate_asset`` (USDC by default).
+        * ``amount`` must be a positive integer within ``max_amount_units``.
+
+        The recipient is not verified. ``payTo`` and ``extra.feePayer`` are only
+        checked for presence, because the SDK has no list of Venice's addresses
+        to compare them with: the transfer goes to whatever ``payTo`` the
+        requirement names. These checks limit which token and how much a
+        misbehaving server can ask for, not where it goes.
 
         :param requirement: A single ``accepts`` entry whose ``network`` is
             either the bare string ``"solana"`` or
@@ -277,6 +288,10 @@ class SolanaX402Auth:
         :param mint_decimals: The mint's decimals (byte 44 of the mint account
             data), encoded into the ``TransferChecked`` instruction.
         :param token_program: The mint's owning token program id (base58).
+        :param validate_asset: The mint the requirement's ``asset`` must equal.
+            When ``None`` (default), that is :data:`USDC_SOLANA_MAINNET`. Pass
+            another mint to allow it instead; there is no value that skips the
+            check. Base58 is case-sensitive, so the comparison is exact.
         :param max_amount_units: Optional cap in token base units; refuses to
             sign if ``int(requirement["amount"])`` exceeds it. ``None``
             disables the cap (not recommended in production).
@@ -297,6 +312,12 @@ class SolanaX402Auth:
         asset = requirement.get("asset")
         if not asset:
             raise ValueError(f"requirement missing 'asset': {requirement!r}")
+        expected_asset = validate_asset if validate_asset is not None else USDC_SOLANA_MAINNET
+        if str(asset) != expected_asset:
+            raise ValueError(
+                f"asset mismatch: requirement has {asset!r}, expected {expected_asset!r}; "
+                "refusing to sign. Pass validate_asset= to expect another mint."
+            )
 
         pay_to = requirement.get("payTo")
         if not pay_to:
@@ -417,6 +438,7 @@ async def fetch_solana_tx_context(
     mint: str,
     *,
     http: Any,
+    request_options: Mapping[str, Any] | None = None,
 ) -> tuple[str, int, str]:
     """Fetch the live transaction context needed to build a Solana payment.
 
@@ -427,20 +449,44 @@ async def fetch_solana_tx_context(
        ``owner`` (the token program id) and ``data``; ``decimals`` is byte 44
        of the base64-decoded mint account data.
 
+    Hosted RPC endpoints often carry an API key in the URL, so no error raised
+    here includes the URL, and aiohttp's own exceptions, whose text does, are
+    not chained to it. A transport failure reports the RPC method, the exception
+    type and any HTTP status.
+
     :param rpc_url: Solana JSON-RPC endpoint.
     :param mint: The mint (asset) base58 address from the 402 requirement.
-    :param http: An ``aiohttp.ClientSession`` to issue the POSTs with.
+    :param http: An ``aiohttp.ClientSession`` to issue the POSTs with. Its default
+        headers are sent, unless *request_options* removes them.
+    :param request_options: Extra keyword arguments for each ``http.post()``.
 
     :return: ``(recent_blockhash, mint_decimals, token_program)``.
 
-    :raises RuntimeError: If the RPC returns an error or unexpected shape.
+    :raises RuntimeError: If the RPC cannot be reached, answers with an HTTP
+        error or a body that is not JSON, or returns an error or unexpected shape.
     """
 
     async def _rpc(method: str, params: list[Any]) -> dict[str, Any]:
         payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        async with http.post(rpc_url, json=payload) as resp:
-            resp.raise_for_status()
-            body = await resp.json()
+        body: Any = None
+        failure: str | None = None
+        try:
+            async with http.post(rpc_url, json=payload, **(request_options or {})) as resp:
+                resp.raise_for_status()
+                body = await resp.json()
+        except aiohttp.ClientResponseError as exc:
+            failure = f"{type(exc).__name__} (HTTP {exc.status})"
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            failure = type(exc).__name__
+        if failure is not None:
+            # Raised outside the except block so the original exception, whose
+            # text carries the URL, is not kept as __context__ either.
+            raise RuntimeError(
+                f"Solana RPC {method} request failed: {failure}. Check rpc_url or "
+                "VENICE_X402_SOLANA_RPC_URL; the URL is left out because it may hold a secret."
+            ) from None
+        if not isinstance(body, dict):
+            raise RuntimeError(f"Solana RPC {method} unexpected result: {body!r}")
         if "error" in body:
             raise RuntimeError(f"Solana RPC {method} error: {body['error']!r}")
         result = body.get("result")

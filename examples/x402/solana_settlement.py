@@ -13,7 +13,9 @@ Two pieces:
    builds the base64 ``X-402-Payment`` envelope (a partially-signed
    ``VersionedTransaction``; Venice's facilitator sponsors the network fee).
 2. ``client.x402.top_up_with_solana(auth=..., amount_usdc=..., max_amount_usdc=...)``
-   — runs the full probe → sign → submit handshake in one call.
+   — runs the full probe → sign → submit handshake in one call. ``amount_usdc``
+   must equal the amount the server requires, or it raises ``ValueError`` before
+   signing.
 
 **This moves real funds.** USDC on Solana mainnet is real money and on-chain
 settlement is irreversible. So this example is a **dry run by default**: it
@@ -28,7 +30,7 @@ The local signature is over a placeholder blockhash no validator accepts, with
 the facilitator's signature slot left empty, so that transaction could never
 land. It is never printed or sent, and the signing itself makes no request.
 
-The minimum top-up is $5. Install the extra first:
+Venice's documented minimum top-up is $5. Install the extra first:
 
     pip install 'venice-py[x402-solana]'    # pulls solders
 
@@ -104,12 +106,13 @@ def _recording_auth(private_key: str) -> "tuple[SolanaX402Auth, list[bool]]":
     return RecordingAuth(private_key=private_key), signed
 
 
-def _report_top_up_error(e: Exception, detail: str, signed: bool) -> None:
+def _report_top_up_error(e: Exception, signed: bool) -> None:
     """Print a failed top-up by what it means for the funds.
 
     Before signing, nothing can have been spent. After signing, a 4xx is the
     server refusing the payment, and anything else may have settled.
     """
+    detail = f"{type(e).__name__}: {e}"
     if not signed:
         print(f"   ❌ Nothing was signed or spent: {detail}")
     elif isinstance(e, APIError) and e.status_code is not None and 400 <= e.status_code < 500:
@@ -205,8 +208,8 @@ async def check_venice_side(auth: "SolanaX402Auth") -> dict[str, Any] | None:
     if solana.get("asset") != USDC_SOLANA_MAINNET:
         print(f"   ❌ Unexpected Solana asset {solana.get('asset')!r}; expected USDC")
         return None
-    minimum = int(str(solana.get("amount", 0))) / 10**USDC_DECIMALS
-    print(f"   Venice accepts USDC on Solana mainnet, minimum top-up ${minimum:,.2f}")
+    required = int(str(solana.get("amount", 0))) / 10**USDC_DECIMALS
+    print(f"   Venice accepts USDC on Solana mainnet, and requires ${required:,.2f}")
     return solana
 
 
@@ -324,6 +327,14 @@ async def solana_top_up() -> bool | None:
     requirement = await check_venice_side(auth)
     if requirement is None:
         return False
+    # top_up_with_solana pays exactly the required amount and raises ValueError on any other.
+    required = int(str(requirement.get("amount", 0))) / 10**USDC_DECIMALS
+    if required != TOPUP_AMOUNT_USDC:
+        print(
+            f"   ❌ Server requires ${required:,.2f}, and top_up_with_solana pays exactly that: "
+            f"it refuses this example's ${TOPUP_AMOUNT_USDC:.2f}"
+        )
+        return False
 
     opted_in = os.environ.get("X402_SOLANA_DO_TOPUP") == "1"
     # Only when not opted in: _recording_auth notes every signature, and an entry
@@ -372,11 +383,8 @@ async def solana_top_up() -> bool | None:
                 max_amount_usdc=TOPUP_AMOUNT_USDC,  # refuse to sign for more than this
                 rpc_url=rpc_url,
             )
-        except (aiohttp.ClientError, TimeoutError) as e:
-            _report_top_up_error(e, _transport_error(e), bool(signed))
-            return False
         except (VeniceError, ValueError, RuntimeError) as e:
-            _report_top_up_error(e, f"{type(e).__name__}: {e}", bool(signed))
+            _report_top_up_error(e, bool(signed))
             return False
 
     data = result.data

@@ -143,7 +143,10 @@ def _catalog_entry(model_id: str, *, reasoning: bool, input_usd: float) -> dict[
                 "supportsWebSearch": False,
                 "supportsLogProbs": False,
             },
-            "pricing": {"input": {"usd": input_usd}, "output": {"usd": input_usd * 2}},
+            "pricing": {
+                "input": {"usd": input_usd, "diem": input_usd},
+                "output": {"usd": input_usd * 2, "diem": input_usd * 2},
+            },
         },
     }
 

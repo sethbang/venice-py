@@ -142,11 +142,81 @@ class TestCostTrackerTrack:
     async def test_unknown_model_yields_zero_cost(self):
         # Pricing missing for response.model — tracker does NOT raise; cost is 0.
         tracker = CostTracker(pricing_map={})
-        cost = await tracker.track(_chat_response())
+        with pytest.warns(UserWarning, match="no pricing for model"):
+            cost = await tracker.track(_chat_response())
         assert cost == Decimal("0.00")
         # Record is still created with zero cost.
         assert len(tracker.requests) == 1
         assert tracker.requests[0].cost_usd == Decimal("0.00")
+
+    @pytest.mark.asyncio
+    async def test_unpriced_model_warns_once_per_model(self):
+        tracker = CostTracker()
+        with pytest.warns(UserWarning, match=f"no pricing for model '{_MODEL_A}'") as caught:
+            await tracker.track(_chat_response(model=_MODEL_A))
+            await tracker.track(_chat_response(model=_MODEL_A))
+        assert len(caught) == 1
+
+        with pytest.warns(UserWarning, match=f"no pricing for model '{_MODEL_B}'"):
+            await tracker.track(_chat_response(model=_MODEL_B))
+
+    @pytest.mark.asyncio
+    async def test_unpriced_embedding_model_warns(self):
+        tracker = CostTracker()
+        response = _embedding_response(model="embed-x")
+        with pytest.warns(UserWarning, match="no pricing for model 'embed-x'"):
+            cost = await tracker.track(response)
+        assert cost == Decimal("0.00")
+
+    @pytest.mark.asyncio
+    async def test_priced_model_does_not_warn(self, recwarn: pytest.WarningsRecorder):
+        tracker = CostTracker(pricing_map={_MODEL_A: _pricing(1.0, 1.0)})
+        await tracker.track(_chat_response(model=_MODEL_A))
+        assert not [w for w in recwarn if "no pricing" in str(w.message)]
+
+    @pytest.mark.asyncio
+    async def test_warning_returns_after_reset(self):
+        tracker = CostTracker()
+        with pytest.warns(UserWarning, match="no pricing"):
+            await tracker.track(_chat_response(model=_MODEL_A))
+        await tracker.reset()
+        with pytest.warns(UserWarning, match="no pricing"):
+            await tracker.track(_chat_response(model=_MODEL_A))
+
+    @pytest.mark.asyncio
+    async def test_from_client_keeps_a_model_priced_without_diem(self):
+        entry = ModelResponse.model_validate(
+            {
+                "id": "no-diem",
+                "object": "model",
+                "created": None,
+                "owned_by": "venice.ai",
+                "type": "text",
+                "model_spec": {
+                    "name": "no-diem",
+                    "pricing": {"input": {"usd": 2.0}, "output": {"usd": 4.0}},
+                },
+            }
+        )
+        client = MagicMock()
+        client.models.list = AsyncMock(return_value=MagicMock(data=[entry]))
+        tracker = await CostTracker.from_client(client)
+        cost = await tracker.track(_chat_response(model="no-diem"))
+        assert "no-diem" in tracker.pricing_map
+        assert cost > Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_from_client_prices_embedding_models(self):
+        entry = _model_entry("embed-x", _pricing(1.0, 0.0))
+
+        async def listing(*, type: str) -> MagicMock:
+            return MagicMock(data=[entry] if type == "embedding" else [])
+
+        client = MagicMock()
+        client.models.list = AsyncMock(side_effect=listing)
+        tracker = await CostTracker.from_client(client)
+        cost = await tracker.track(_embedding_response(model="embed-x", total_tokens=1_000_000))
+        assert cost == Decimal("1")
 
     @pytest.mark.asyncio
     async def test_unsupported_response_type_raises(self):
@@ -246,7 +316,10 @@ class TestCostTrackerFromClient:
         assert _MODEL_A in tracker.pricing_map
         assert _MODEL_B in tracker.pricing_map
         assert "no-pricing" not in tracker.pricing_map
-        mock_client.models.list.assert_awaited_once_with(type="chat")
+        assert [c.kwargs for c in mock_client.models.list.await_args_list] == [
+            {"type": "chat"},
+            {"type": "embedding"},
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +353,10 @@ class TestAttachCostTracker:
         await VeniceClient.attach_cost_tracker(client, tracker)
         assert _MODEL_A in tracker.pricing_map
         assert client._cost_tracker is tracker  # type: ignore[attr-defined]
-        client.models.list.assert_awaited_once_with(type="chat")
+        assert [c.kwargs for c in client.models.list.await_args_list] == [
+            {"type": "chat"},
+            {"type": "embedding"},
+        ]
 
     @pytest.mark.asyncio
     async def test_attach_skip_pricing_avoids_network(self):

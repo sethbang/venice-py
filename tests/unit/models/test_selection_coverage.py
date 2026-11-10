@@ -6,6 +6,7 @@ to achieve 90%+ coverage.
 """
 
 import asyncio
+import inspect
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock
 
@@ -1374,3 +1375,9 @@ class TestDeprecationFilter:
         chosen = await selector.select_chat_model()
         assert chosen != "venice-uncensored"
         assert chosen == "good-model"
+
+
+def test_select_chat_model_positional_order_is_stable() -> None:
+    """exclude_e2ee sits last, so existing positional callers keep their meaning."""
+    names = list(inspect.signature(DynamicModelSelector.select_chat_model).parameters)
+    assert names[-3:] == ["exclude_reasoning", "exclude_uncensored", "exclude_e2ee"]

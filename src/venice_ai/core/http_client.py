@@ -22,8 +22,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
+from yarl import URL
 
 from ..middleware.retry import RetryOptions, create_retry_middleware
+from ..middleware.third_party import create_third_party_header_filter
+from ..utils.errors import HeaderFreeResponse
 from .auth import create_auth_headers
 from .config import VeniceAIConfig
 
@@ -230,6 +233,7 @@ class VeniceHTTPClient:
             "base_url": base_url_with_slash,
             "connector": connector,
             "timeout": self._default_timeout,
+            "response_class": HeaderFreeResponse,
         }
 
         if self._proxy is not None:
@@ -254,12 +258,19 @@ class VeniceHTTPClient:
 
         # Retry middleware: with retry_options=None it applies the billing-aware
         # RetryOptions() defaults described in venice_ai.middleware.retry.
-        retry_middleware = create_retry_middleware(self._retry_options)
-        session_kwargs["middlewares"] = [retry_middleware]
+        retry_middleware = create_retry_middleware(
+            self._retry_options, api_origin=URL(self._base_url).origin()
+        )
+        # The filter comes last, so it covers the retry counter too and sees each
+        # attempt and each redirect hop.
+        session_kwargs["middlewares"] = [
+            retry_middleware,
+            create_third_party_header_filter(URL(self._base_url).origin()),
+        ]
 
         logger.debug(
             "Creating aiohttp ClientSession with base_url=%s, timeout=%s",
-            self._base_url,
+            URL(self._base_url).with_user(None) if self._base_url else self._base_url,
             self._default_timeout.total,
         )
 

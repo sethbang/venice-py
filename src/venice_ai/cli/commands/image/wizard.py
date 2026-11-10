@@ -50,11 +50,11 @@ async def _interactive_image_generation(ctx: click.Context) -> None:
                 if not available_models:
                     print_error("No image models found in API response.")
                     print_info("Please check your API connection and try again.")
-                    return
+                    raise SystemExit(1)
             except Exception as e:
                 print_error(f"Could not fetch models from API: {e}")
                 print_info("Please check your API key and connection.")
-                return
+                raise SystemExit(1) from e
 
             try:
                 styles_response = await client.image.list_styles()

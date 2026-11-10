@@ -8,7 +8,9 @@ functionality including voice management and audio response handling.
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from ...core.models.base import CaseInsensitiveHeaders
 
 
 class VoiceDetail(BaseModel):
@@ -139,12 +141,18 @@ class AudioResponse(BaseModel):
     """
 
     headers: dict[str, str] | None = None
-    """HTTP response headers from the audio API request.
+    """HTTP response headers from the audio API request, or ``None`` without a response.
 
-    Includes rate limiting headers like ``x-ratelimit-remaining-requests`` and
-    ``x-ratelimit-reset-requests`` for proper rate limit tracking. Essential
-    for scheduler integration and usage monitoring.
+    A ``CaseInsensitiveHeaders``: names are stored
+    lowercase and looked up in any casing. Includes rate limiting headers like
+    ``x-ratelimit-remaining-requests`` and ``x-ratelimit-reset-requests`` for proper
+    rate limit tracking. Essential for scheduler integration and usage monitoring.
     """
+
+    @field_validator("headers", mode="after")
+    @classmethod
+    def _ignore_header_case(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        return None if value is None else CaseInsensitiveHeaders(value)
 
     def __init__(self, content: bytes, response: Any = None, **kwargs: Any):
         """Initialize AudioResponse with content and optional response object."""

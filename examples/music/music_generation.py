@@ -32,23 +32,32 @@ Key features covered:
   only once the audio is on disk (or the job failed and has none)
 - Naming the saved file from the format the server reported
   (``MusicCompletedStatus.audio_format``)
+- ``lyrics_prompt`` on a model whose catalog entry sets ``supports_lyrics``.
+  ``lyrics_supplied=True`` only lets the resolver consider models that require
+  lyrics; it does not drop instrumental models, so those are excluded by id
 
-Cost: each run makes two paid generations on the cheapest model at the
-target length (the price is printed before each one). The
-``force_instrumental`` section is quoted for free on every run and generates
-only when you opt in, because the models that support it cost more::
+Cost: quote only by default. Every model is quoted for free and the example
+then exits 77, because a generation bills at least about $0.03. To generate,
+set::
 
     VENICE_RUN_PAID_MUSIC=1 poetry run python examples/music/music_generation.py
 
+A paid run makes four generations, each priced before it runs: two on the
+cheapest model at the target length (about $0.03 each when this was written),
+one on the cheapest model that takes ``force_instrumental`` and one on the
+cheapest that takes lyrics. Those two depend on the catalog, about $0.04 to
+$0.19 each on the listed prices, so a run costs about $0.15 to $0.45.
+
 Outputs are written to ``examples/results/music/``.
 
-Exit status: ``0`` when both core demos produced audio, ``1`` on any failure,
-``77`` (with a ``SKIPPED:`` line) when no music generator in the catalog can
-make the target clip length (``NoMatchingModelError``). Candidates whose
-quotes all failed (``ModelQuotesUnavailableError``) are a failure, not a
-skip: the catalog has the models, but they could not be priced. The
-``force_instrumental`` section prints ``Section skipped:`` when it only
-quotes or no model accepts the flag; that does not change the exit status.
+Exit status: ``0`` when every demo that ran produced audio, ``1`` on any
+failure, ``77`` (with a ``SKIPPED:`` line) when ``VENICE_RUN_PAID_MUSIC`` is
+unset or no music generator in the catalog can make the target clip length
+(``NoMatchingModelError``). Candidates whose quotes all failed
+(``ModelQuotesUnavailableError``) are a failure, not a skip: the catalog has
+the models, but they could not be priced. The ``force_instrumental`` and lyrics
+sections print ``Section skipped:`` when no model takes them; that does not
+change the exit status.
 """
 
 import asyncio
@@ -64,13 +73,15 @@ import aiohttp
 
 from venice_ai import (
     CheapestMusicResult,
+    InvalidRequestError,
     ModelQuotesUnavailableError,
     MusicGenerationError,
     NoMatchingModelError,
+    UnprocessableEntityError,
     VeniceClient,
     VeniceError,
 )
-from venice_ai.types.api.models import MusicModelSpec
+from venice_ai.types.api.models import ModelResponse, MusicModelSpec
 from venice_ai.types.api.music import (
     MusicCompletedStatus,
     MusicCompleteResponse,
@@ -93,11 +104,14 @@ WAIT_BUDGET_SECONDS = 600
 POLL_INTERVAL_SECONDS = 5.0
 MAX_POLLS = math.ceil(WAIT_BUDGET_SECONDS / POLL_INTERVAL_SECONDS)
 
-#: Opt-in for the paid force_instrumental generation (quoted either way).
+#: Opt-in for every paid generation (each is quoted either way).
 RUN_PAID = os.environ.get("VENICE_RUN_PAID_MUSIC") == "1"
 
 #: Exit status for a run that skipped because a prerequisite is missing.
 EXIT_SKIPPED = 77
+
+LYRICS_STYLE = "Warm folk ballad with acoustic guitar and a gentle solo vocal."
+LYRICS = "Lanterns on the water, drifting slow,\nCarry all the evening down below."
 
 
 def _ts() -> str:
@@ -221,6 +235,7 @@ async def generate_with_job(
     stem: str,
     *,
     force_instrumental: bool | None = None,
+    lyrics_prompt: str | None = None,
 ) -> Path | None:
     """Quote, generate and download with the managed :class:`MusicJob`.
 
@@ -237,12 +252,13 @@ async def generate_with_job(
         # A block that raises leaves the finished job's audio stored (only a
         # failed or rejected job, which has none, is released on the way out),
         # so a clip is never deleted before it is saved. After the save the
-        # block releases the job itself to report the result; the release the
-        # context manager repeats on a clean exit then has nothing to delete.
+        # block releases the job itself to report the result, and the context
+        # manager then leaves the released job alone.
         async with await client.music.run(
             model=pick.model,
             prompt=prompt,
             force_instrumental=force_instrumental,
+            lyrics_prompt=lyrics_prompt,
             **pick.request_params,
         ) as job:
             print(f"   ⏳ Queued with queue_id={job.queue_id}")
@@ -331,6 +347,10 @@ async def low_level_flow(client: VeniceClient, pick: CheapestMusicResult) -> Pat
 
     try:
         spec = await music_spec(client, model, prompt)
+        quote = await client.music.quote(
+            model=model, character_count=len(prompt), **pick.request_params
+        )
+        print(f"   💰 Quoted cost: ${quote.quote:.4f}")
         queued = await client.music.submit(model=model, prompt=prompt, **pick.request_params)
         queue_id = queued.queue_id
         print(f"   ⏳ queue_id={queue_id}")
@@ -380,6 +400,13 @@ async def low_level_flow(client: VeniceClient, pick: CheapestMusicResult) -> Pat
         written.write_bytes(audio)
         kind = status.content_type or "audio"
         print(f"   💾 Saved {len(audio):,} bytes of {kind} to: {written}")
+    except (InvalidRequestError, UnprocessableEntityError) as e:
+        # A 400 or 422 means the server refused the request or, from retrieve, the
+        # job itself. Either way it is not generating, so there is nothing to resume.
+        print(f"\n   ❌ The server refused this: {type(e).__name__}: {e}")
+        if queue_id is not None:
+            print(f"      queue_id={queue_id} has no audio to wait for")
+        return None
     except (LookupError, ValueError, VeniceError, aiohttp.ClientError, OSError) as e:
         print(f"\n   ❌ {type(e).__name__}: {e}")
         # Nothing was released, so a queued job keeps whatever it produced.
@@ -435,14 +462,76 @@ async def instrumental_demo(client: VeniceClient) -> Path | bool | None:
     return saved if saved is not None else False
 
 
+def instrumental_only_models(entries: list[ModelResponse]) -> list[str]:
+    """IDs of the music models whose catalog entry does not set ``supports_lyrics``.
+
+    Passing these as ``exclude_models`` keeps ``lyrics_prompt`` away from a model
+    that would not use it. ``lyrics_supplied=True`` alone does not do that.
+    """
+    return [
+        m.id
+        for m in entries
+        if not (isinstance(m.model_spec, MusicModelSpec) and m.model_spec.supports_lyrics)
+    ]
+
+
+async def lyrics_demo(client: VeniceClient) -> Path | bool | None:
+    """Find the cheapest model that takes ``lyrics_prompt``, quote it, and sing.
+
+    Generates only with ``VENICE_RUN_PAID_MUSIC=1``. Returns the written file,
+    ``False`` on failure, and ``None`` when it only quoted or no model in the
+    catalog takes lyrics.
+    """
+    print("\n🎤 lyrics_prompt — the cheapest model that supports lyrics")
+    print("-" * 60)
+    try:
+        catalog = await client.models.list(type="music")
+        pick = await client.models.resolve_cheapest_music(
+            duration_seconds=TARGET_SECONDS,
+            lyrics_supplied=True,
+            exclude_models=instrumental_only_models(catalog.data),
+        )
+        spec = await music_spec(client, pick.model, LYRICS_STYLE)
+    except NoMatchingModelError as e:
+        print(f"Section skipped: lyrics: no catalog music model supports them: {e}")
+        return None
+    except ModelQuotesUnavailableError as e:
+        print("   ❌ Lyrics models exist, but none could be quoted:")
+        _print_quote_failures(e)
+        return False
+    except (LookupError, ValueError, VeniceError, aiohttp.ClientError) as e:
+        print(f"   ❌ Could not rank lyrics models: {type(e).__name__}: {e}")
+        return False
+    print_pick(pick)
+    if spec.lyrics_character_limit is not None and len(LYRICS) > spec.lyrics_character_limit:
+        print(f"   ❌ {pick.model} accepts lyrics of at most {spec.lyrics_character_limit} chars")
+        return False
+
+    if not RUN_PAID:
+        print(
+            "Section skipped: lyrics generation: quoted only. "
+            "Set VENICE_RUN_PAID_MUSIC=1 to generate it (incurs the cost)."
+        )
+        return None
+
+    saved = await generate_with_job(
+        client, pick, LYRICS_STYLE, "music_lyrics", lyrics_prompt=LYRICS
+    )
+    return saved if saved is not None else False
+
+
 async def main() -> int:
-    """Run the demos; return ``0`` only if both core demos wrote audio."""
+    """Run the demos.
+
+    Returns ``0`` only if every demo that ran wrote audio, ``1`` on any failure
+    and ``77`` when the paid opt-in is unset or no generator fits.
+    """
     print("🚀 Venice AI Music Generation Examples")
     print("=" * 60)
     if RUN_PAID:
-        print("💸 VENICE_RUN_PAID_MUSIC=1: the force_instrumental section will generate (paid).")
+        print("💸 VENICE_RUN_PAID_MUSIC=1: this run makes paid generations, each quoted first.")
     else:
-        print("🧪 force_instrumental is quote only. Set VENICE_RUN_PAID_MUSIC=1 to generate it.")
+        print("🧪 Quote only (default). Set VENICE_RUN_PAID_MUSIC=1 to generate.")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -466,18 +555,21 @@ async def main() -> int:
             return 1
         print_pick(pick)
 
-        core: list[tuple[str, Path | None]] = [
-            ("quote_then_generate", await quote_then_generate(client, pick)),
-            ("low_level_flow", await low_level_flow(client, pick)),
-        ]
-        instrumental = await instrumental_demo(client)
+        core: list[tuple[str, Path | None]] = []
+        if RUN_PAID:
+            core = [
+                ("quote_then_generate", await quote_then_generate(client, pick)),
+                ("low_level_flow", await low_level_flow(client, pick)),
+            ]
+        optional = {
+            "instrumental_demo": await instrumental_demo(client),
+            "lyrics_demo": await lyrics_demo(client),
+        }
 
     failed = [name for name, path in core if path is None]
-    if instrumental is False:
-        failed.append("instrumental_demo")
+    failed += [name for name, outcome in optional.items() if outcome is False]
     written = [path for _, path in core if path is not None]
-    if isinstance(instrumental, Path):
-        written.append(instrumental)
+    written += [path for path in optional.values() if isinstance(path, Path)]
 
     if written:
         print("\n📁 Files written by this run:")
@@ -487,8 +579,12 @@ async def main() -> int:
     if failed:
         print(f"\n❌ Demos failed: {', '.join(failed)}")
         return 1
-    if instrumental is None:
-        print("\n⏭️  force_instrumental was not generated this run (see Section skipped above).")
+    if not RUN_PAID:
+        print("\nSKIPPED: VENICE_RUN_PAID_MUSIC is not set, so no music was generated")
+        return EXIT_SKIPPED
+    for name, outcome in optional.items():
+        if outcome is None:
+            print(f"\n⏭️  {name} generated nothing this run (see Section skipped above).")
 
     print("\n✨ Done!")
     return 0

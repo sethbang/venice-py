@@ -7,9 +7,19 @@ Shared helpers for Venice AI chat examples.
   that merely contains its digits, and not the same digits with the opposite
   sign) and a temperature together with its unit. A bare substring test would
   accept "2024" for 24, "5480" for 548 or "-24°C" for 24°C.
+- ``completion_cap`` keeps a generous reasoning budget within what a model can
+  produce, so the request and the cut-off check agree on the same number.
 """
 
 import re
+
+from venice_ai import VeniceClient
+from venice_ai.types.api import TextModelSpec
+
+# Room for a reasoning model to think and still answer. Small reasoning models
+# vary widely in how long they think, even on easy questions, so this leaves
+# several thousand tokens of headroom over a typical run.
+REASONING_BUDGET = 16384
 
 # A temperature as the example tools format it: ``24°C``, ``-5°F``.
 _READING = re.compile(r"(-?\d+)\s*°\s*([CF])")
@@ -25,6 +35,19 @@ _DEGREE_MARKS = "°º˚"
 # subtraction), or the word "minus" followed by any whitespace.
 _NEGATIVE = r"(?:(?<![\d.,])[-−]|\bminus\s+)"
 _ENDS_WITH_NEGATIVE = re.compile(rf"{_NEGATIVE}\Z", re.IGNORECASE)
+
+
+async def completion_cap(
+    client: VeniceClient, model_id: str, wanted: int = REASONING_BUDGET
+) -> int:
+    """``wanted``, or the model's ``maxCompletionTokens`` if that is lower.
+
+    Many models accept fewer than 16384 completion tokens, some as few as 4096.
+    A cut-off check must compare against the cap the request really used.
+    """
+    spec = (await client.models.get(model_id)).model_spec
+    limit = spec.maxCompletionTokens if isinstance(spec, TextModelSpec) else None
+    return min(wanted, int(limit)) if limit else wanted
 
 
 def _magnitude_pattern(value: float) -> str:

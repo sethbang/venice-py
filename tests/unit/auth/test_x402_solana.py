@@ -10,8 +10,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import pytest
+from aiohttp import web
 
 # Skip the whole module cleanly if the optional extra is missing.
 solders = pytest.importorskip("solders")
@@ -22,12 +28,15 @@ from solders.pubkey import Pubkey  # noqa: E402
 from solders.signature import Signature  # noqa: E402
 from solders.transaction import VersionedTransaction  # noqa: E402
 
+from venice_ai import RetryOptions, VeniceClient  # noqa: E402
 from venice_ai.auth.x402_solana import (  # noqa: E402
     MEMO_PROGRAM_ID,
+    SOLANA_MAINNET_CAIP2,
     USDC_SOLANA_MAINNET,
     SolanaX402Auth,
     _derive_ata,
 )
+from venice_ai.types.api.x402 import X402TopUpData, X402TopUpResponse  # noqa: E402
 
 # A fixed facilitator + recipient mirroring Venice's live 402 response.
 _FEE_PAYER = "BFK9TLC3edb13K6v4YyH3DwPb5DSUpkWvb7XnqCL9b4F"
@@ -379,6 +388,43 @@ def test_rejects_bad_decimals(auth: SolanaX402Auth, requirement: dict) -> None:
         _build(auth, requirement, mint_decimals=256)
 
 
+_OTHER_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+
+
+def test_rejects_asset_that_is_not_usdc(auth: SolanaX402Auth, requirement: dict) -> None:
+    requirement["asset"] = _OTHER_MINT
+    with pytest.raises(ValueError, match="asset mismatch") as exc_info:
+        _build(auth, requirement)
+    assert _OTHER_MINT in str(exc_info.value)
+    assert USDC_SOLANA_MAINNET in str(exc_info.value)
+
+
+def test_validate_asset_none_means_usdc(auth: SolanaX402Auth, requirement: dict) -> None:
+    requirement["asset"] = _OTHER_MINT
+    with pytest.raises(ValueError, match="asset mismatch"):
+        _build(auth, requirement, validate_asset=None)
+
+
+def test_asset_comparison_is_case_sensitive(auth: SolanaX402Auth, requirement: dict) -> None:
+    """Base58 is case-sensitive: a re-cased mint is a different address, unlike EVM hex."""
+    requirement["asset"] = USDC_SOLANA_MAINNET.swapcase()
+    with pytest.raises(ValueError, match="asset mismatch"):
+        _build(auth, requirement)
+
+
+def test_validate_asset_allows_the_named_mint(auth: SolanaX402Auth, requirement: dict) -> None:
+    requirement["asset"] = _OTHER_MINT
+    tx = _decode_tx(_build(auth, requirement, validate_asset=_OTHER_MINT))
+    keys = list(tx.message.account_keys)
+    transfer = tx.message.instructions[2]
+    assert str(keys[transfer.accounts[1]]) == _OTHER_MINT
+
+
+def test_validate_asset_replaces_the_usdc_default(auth: SolanaX402Auth, requirement: dict) -> None:
+    with pytest.raises(ValueError, match="asset mismatch"):
+        _build(auth, requirement, validate_asset=_OTHER_MINT)
+
+
 # ── Resource wiring: X402.top_up_with_solana ────────────────────────────────
 
 
@@ -398,7 +444,9 @@ def x402_resource():
 
     from venice_ai.resources.x402 import X402
 
-    return X402(MagicMock())
+    client = MagicMock()
+    client._get_session = AsyncMock(return_value=MagicMock())
+    return X402(client)
 
 
 @pytest.mark.asyncio
@@ -422,7 +470,7 @@ async def test_top_up_with_solana_happy_path(
     x402_resource.top_up = AsyncMock(side_effect=[probe_err, settled])
 
     # Patch the live RPC fetch to return deterministic context (no network).
-    async def _fake_ctx(rpc_url, mint, *, http):
+    async def _fake_ctx(rpc_url, mint, *, http, **_kwargs):
         return _BLOCKHASH, 6, _USDC_TOKEN_PROGRAM
 
     monkeypatch.setattr("venice_ai.auth.x402_solana.fetch_solana_tx_context", _fake_ctx)
@@ -466,7 +514,7 @@ async def test_top_up_with_solana_picks_solana_accepts_entry(
     )
     x402_resource.top_up = AsyncMock(side_effect=[probe_err, settled])
 
-    async def _fake_ctx(rpc_url, mint, *, http):
+    async def _fake_ctx(rpc_url, mint, *, http, **_kwargs):
         assert mint == USDC_SOLANA_MAINNET  # used the solana entry's asset
         return _BLOCKHASH, 6, _USDC_TOKEN_PROGRAM
 
@@ -515,7 +563,7 @@ async def test_top_up_with_solana_picks_caip2_accepts_entry(
     )
     x402_resource.top_up = AsyncMock(side_effect=[probe_err, settled])
 
-    async def _fake_ctx(rpc_url, mint, *, http):
+    async def _fake_ctx(rpc_url, mint, *, http, **_kwargs):
         assert mint == USDC_SOLANA_MAINNET  # used the CAIP-2 entry's asset
         return _BLOCKHASH, 6, _USDC_TOKEN_PROGRAM
 
@@ -541,3 +589,284 @@ async def test_top_up_with_solana_no_solana_entry_raises(
 
     with pytest.raises(RuntimeError, match="no Solana mainnet requirement"):
         await x402_resource.top_up_with_solana(auth=auth, amount_usdc=5.0)
+
+
+@pytest.mark.parametrize(
+    ("amount_usdc", "max_amount_usdc", "server_units", "pattern"),
+    [
+        (10.0, None, "5000000", r"amount_usdc=\$10\.0 differs .*\$5\.0 USDC"),
+        (3.0, 10.0, "5000000", r"amount_usdc=\$3\.0 differs .*\$5\.0 USDC"),
+        (5.0, 10.0, "7000000", r"amount_usdc=\$5\.0 differs .*\$7\.0 USDC"),
+        (5.0, 5.0, "10000000", r"Server requires \$10\.0 USDC"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_top_up_with_solana_refuses_amount_mismatch_before_rpc_or_signing(
+    x402_resource,
+    auth: SolanaX402Auth,
+    requirement: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    amount_usdc: float,
+    max_amount_usdc: float | None,
+    server_units: str,
+    pattern: str,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    requirement["amount"] = server_units
+    probe_err = _payment_required_error({"x402Version": 2, "accepts": [requirement]})
+    x402_resource.top_up = AsyncMock(side_effect=[probe_err])
+    fetch = AsyncMock(return_value=(_BLOCKHASH, 6, _USDC_TOKEN_PROGRAM))
+    monkeypatch.setattr("venice_ai.auth.x402_solana.fetch_solana_tx_context", fetch)
+    sign = MagicMock(side_effect=AssertionError("must not sign"))
+    monkeypatch.setattr(auth, "build_payment_header", sign)
+
+    with pytest.raises(ValueError, match=pattern):
+        await x402_resource.top_up_with_solana(
+            auth=auth, amount_usdc=amount_usdc, max_amount_usdc=max_amount_usdc
+        )
+
+    fetch.assert_not_called()
+    sign.assert_not_called()
+    assert x402_resource.top_up.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_top_up_with_solana_signs_exactly_the_requirement_under_a_higher_cap(
+    x402_resource, auth: SolanaX402Auth, requirement: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from venice_ai.types.api.x402 import X402TopUpData, X402TopUpResponse
+
+    probe_err = _payment_required_error({"x402Version": 2, "accepts": [requirement]})
+    settled = X402TopUpResponse(
+        success=True,
+        data=X402TopUpData(
+            walletAddress=auth.wallet_address,
+            amountCredited=5.0,
+            newBalance=5.0,
+            paymentId="x402-sol-test",
+        ),
+    )
+    x402_resource.top_up = AsyncMock(side_effect=[probe_err, settled])
+    monkeypatch.setattr(
+        "venice_ai.auth.x402_solana.fetch_solana_tx_context",
+        AsyncMock(return_value=(_BLOCKHASH, 6, _USDC_TOKEN_PROGRAM)),
+    )
+
+    await x402_resource.top_up_with_solana(auth=auth, amount_usdc=5.0, max_amount_usdc=10.0)
+
+    tx = _decode_tx(x402_resource.top_up.call_args_list[1].kwargs["payment_header"])
+    assert tx.message.instructions[2].data[1:9] == (5_000_000).to_bytes(8, "little")
+
+
+@pytest.mark.asyncio
+async def test_top_up_with_solana_refuses_a_requirement_that_is_not_usdc(
+    x402_resource, auth: SolanaX402Auth, requirement: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one-call path takes no validate_asset, so a non-USDC mint never settles."""
+    from unittest.mock import AsyncMock
+
+    requirement["asset"] = _OTHER_MINT
+    probe_err = _payment_required_error({"x402Version": 2, "accepts": [requirement]})
+    x402_resource.top_up = AsyncMock(side_effect=[probe_err])
+    fetch = AsyncMock(return_value=(_BLOCKHASH, 6, _USDC_TOKEN_PROGRAM))
+    monkeypatch.setattr("venice_ai.auth.x402_solana.fetch_solana_tx_context", fetch)
+
+    with pytest.raises(ValueError, match="no USDC requirement on Solana mainnet") as exc_info:
+        await x402_resource.top_up_with_solana(auth=auth, amount_usdc=5.0)
+
+    assert "validate_asset" not in str(exc_info.value)
+    assert _OTHER_MINT in str(exc_info.value)
+    assert x402_resource.top_up.call_count == 1
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("network", ["solana", SOLANA_MAINNET_CAIP2])
+@pytest.mark.asyncio
+async def test_top_up_with_solana_takes_the_usdc_entry_behind_another_mint(
+    x402_resource,
+    auth: SolanaX402Auth,
+    requirement: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    network: str,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from venice_ai.types.api.x402 import X402TopUpData, X402TopUpResponse
+
+    requirement["network"] = network
+    other_mint = {**requirement, "asset": _OTHER_MINT, "amount": "9000000"}
+    probe_err = _payment_required_error({"x402Version": 2, "accepts": [other_mint, requirement]})
+    settled = X402TopUpResponse(
+        success=True,
+        data=X402TopUpData(
+            walletAddress=auth.wallet_address,
+            amountCredited=5.0,
+            newBalance=5.0,
+            paymentId="x402-sol-test",
+        ),
+    )
+    x402_resource.top_up = AsyncMock(side_effect=[probe_err, settled])
+    fetched: list[str] = []
+
+    async def _fake_ctx(rpc_url, mint, *, http, **_kwargs):
+        fetched.append(mint)
+        return _BLOCKHASH, 6, _USDC_TOKEN_PROGRAM
+
+    monkeypatch.setattr("venice_ai.auth.x402_solana.fetch_solana_tx_context", _fake_ctx)
+
+    await x402_resource.top_up_with_solana(auth=auth, amount_usdc=5.0)
+
+    assert fetched == [USDC_SOLANA_MAINNET]
+    envelope = _decode_envelope(x402_resource.top_up.call_args_list[1].kwargs["payment_header"])
+    assert envelope["accepted"]["asset"] == USDC_SOLANA_MAINNET
+
+
+@pytest.mark.asyncio
+async def test_top_up_with_solana_skips_usdc_on_another_network(
+    x402_resource, auth: SolanaX402Auth, requirement: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import AsyncMock
+
+    requirement["asset"] = _OTHER_MINT
+    devnet = {**requirement, "network": "solana-devnet", "asset": USDC_SOLANA_MAINNET}
+    probe_err = _payment_required_error({"x402Version": 2, "accepts": [devnet, requirement]})
+    x402_resource.top_up = AsyncMock(side_effect=[probe_err])
+    fetch = AsyncMock(return_value=(_BLOCKHASH, 6, _USDC_TOKEN_PROGRAM))
+    monkeypatch.setattr("venice_ai.auth.x402_solana.fetch_solana_tx_context", fetch)
+
+    with pytest.raises(ValueError, match="no USDC requirement on Solana mainnet"):
+        await x402_resource.top_up_with_solana(auth=auth, amount_usdc=5.0)
+
+    fetch.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# The RPC call goes through the client's session
+# ---------------------------------------------------------------------------
+
+_API_KEY = "sk-SENTINELAPIKEY"
+_RPC_SECRET = "RPCSECRET"
+_RPC_URL = f"http://rpc.example/v2/{_RPC_SECRET}/?api-key={_RPC_SECRET}"
+
+
+def _rpc_answer(method: str) -> dict:
+    if method == "getLatestBlockhash":
+        return {"result": {"value": {"blockhash": _BLOCKHASH}}}
+    mint = base64.b64encode(bytes(44) + bytes([6]) + bytes(37)).decode()
+    return {"result": {"value": {"owner": _USDC_TOKEN_PROGRAM, "data": [mint, "base64"]}}}
+
+
+@asynccontextmanager
+async def _rpc_host(seen: list[web.Request]) -> AsyncIterator[str]:
+    """A loopback host answering Solana RPC calls, used directly or as an HTTP proxy."""
+
+    async def answer(request: web.Request) -> web.Response:
+        seen.append(request)
+        return web.json_response(_rpc_answer((await request.json())["method"]))
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", answer)
+    runner = web.AppRunner(app, access_log=None, shutdown_timeout=0.1)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    try:
+        yield f"http://127.0.0.1:{runner.addresses[0][1]}"
+    finally:
+        await runner.cleanup()
+
+
+def _stub_top_up(client: VeniceClient, requirement: dict, auth: SolanaX402Auth) -> None:
+    probe_err = _payment_required_error({"x402Version": 2, "accepts": [requirement]})
+    settled = X402TopUpResponse(
+        success=True,
+        data=X402TopUpData(
+            walletAddress=auth.wallet_address,
+            amountCredited=5.0,
+            newBalance=5.0,
+            paymentId="x402-sol-test",
+        ),
+    )
+    client.x402.top_up = AsyncMock(side_effect=[probe_err, settled])  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_solana_rpc_goes_through_the_clients_proxy_without_the_api_key(
+    auth: SolanaX402Auth, requirement: dict
+) -> None:
+    seen: list[web.Request] = []
+    async with (
+        _rpc_host(seen) as proxy,
+        VeniceClient(api_key=_API_KEY, base_url="http://127.0.0.1:9/api/v1", proxy=proxy) as client,
+    ):
+        _stub_top_up(client, requirement, auth)
+        result = await client.x402.top_up_with_solana(auth=auth, amount_usdc=5.0, rpc_url=_RPC_URL)
+
+    assert result.success
+    assert [r.host for r in seen] == ["rpc.example", "rpc.example"]
+    for request in seen:
+        assert "Authorization" not in request.headers
+        assert "X-API-Key" not in request.headers
+        assert _API_KEY not in str(request.headers)
+
+
+@pytest.mark.asyncio
+async def test_solana_rpc_uses_a_session_the_caller_supplied(
+    auth: SolanaX402Auth, requirement: dict
+) -> None:
+    seen: list[web.Request] = []
+    async with (
+        _rpc_host(seen) as rpc,
+        aiohttp.ClientSession() as session,
+        VeniceClient(api_key=_API_KEY, base_url=f"{rpc}/api/v1", http_client=session) as client,
+    ):
+        _stub_top_up(client, requirement, auth)
+        with patch.object(session, "post", wraps=session.post) as post:
+            await client.x402.top_up_with_solana(auth=auth, amount_usdc=5.0, rpc_url=f"{rpc}/rpc")
+        assert not session.closed
+
+    assert post.call_count == 2
+    assert all("Authorization" not in r.headers for r in seen)
+
+
+@pytest.mark.parametrize("status", [401, 503])
+@pytest.mark.asyncio
+async def test_solana_rpc_failure_through_the_clients_session_stays_url_free(
+    auth: SolanaX402Auth,
+    requirement: dict,
+    status: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+
+    async def refuse(_request: web.Request) -> web.Response:
+        return web.Response(status=status, text=f"refused {_RPC_SECRET}")
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", refuse)
+    runner = web.AppRunner(app, access_log=None, shutdown_timeout=0.1)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    rpc = f"http://127.0.0.1:{runner.addresses[0][1]}/v2/{_RPC_SECRET}/?api-key={_RPC_SECRET}"
+    try:
+        async with VeniceClient(
+            api_key=_API_KEY,
+            base_url="http://127.0.0.1:9/api/v1",
+            retry_options=RetryOptions(max_attempts=1, base_delay=0.001, max_delay=0.002),
+        ) as client:
+            _stub_top_up(client, requirement, auth)
+            with pytest.raises(RuntimeError) as excinfo:
+                await client.x402.top_up_with_solana(auth=auth, amount_usdc=5.0, rpc_url=rpc)
+    finally:
+        await runner.cleanup()
+
+    error = excinfo.value
+    assert f"HTTP {status}" in str(error)
+    assert error.__cause__ is None and error.__context__ is None
+    for secret in (_RPC_SECRET, _API_KEY):
+        assert secret not in f"{error!s} {error!r}"
+        assert secret not in caplog.text

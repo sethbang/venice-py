@@ -415,11 +415,10 @@ class ChatCompletionRequest(BaseModel):
         default=None, description="Venice-specific parameters"
     )
 
-    # OpenAI-compatible passthrough fields. The Venice API proxies these to
-    # the underlying model without SDK-side interpretation.
+    # OpenAI-compatible fields passed through without SDK-side interpretation.
     store: bool | None = Field(
         default=None,
-        description="OpenAI-compat: whether to store the completion on the provider side.",
+        description="Accepted for OpenAI compatibility; Venice does not use it.",
     )
     text: dict[str, Any] | None = Field(
         default=None,

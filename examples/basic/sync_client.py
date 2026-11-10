@@ -5,26 +5,31 @@ Venice AI SDK - Synchronous Client
 
 ``SyncVeniceClient`` calls the API from ordinary blocking code, with no
 ``async``/``await`` in sight. It runs the async client on a background thread
-and has the same resource methods. This example shows the three shapes of call
-that work with it:
+and has the same resource methods. This example shows three shapes of call:
 
 - a chat completion;
-- a chat stream, read with a plain ``for`` loop;
-- a paginated ``.list()`` walked page by page.
+- a chat stream, read with a plain ``for`` loop into one assembled response;
+- an ``iter_*`` paginator, walked with a ``for`` loop and left early.
 
-What is still async
--------------------
-The sync client turns coroutine methods into blocking ones and wraps streams.
-Everything else comes back unchanged, so for these, use ``VeniceClient``:
+What a method returns works without ``await`` too: streams with their
+``collect()``, ``text_deltas()``, ``collect_with_deltas()`` and
+``final_response``, ``iter_*`` paginators, streamed audio from
+``audio.create_speech(stream=True)`` and ``audio.stream_long_text()``, and job
+objects such as the one ``video.run()`` returns, whose methods block and which a
+plain ``with`` releases.
 
-- ``iter_*`` paginators such as ``characters.iter_all()``: they return an async
-  ``Paginator``, and ``for item in paginator`` raises ``TypeError``. Walk the
-  matching ``.list()`` by hand, as this example does.
-- Job objects, such as the ``VideoJob`` from ``video.run()``: its methods stay
-  coroutines. ``video.run()`` submits the job before it returns, so calling it
-  here can start a paid job that blocking code cannot then drive.
-- A sync stream has no ``collect()``, ``text_deltas()`` or ``final_response``.
-  Put the text, the finish reason and the usage together from the chunks yourself.
+An ``on_progress`` callback passed to a job's ``wait()`` runs on the client's
+loop thread. Keep it short and do not call the client from it, which raises
+``RuntimeError``.
+
+What stays async
+----------------
+- ``client.gather()`` takes awaitables, which blocking calls never produce. Use
+  ``VeniceClient`` to run requests concurrently.
+- A ``VideoJob`` built by hand, say from a saved queue ID, needs the async client.
+  In blocking code, use ``client.video.retrieve()`` and ``client.video.cancel()``.
+  A job on a ``download_url`` model is not known to ``/video/complete``: fetch its
+  saved link and send ``DELETE`` to it yourself.
 
 Prerequisites:
 - Install: pip install venice-py
@@ -36,22 +41,24 @@ and listing characters are free.
 
 Exit status: ``0`` when the chat and the stream returned complete answers
 (listing characters may print ``Section skipped:`` if the catalog has none),
-``1`` for an empty or cut-off reply, one without usage to check, a page loop
-that did not advance, or an API error, and ``77`` (with a ``SKIPPED:`` line)
-when the catalog has no chat model that answers directly.
+``1`` for an empty or cut-off reply, one without usage to check, a stream with
+no finish reason, a walk that repeats a character, or an API error, and ``77``
+(with a ``SKIPPED:`` line) when the catalog has no chat model that answers
+directly.
 """
 
 import sys
 
 from venice_ai import NoMatchingModelError, SyncVeniceClient, UserMessage, VeniceError
+from venice_ai.types.api import ChatCompletionResponse
 from venice_ai.types.api.requests import VeniceParameters
 
 #: Plenty for a one-line answer from a model that answers directly.
 MAX_COMPLETION_TOKENS = 64
 
-#: Characters per page, and how many pages to read before stopping.
+#: Characters per page, and how many to read before leaving the walk: two pages.
 PAGE_SIZE = 5
-MAX_PAGES = 2
+MAX_CHARACTERS = 2 * PAGE_SIZE
 
 #: Exit code for "skipped": a prerequisite is missing, not a failure.
 EXIT_SKIPPED = 77
@@ -73,6 +80,18 @@ def cut_off(finish_reason: str | None, completion_tokens: int | None) -> bool:
     )
 
 
+def reply_complete(response: ChatCompletionResponse) -> bool:
+    """Print the finish reason and usage, and check the reply is complete."""
+    finish_reason = response.choices[0].finish_reason if response.choices else None
+    used = response.usage.completion_tokens if response.usage else None
+    print(f"Finish reason: {finish_reason} ({used} of {MAX_COMPLETION_TOKENS} completion tokens)")
+    if not response.text or cut_off(finish_reason, used):
+        print("❌ The reply was empty or may be cut off by the token cap")
+        return False
+    print("✓ Complete reply")
+    return True
+
+
 def chat_once(client: SyncVeniceClient, model: str) -> bool:
     """Make one blocking chat completion and check the reply is complete."""
     print("\n💬 Chat completion")
@@ -84,95 +103,60 @@ def chat_once(client: SyncVeniceClient, model: str) -> bool:
         max_completion_tokens=MAX_COMPLETION_TOKENS,
         venice_parameters=NO_SYSTEM_PROMPT,
     )
-
-    finish_reason = response.choices[0].finish_reason if response.choices else None
     print(f"Reply: {response.text}")
-    used = response.usage.completion_tokens if response.usage else None
-    print(f"Finish reason: {finish_reason} ({used} of {MAX_COMPLETION_TOKENS} completion tokens)")
-    if not response.text or cut_off(finish_reason, used):
-        print("❌ The reply was empty or may be cut off by the token cap")
-        return False
-    print("✓ Complete reply")
-    return True
+    return reply_complete(response)
 
 
 def stream_once(client: SyncVeniceClient, model: str) -> bool:
-    """Read a chat stream with a ``for`` loop and put the reply together.
+    """Print a chat stream as it arrives, then check the assembled response.
 
-    A sync stream has no ``collect()``, so this keeps the text, the finish
-    reason and the usage itself. The usage arrives on the final chunk, which has
-    no choices at all, so read it before checking for them.
+    ``collect_with_deltas()`` yields the text and leaves the whole response, with
+    its finish reason and usage, on ``final_response``. To skip the live text,
+    ``stream.collect()`` returns that response directly. Both raise ``ValueError``
+    for a stream that ends without a finish reason.
     """
     print("\n🌊 Streaming")
     print("-" * 40)
 
-    parts: list[str] = []
-    finish_reason: str | None = None
-    used: int | None = None
-    chunks = 0
-    with client.chat.completions.stream(
-        model=model,
-        messages=[UserMessage(content="Count from one to three in words.")],
-        max_completion_tokens=MAX_COMPLETION_TOKENS,
-        venice_parameters=NO_SYSTEM_PROMPT,
-    ) as stream:
-        for chunk in stream:
-            chunks += 1
-            if chunk.usage is not None:
-                used = chunk.usage.completion_tokens
-            if not chunk.choices:
-                continue
-            choice = chunk.choices[0]
-            if choice.delta.content:
-                parts.append(choice.delta.content)
-                print(choice.delta.content, end="", flush=True)
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
-    print()
-
-    text = "".join(parts)
-    print(
-        f"Chunks: {chunks}, finish reason: {finish_reason} "
-        f"({used} of {MAX_COMPLETION_TOKENS} completion tokens)"
-    )
-    if not text or finish_reason is None or cut_off(finish_reason, used):
-        print("❌ The stream was empty, unfinished or may be cut off by the token cap")
+    try:
+        with client.chat.completions.stream(
+            model=model,
+            messages=[UserMessage(content="Count from one to three in words.")],
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
+            venice_parameters=NO_SYSTEM_PROMPT,
+        ) as stream:
+            for text in stream.collect_with_deltas():
+                print(text, end="", flush=True)
+            print()
+    except ValueError as e:
+        print(f"❌ The stream did not finish: {e}")
         return False
-    print("✓ Complete stream")
-    return True
+    return reply_complete(stream.final_response)
 
 
-def list_character_pages(client: SyncVeniceClient) -> bool:
-    """Walk ``characters.list()`` page by page, up to ``MAX_PAGES``. Free.
+def walk_characters(client: SyncVeniceClient) -> bool:
+    """Walk ``characters.iter_all()`` with a ``for`` loop and leave it early. Free.
 
-    The loop stops on a short page, which is how this endpoint signals the last
-    one. It fails if a page is longer than asked for, or if a full page is
-    followed by a page with nothing new, which would mean ``offset`` is having
-    no effect.
+    The paginator fetches each page only when the walk reaches it, so stopping at
+    ``MAX_CHARACTERS`` never asks for a third page. A character seen twice fails
+    the check: it would mean the pages are not advancing.
     """
-    print("\n📄 Paging through a list")
+    print("\n📄 Walking a paginator")
     print("-" * 40)
 
     seen: set[str] = set()
-    for page in range(MAX_PAGES):
-        # Both requests name the same order, so the offset walks one list.
-        response = client.characters.list(
-            limit=PAGE_SIZE, offset=page * PAGE_SIZE, sort_by="mostRecent"
-        )
-        slugs = [character.slug for character in response.data]
-        print(f"Page {page + 1} (offset {page * PAGE_SIZE}): {slugs}")
-        if len(slugs) > PAGE_SIZE:
-            print(f"❌ Asked for {PAGE_SIZE} characters per page, got {len(slugs)}")
+    # Naming the order keeps every page on one list.
+    for character in client.characters.iter_all(page_size=PAGE_SIZE, sort_by="mostRecent"):
+        if character.slug in seen:
+            print(f"❌ {character.slug} came back again, so the pages are not advancing")
             return False
-        if page > 0 and slugs and seen.issuperset(slugs):
-            print("❌ This page repeats the previous one, so the offset had no effect")
-            return False
-        seen.update(slugs)
-        if len(slugs) < PAGE_SIZE:
+        seen.add(character.slug)
+        print(f"{len(seen)}. {character.slug}")
+        if len(seen) == MAX_CHARACTERS:
             break
 
     if not seen:
-        print("Section skipped: the catalog returned no characters to page through")
+        print("Section skipped: the catalog returned no characters to walk")
         return True
     print(f"✓ Read {len(seen)} characters")
     return True
@@ -198,13 +182,13 @@ def main() -> int:
         results = [
             chat_once(client, model),
             stream_once(client, model),
-            list_character_pages(client),
+            walk_characters(client),
         ]
 
     if not all(results):
         print("\n❌ One or more checks failed")
         return 1
-    print("\n✅ All checks passed; see the docstring for what still needs VeniceClient")
+    print("\n✅ All checks passed; see the docstring for what stays async")
     return 0
 
 

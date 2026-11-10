@@ -158,6 +158,14 @@ class BillingBalances(BaseModel):
         ),
     )
     usd: float | None = Field(default=None, description="Remaining USD balance")
+    bundledCredits: float | None = Field(
+        default=None,
+        description="Remaining bundled credits balance; ``None`` if not available",
+    )
+    earnedCredits: float | None = Field(
+        default=None,
+        description="Remaining earned credits balance; ``None`` if not available",
+    )
 
 
 class BillingBalanceResponse(BaseModel):

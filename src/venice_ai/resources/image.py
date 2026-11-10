@@ -73,6 +73,7 @@ import base64
 import io
 import logging
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -842,7 +843,8 @@ class Image(APIResource["VeniceClient"]):
                       - A base64-encoded string
                       - An HTTP/HTTPS URL
         :param aspect_ratio: Optional. Aspect ratio for the output (e.g. ``"1:1"``,
-            ``"16:9"``). Omit to use the model's default; supported values vary by model.
+            ``"16:9"``), or ``"auto"`` for the supported ratio closest to the input
+            image. Omit to use the model's default; supported values vary by model.
         :type aspect_ratio: Optional[str]
         :param safe_mode: Optional. When ``True`` (the server-side default) the
             API blurs images classified as adult content. Pass ``False`` to
@@ -1136,6 +1138,7 @@ class Image(APIResource["VeniceClient"]):
         image: str | bytes | BinaryIO | Path | None = None,
         image_2: str | bytes | BinaryIO | Path | None = None,
         image_3: str | bytes | BinaryIO | Path | None = None,
+        images: Sequence[str | bytes | BinaryIO | Path] | None = None,
         safe_mode: bool | None = None,
         resolution: str | None = None,
         aspect_ratio: str | None = None,
@@ -1146,11 +1149,16 @@ class Image(APIResource["VeniceClient"]):
         transparent_background: bool | None = None,
         anon_user_id: str | None = None,
     ) -> bytes:
-        """Edit an image using up to 3 layered inputs (POST /image/multi-edit).
+        """Edit an image using several layered inputs (POST /image/multi-edit).
 
-        Composite up to three images with a single prompt. The first image is
-        the base; remaining images are layered on top. Supports both base64
-        strings and URLs; bytes/file-like/Path inputs are encoded as base64.
+        Composite images with a single prompt. The first image is the base;
+        remaining images are layered on top. Supports both base64 strings and
+        URLs; bytes/file-like/Path inputs are encoded as base64.
+
+        The maximum is per model: the catalog's
+        ``model_spec.constraints.maxInputImages``, or 3 when absent (1 when
+        ``combineImages`` is false). The SDK does not check it; the API rejects
+        too many inputs. Pass ``images`` to send more than three.
 
         :param prompt: Edit instruction describing the desired changes.
         :type prompt: str
@@ -1162,6 +1170,9 @@ class Image(APIResource["VeniceClient"]):
         :type image_2: Optional[Union[str, bytes, BinaryIO, Path]]
         :param image_3: Third layer image.
         :type image_3: Optional[Union[str, bytes, BinaryIO, Path]]
+        :param images: Every input as a sequence, base image first, in place of
+            ``image``, ``image_2`` and ``image_3``.
+        :type images: Optional[Sequence[Union[str, bytes, BinaryIO, Path]]]
         :param safe_mode: When ``True`` (server default) blur adult content.
             Pass ``False`` to disable.
         :type safe_mode: Optional[bool]
@@ -1170,8 +1181,8 @@ class Image(APIResource["VeniceClient"]):
             ``"1K"`` server-side when omitted.
         :type resolution: Optional[str]
         :param aspect_ratio: Optional. Aspect ratio for the output (e.g.
-            ``"1:1"``, ``"16:9"``). Omit to infer from the first input image;
-            supported values vary by model.
+            ``"1:1"``, ``"16:9"``), or ``"auto"``. Omit it or pass ``"auto"`` to infer
+            it from the first input image; supported values vary by model.
         :type aspect_ratio: Optional[str]
         :param output_format: Optional. Output format for the edited image.
             When omitted, the format is inferred from resolution (PNG for 1K
@@ -1192,6 +1203,9 @@ class Image(APIResource["VeniceClient"]):
 
         :return: Edited image bytes.
 
+        :raises ValueError: If no image is given, ``images`` is combined with
+            ``image``, ``image_2`` or ``image_3``, or ``images`` is a single
+            input rather than a sequence.
         :raises venice_ai.exceptions.APIError: If an API error occurs.
 
         **Example:**
@@ -1234,21 +1248,25 @@ class Image(APIResource["VeniceClient"]):
                 return base64.b64encode(b).decode("utf-8")
             return str(val)
 
-        images_list: list[str] = []
+        named_inputs = [i for i in (image, image_2, image_3) if i is not None]
+        if images is not None and named_inputs:
+            raise ValueError("multi_edit takes images or image/image_2/image_3, not both.")
+        if images is not None and (
+            isinstance(images, (str, bytes)) or not isinstance(images, Sequence)
+        ):
+            raise ValueError("multi_edit images must be a sequence of inputs, not a single input.")
 
-        if image is not None:
-            images_list.append(await _to_b64_or_str(image))
-        if image_2 is not None:
-            images_list.append(await _to_b64_or_str(image_2))
-        if image_3 is not None:
-            images_list.append(await _to_b64_or_str(image_3))
+        images_list = [
+            await _to_b64_or_str(i) for i in (named_inputs if images is None else images)
+        ]
 
-        # Per the docs (api-reference/endpoint/image/multi-edit), ``images`` is
-        # required and must contain 1-3 items. Surface this as a ValueError at
-        # the call site rather than letting the API reject an empty array.
+        # ``images`` is required with at least one item; the maximum is per
+        # model and the API enforces it. Surface an empty array as a ValueError
+        # at the call site rather than letting the API reject it.
         if not images_list:
             raise ValueError(
-                "multi_edit requires at least one image; provide image, image_2, or image_3."
+                "multi_edit requires at least one image; provide images, or image, "
+                "image_2, or image_3."
             )
 
         headers = {"Accept": "image/*"}

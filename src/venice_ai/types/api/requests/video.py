@@ -679,19 +679,12 @@ class VideoCompleteRequest(BaseModel):
 
 
 class VideoTranscriptionRequest(BaseModel):
-    """Request for video transcription (``POST /api/v1/video/transcriptions``).
-
-    Takes a publicly accessible YouTube URL and returns the detected language
-    plus transcribed text in either JSON or plain-text form.
-    """
+    """Request for ``POST /api/v1/video/transcriptions``, a retired endpoint that answers every request with a 410."""
 
     url: str = Field(..., description="YouTube video URL to transcribe")
     response_format: Literal["json", "text"] = Field(
         default="json",
-        description=(
-            "Transcript output format: ``json`` (default) returns a structured "
-            "object with ``transcript`` and ``lang``; ``text`` returns plain text."
-        ),
+        description=("``json`` (default) or ``text``. It makes no difference to the 410."),
     )
 
     @field_validator("url")

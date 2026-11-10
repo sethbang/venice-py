@@ -36,7 +36,7 @@ from ..types.api.crypto import (
     JsonRpcRequest,
     JsonRpcResponse,
 )
-from ..utils.errors import read_body
+from ..utils.errors import parse_json, read_body
 
 if TYPE_CHECKING:
     from .._client import VeniceClient  # noqa: F401
@@ -219,7 +219,7 @@ class Crypto(APIResource["VeniceClient"]):
             )
         try:
             await read_body(response)
-            raw = await response.json()
+            raw = await parse_json(response)
         finally:
             response.release()
         if not isinstance(raw, list):

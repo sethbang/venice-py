@@ -2,14 +2,24 @@
 Venice x402 API resources.
 
 Wraps the three ``/x402/*`` endpoints documented at
-``api-reference/endpoint/x402/``. These endpoints use wallet-based
-Sign-In-With-X (SIWE / EIP-4361) authentication rather than Bearer tokens,
-so calls go through a per-request ``X-Sign-In-With-X`` header built by
-:class:`~venice_ai.auth.x402.X402Auth`.
+``api-reference/endpoint/x402/``. The balance and transaction reads are
+authenticated by a wallet: each call signs a fresh ``X-Sign-In-With-X`` header
+with the ``auth`` it is given.
 
-``top_up`` uses Bearer auth (the standard ``VENICE_API_KEY``) and may
-optionally carry an ``X-402-Payment`` header containing a signed payment
-payload.
+A :class:`~venice_ai.VeniceClient` needs an API key or a wallet ``auth`` to be
+constructed, and raises :class:`ValueError` with neither. The credentials it
+attaches depend on which it has:
+
+* ``VeniceClient(api_key="", auth=auth)`` sends only the wallet envelope, on every
+  request. The empty string also stops the client reading ``VENICE_API_KEY``.
+* A client with an API key, passed in or read from ``VENICE_API_KEY``, sends Bearer
+  on every request. That includes ``VeniceClient(auth=auth)`` when the variable is
+  set: the key wins, and the client's ``auth`` is not sent by default. ``balance``
+  and ``transactions`` still add the envelope for the ``auth`` they are given, so
+  those calls carry both Bearer and ``X-Sign-In-With-X``.
+
+``top_up`` attaches the client's credentials as above and may carry an
+``X-402-Payment`` header containing a signed payment payload.
 
 This module is intentionally import-time dependency-free; the ``X402Auth``
 helper lives under :mod:`venice_ai.auth.x402` which is only imported lazily
@@ -42,15 +52,49 @@ logger = logging.getLogger(__name__)
 __all__ = ["X402"]
 
 
+def _check_requirement_amount(
+    requirement: dict[str, Any], amount_usdc: float, cap_usdc: float
+) -> None:
+    """Refuse a requirement that is over the cap or differs from ``amount_usdc``.
+
+    Args:
+        requirement: The ``accepts`` entry about to be signed.
+        amount_usdc: The amount the caller asked to pay, in USD.
+        cap_usdc: The caller's safety cap, in USD.
+
+    Raises:
+        RuntimeError: If the requirement's amount is not an integer.
+        ValueError: If the requirement's amount exceeds the cap, or differs from
+            ``amount_usdc`` once both are in USDC base units.
+    """
+    server_units_raw = requirement.get("amount", "0")
+    try:
+        server_units = int(server_units_raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"x402 requirement has non-integer amount {server_units_raw!r}") from exc
+    server_usdc = server_units / 1_000_000
+    if server_units > int(round(cap_usdc * 1_000_000)):
+        raise ValueError(
+            f"Server requires ${server_usdc} USDC (>{cap_usdc} cap); refusing to sign."
+        )
+    if int(round(amount_usdc * 1_000_000)) != server_units:
+        raise ValueError(
+            f"amount_usdc=${amount_usdc} differs from the ${server_usdc} USDC the server "
+            f"requires; refusing to sign. This call pays exactly the server's required "
+            f"amount, so pass amount_usdc={server_usdc} to pay it."
+        )
+
+
 class X402(APIResource["VeniceClient"]):
     """Provides access to Venice's x402 wallet-based billing endpoints."""
 
     async def balance(self, *, auth: X402Auth | SolanaX402Auth) -> X402BalanceResponse:
         """Get the current x402 prepaid USDC balance for a wallet.
 
-        Wraps ``GET /api/v1/x402/balance/{wallet}``. Authentication uses
-        the SIWE (EIP-4361) flow via the ``X-Sign-In-With-X`` header
-        derived from ``auth``; standard Bearer auth is not used here.
+        Wraps ``GET /api/v1/x402/balance/{wallet}``. The call carries an
+        ``X-Sign-In-With-X`` header signed by ``auth``. A client with an API
+        key sends its Bearer header as well; use
+        ``VeniceClient(api_key="", auth=auth)`` to send only the envelope.
 
         Args:
             auth: An :class:`~venice_ai.auth.x402.X402Auth` instance
@@ -77,8 +121,8 @@ class X402(APIResource["VeniceClient"]):
                 from venice_ai import VeniceClient
                 from venice_ai.auth.x402 import X402Auth
 
-                async with VeniceClient() as client:
-                    auth = X402Auth(private_key=os.environ["WALLET_PRIVATE_KEY"])
+                auth = X402Auth(private_key=os.environ["WALLET_PRIVATE_KEY"])
+                async with VeniceClient(api_key="", auth=auth) as client:
                     bal = await client.x402.balance(auth=auth)
                     print(bal.data.balanceUsd)
         """
@@ -98,8 +142,10 @@ class X402(APIResource["VeniceClient"]):
     ) -> X402TransactionsResponse:
         """List x402 ledger entries (usage + top-ups) for the wallet.
 
-        Wraps ``GET /api/v1/x402/transactions/{wallet}``. SIWE-signed via
-        ``auth`` (no Bearer auth).
+        Wraps ``GET /api/v1/x402/transactions/{wallet}``. The call carries an
+        ``X-Sign-In-With-X`` header signed by ``auth``. A client with an API
+        key sends its Bearer header as well; use
+        ``VeniceClient(api_key="", auth=auth)`` to send only the envelope.
 
         Args:
             auth: :class:`~venice_ai.auth.x402.X402Auth` for the wallet to
@@ -145,7 +191,8 @@ class X402(APIResource["VeniceClient"]):
 
         Wraps :meth:`transactions` for unbounded enumeration. Termination
         uses the response's ``data.pagination.hasMore`` flag, so iteration
-        stops when the server signals no more pages. Each page hits
+        stops when the server signals no more pages, or on a page that adds no
+        transaction the walk has not yet yielded. Each page hits
         ``GET /api/v1/x402/transactions/{wallet}``.
 
         Args:
@@ -175,16 +222,19 @@ class X402(APIResource["VeniceClient"]):
             has_more = response.data.pagination.hasMore
             return _PageResult(items=items, has_more=has_more)
 
-        return Paginator(_fetch_page, page_size=page_size, max_items=max_items)
+        return Paginator(
+            _fetch_page, page_size=page_size, max_items=max_items, key=lambda tx: tx.id
+        )
 
     async def top_up(self, *, payment_header: str | None = None) -> X402TopUpResponse:
         """Top up the wallet balance via the x402 payment channel.
 
-        Wraps ``POST /api/v1/x402/top-up``. Uses the standard Bearer auth
-        (``VENICE_API_KEY``). Optionally accepts a pre-built
-        ``X-402-Payment`` header containing the signed payment payload -
-        when omitted, an empty POST triggers a 402 response containing
-        structured payment-requirement details.
+        Wraps ``POST /api/v1/x402/top-up``. Attaches the client's own
+        credentials: Bearer when it has an API key, otherwise an
+        ``X-Sign-In-With-X`` envelope from its wallet ``auth``. Optionally
+        accepts a pre-built ``X-402-Payment`` header containing the signed
+        payment payload - when omitted, an empty POST triggers a 402 response
+        containing structured payment-requirement details.
 
         Args:
             payment_header: Optional signed x402 payment payload sent in
@@ -196,8 +246,8 @@ class X402(APIResource["VeniceClient"]):
         Raises:
             PaymentRequiredError: When the server returns 402 with payment
                 instructions (the structured payment requirements are
-                attached to the error body).
-            AuthenticationError: If the API key is missing or invalid.
+                attached to the error body). An empty POST gets this 402
+                whatever the API key, so it says nothing about the key.
             InvalidRequestError: If the supplied payment header is
                 malformed.
             APIError: For other HTTP-level failures.
@@ -231,8 +281,8 @@ class X402(APIResource["VeniceClient"]):
            :class:`~venice_ai.exceptions.PaymentRequiredError`.
         2. Picks the first ``"exact"`` requirement on Base mainnet
            (``eip155:8453``).
-        3. Validates ``amount_usdc`` against the server's required amount
-           and the optional ``max_amount_usdc`` cap.
+        3. Refuses unless ``amount_usdc`` equals the server's required amount
+           and that amount is within the optional ``max_amount_usdc`` cap.
         4. Builds the EIP-3009 ``X-402-Payment`` header via
            :meth:`venice_ai.auth.x402.X402Auth.build_payment_header`.
         5. Re-POSTs ``/x402/top-up`` with the signed header; returns the
@@ -246,12 +296,17 @@ class X402(APIResource["VeniceClient"]):
             auth: An :class:`~venice_ai.auth.x402.X402Auth` whose private
                 key signs the EIP-3009 transfer authorization. The wallet
                 must hold enough USDC on-chain to cover the payment.
-            amount_usdc: The intended top-up amount in USD (Venice's x402
-                pricing is in USD; USDC is the settlement asset). Must
-                meet or exceed the server's minimum (currently $5).
-            max_amount_usdc: Optional safety cap. Defaults to
-                ``amount_usdc``. Raises :class:`ValueError` before signing
-                if the server's required amount exceeds this cap.
+            amount_usdc: The amount you expect to pay, in USD (Venice's x402
+                pricing is in USD; USDC is the settlement asset). This does not
+                choose the amount: the SDK signs only the amount in the server's
+                requirement, currently its $5 minimum. It is a check that raises
+                :class:`ValueError` before signing when the two differ, in either
+                direction.
+            max_amount_usdc: Optional safety cap, at least ``amount_usdc``.
+                Defaults to ``amount_usdc``. Raises :class:`ValueError` before
+                signing if the server's required amount exceeds it. Because that
+                amount must also equal ``amount_usdc``, a cap above ``amount_usdc``
+                does not let a larger payment through.
 
         Returns:
             :class:`~venice_ai.types.api.x402.X402TopUpResponse` from the
@@ -260,13 +315,16 @@ class X402(APIResource["VeniceClient"]):
             ``.data.paymentId`` for the settlement record.
 
         Raises:
-            ValueError: If ``amount_usdc`` is below the server's minimum,
-                or if the server's required amount exceeds
-                ``max_amount_usdc``, or if the 402 body is malformed.
+            ValueError: If ``amount_usdc`` is not positive, ``max_amount_usdc``
+                is below it, ``amount_usdc`` differs from the server's required
+                amount, that amount exceeds ``max_amount_usdc``, or the
+                requirement fails a check in
+                :meth:`~venice_ai.auth.x402.X402Auth.build_payment_header`.
             ImportError: If the ``[x402]`` extra is not installed.
             RuntimeError: If the initial probe call (no payment header)
-                unexpectedly succeeds, or the 402 body lacks any
-                acceptable ``"exact"`` requirement on Base mainnet.
+                unexpectedly succeeds, the 402 body lacks any acceptable
+                ``"exact"`` requirement on Base mainnet, or the requirement's
+                amount is not an integer.
             PaymentRequiredError: If the signed payment is rejected
                 server-side (e.g., insufficient on-chain balance, expired
                 signature, replayed nonce).
@@ -280,8 +338,8 @@ class X402(APIResource["VeniceClient"]):
                 from venice_ai import VeniceClient
                 from venice_ai.auth.x402 import X402Auth
 
-                async with VeniceClient() as client:
-                    auth = X402Auth(private_key=os.environ["WALLET_PRIVATE_KEY"])
+                auth = X402Auth(private_key=os.environ["WALLET_PRIVATE_KEY"])
+                async with VeniceClient(api_key="", auth=auth) as client:
                     result = await client.x402.top_up_with(
                         auth=auth,
                         amount_usdc=5.0,
@@ -331,24 +389,7 @@ class X402(APIResource["VeniceClient"]):
             )
 
         # 2. Validate against caller's amount_usdc and cap.
-        server_units_raw = requirement.get("amount", "0")
-        try:
-            server_units = int(server_units_raw)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"x402 requirement has non-integer amount {server_units_raw!r}"
-            ) from exc
-        requested_units = int(round(amount_usdc * 1_000_000))
-        if server_units > cap_units:
-            raise ValueError(
-                f"Server requires ${server_units / 1_000_000} USDC (>{cap_usdc} cap); "
-                "refusing to sign."
-            )
-        if requested_units < server_units:
-            raise ValueError(
-                f"amount_usdc=${amount_usdc} is below server minimum "
-                f"${server_units / 1_000_000}; pass a larger amount."
-            )
+        _check_requirement_amount(requirement, amount_usdc, cap_usdc)
 
         # 3. Sign the EIP-3009 payment.
         payment_header = auth.build_payment_header(
@@ -377,14 +418,15 @@ class X402(APIResource["VeniceClient"]):
         2. Picks the ``accepts`` entry whose ``network`` identifies Solana
            mainnet (the bare string ``"solana"`` or the CAIP-2 id
            ``"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"``).
-        3. Validates ``amount_usdc`` against the server's required amount and
-           the optional ``max_amount_usdc`` cap.
+        3. Refuses unless ``amount_usdc`` equals the server's required amount
+           and that amount is within the optional ``max_amount_usdc`` cap.
         4. Fetches the live transaction context (recent blockhash, mint
            decimals, token program) from a Solana RPC via
            :func:`venice_ai.auth.x402_solana.fetch_solana_tx_context`.
         5. Builds the base64 ``X-402-Payment`` envelope (a partially-signed
            ``VersionedTransaction``) via
-           :meth:`venice_ai.auth.x402_solana.SolanaX402Auth.build_payment_header`.
+           :meth:`venice_ai.auth.x402_solana.SolanaX402Auth.build_payment_header`,
+           which refuses a requirement whose asset is not USDC.
         6. Re-POSTs ``/x402/top-up`` with the signed header; returns the
            settlement response.
 
@@ -393,11 +435,16 @@ class X402(APIResource["VeniceClient"]):
                 base58 secret signs the SPL transfer authorization. The wallet
                 must hold enough USDC on-chain to cover the payment (the
                 facilitator pays the gas / network fees).
-            amount_usdc: The intended top-up amount in USD. Must meet or exceed
-                the server's minimum (currently $5).
-            max_amount_usdc: Optional safety cap. Defaults to ``amount_usdc``.
-                Raises :class:`ValueError` before signing if the server's
-                required amount exceeds this cap.
+            amount_usdc: The amount you expect to pay, in USD. This does not
+                choose the amount: the SDK signs only the amount in the server's
+                requirement, currently its $5 minimum. It is a check that raises
+                :class:`ValueError` before the RPC call and signing when the two
+                differ, in either direction.
+            max_amount_usdc: Optional safety cap, at least ``amount_usdc``.
+                Defaults to ``amount_usdc``. Raises :class:`ValueError` before
+                signing if the server's required amount exceeds it. Because that
+                amount must also equal ``amount_usdc``, a cap above ``amount_usdc``
+                does not let a larger payment through.
             rpc_url: Optional Solana JSON-RPC endpoint. Defaults to the
                 ``VENICE_X402_SOLANA_RPC_URL`` environment variable, then to
                 ``https://api.mainnet-beta.solana.com``.
@@ -407,12 +454,18 @@ class X402(APIResource["VeniceClient"]):
             settled top-up.
 
         Raises:
-            ValueError: If ``amount_usdc`` is below the server's minimum, or
-                if the server's required amount exceeds ``max_amount_usdc``,
-                or if the 402 body is malformed.
+            ValueError: If ``amount_usdc`` is not positive, ``max_amount_usdc``
+                is below it, the server's Solana mainnet requirements include none
+                in USDC, ``amount_usdc`` differs from the required amount, that
+                amount exceeds ``max_amount_usdc``, or the requirement fails a
+                check in
+                :meth:`~venice_ai.auth.x402_solana.SolanaX402Auth.build_payment_header`.
             ImportError: If the ``[x402-solana]`` extra is not installed.
             RuntimeError: If the initial probe call succeeds unexpectedly, the
-                402 body lacks a Solana mainnet requirement, or RPC fails.
+                402 body lacks a Solana mainnet requirement, the requirement's
+                amount is not an integer, or the Solana RPC fails. An RPC failure,
+                including an HTTP or connection error, never carries the RPC URL
+                in its text, because the URL may hold a secret.
             PaymentRequiredError: If the signed payment is rejected
                 server-side.
             APIError: For other HTTP-level failures.
@@ -425,8 +478,8 @@ class X402(APIResource["VeniceClient"]):
                 from venice_ai import VeniceClient
                 from venice_ai.auth.x402_solana import SolanaX402Auth
 
-                async with VeniceClient() as client:
-                    auth = SolanaX402Auth(private_key=os.environ["SOLANA_SECRET"])
+                auth = SolanaX402Auth(private_key=os.environ["SOLANA_SECRET"])
+                async with VeniceClient(api_key="", auth=auth) as client:
                     result = await client.x402.top_up_with_solana(
                         auth=auth,
                         amount_usdc=5.0,
@@ -435,14 +488,14 @@ class X402(APIResource["VeniceClient"]):
         """
         import os
 
-        import aiohttp
-
         from ..auth.x402_solana import (
             DEFAULT_SOLANA_RPC_URL,
             SOLANA_MAINNET_CAIP2,
+            USDC_SOLANA_MAINNET,
             fetch_solana_tx_context,
             is_solana_mainnet,
         )
+        from ..middleware.third_party import keeping_url_credentials
 
         if amount_usdc <= 0:
             raise ValueError(f"amount_usdc must be positive, got {amount_usdc}")
@@ -464,14 +517,25 @@ class X402(APIResource["VeniceClient"]):
                 raise RuntimeError(
                     f"x402.top_up() probe returned 402 with no 'accepts' list: {body!r}"
                 ) from exc
-            for entry in accepts:
-                if isinstance(entry, dict) and is_solana_mainnet(entry.get("network")):
-                    requirement = entry
-                    break
-            if requirement is None:
+            solana_entries = [
+                entry
+                for entry in accepts
+                if isinstance(entry, dict) and is_solana_mainnet(entry.get("network"))
+            ]
+            if not solana_entries:
                 raise RuntimeError(
                     "x402.top_up() probe 402 has no Solana mainnet requirement "
                     f"(expected network 'solana' or {SOLANA_MAINNET_CAIP2!r}): {accepts!r}"
+                ) from exc
+            requirement = next(
+                (e for e in solana_entries if e.get("asset") == USDC_SOLANA_MAINNET), None
+            )
+            if requirement is None:
+                offered = [entry.get("asset") for entry in solana_entries]
+                raise ValueError(
+                    "x402.top_up() probe 402 has no USDC requirement on Solana mainnet: "
+                    f"top_up_with_solana pays USDC ({USDC_SOLANA_MAINNET}) only, and the "
+                    f"server offers {offered!r}."
                 ) from exc
         else:
             raise RuntimeError(
@@ -480,33 +544,22 @@ class X402(APIResource["VeniceClient"]):
             )
 
         # 2. Validate against caller's amount_usdc and cap.
-        server_units_raw = requirement.get("amount", "0")
-        try:
-            server_units = int(server_units_raw)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                f"x402 requirement has non-integer amount {server_units_raw!r}"
-            ) from exc
-        requested_units = int(round(amount_usdc * 1_000_000))
-        if server_units > cap_units:
-            raise ValueError(
-                f"Server requires ${server_units / 1_000_000} USDC (>{cap_usdc} cap); "
-                "refusing to sign."
-            )
-        if requested_units < server_units:
-            raise ValueError(
-                f"amount_usdc=${amount_usdc} is below server minimum "
-                f"${server_units / 1_000_000}; pass a larger amount."
-            )
+        _check_requirement_amount(requirement, amount_usdc, cap_usdc)
 
         # 3. Fetch live tx context from the Solana RPC.
         effective_rpc = (
             rpc_url or os.environ.get("VENICE_X402_SOLANA_RPC_URL") or DEFAULT_SOLANA_RPC_URL
         )
         mint = str(requirement.get("asset"))
-        async with aiohttp.ClientSession() as session:
+        # The client's session has its proxy, SSL, timeout and retry settings. The RPC
+        # host receives Accept and User-Agent, and nothing meant for the API: not the
+        # key, the client's headers=, or a caller-supplied session's default headers.
+        with keeping_url_credentials(effective_rpc):
             recent_blockhash, mint_decimals, token_program = await fetch_solana_tx_context(
-                effective_rpc, mint, http=session
+                effective_rpc,
+                mint,
+                http=await self._client._get_session(),
+                request_options=self._client._session_request_options(),
             )
 
         # 4. Build the partially-signed payment envelope.

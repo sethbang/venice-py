@@ -15,6 +15,9 @@ from .config import (
     RedisBackendConfig as RedisBackendConfig,
 )
 from .models import (
+    CaseInsensitiveHeaders as CaseInsensitiveHeaders,
+)
+from .models import (
     VeniceBaseModel as VeniceBaseModel,
 )
 from .rate_limit_discovery import (
@@ -30,6 +33,7 @@ __all__ = [
     "validate_api_key_format",
     # Models
     "VeniceBaseModel",
+    "CaseInsensitiveHeaders",
     # Config
     "RedisBackendConfig",
     # Rate limiting

@@ -55,7 +55,7 @@ print(result.data.amountCredited, result.data.paymentId)
 `top_up_with` performs the full probe → sign → submit flow internally:
 1. POSTs `/x402/top-up` with no header → catches `PaymentRequiredError`.
 2. Picks the first `"exact"` requirement on Base mainnet from `e.body["accepts"]`.
-3. Validates the requirement against `amount_usdc` and `max_amount_usdc` (refuses if the server requires more than `max_amount_usdc`, or if `amount_usdc` is below the server's required minimum).
+3. Validates the requirement against `amount_usdc` and `max_amount_usdc` (raises `ValueError` before signing if the server requires more than `max_amount_usdc`, or if `amount_usdc` differs from the server's required amount, in either direction).
 4. Builds the EIP-3009 payment header via `auth.build_payment_header(...)`.
 5. Re-POSTs with the signed header; returns `X402TopUpResponse{success, data: {walletAddress, amountCredited, newBalance, paymentId}}`.
 

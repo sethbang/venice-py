@@ -144,6 +144,8 @@ async with await client.chat.completions.stream(
 
 For the assembled response: `response = await stream.collect()`.
 
+`text_deltas()` gives text only, with no finish state or usage, so a cut-off answer looks finished. Use `collect_with_deltas()` when that matters.
+
 [-> `examples/chat/streaming_chat.py`](https://github.com/sethbang/venice-py/blob/main/examples/chat/streaming_chat.py)
 
 ### Synchronous Usage
@@ -369,8 +371,8 @@ print(parsed.text, parsed.tokens)
 
 ### x402 Wallet Billing (optional)
 
-The x402 billing endpoints use Ethereum wallet auth (SIWE / EIP-4361 on
-Base) instead of Bearer tokens. Install the optional extra to pick up
+x402 balance and transaction reads are authenticated by an Ethereum wallet
+(SIWE / EIP-4361 on Base). Install the optional extra to pick up
 `eth-account` + `siwe`:
 
 ```bash
@@ -394,6 +396,9 @@ async with VeniceClient() as client:
     # as a 402 APIError whose body carries the accept spec.
     await client.x402.top_up()  # or top_up(payment_header=<signed b64>)
 ```
+
+This client uses `VENICE_API_KEY`. To authenticate with the wallet alone, use
+`VeniceClient(api_key="", auth=auth)`.
 
 Prefer one-call top-ups? `client.x402.top_up_with(auth=auth, amount_usdc=5.0)` runs the
 full EVM probe → sign → submit flow for you. To settle from a **Solana** wallet instead,
@@ -589,7 +594,7 @@ Rate limiting, distributed state, monitoring, observability, and performance tun
 | `embeddings` | Text embeddings | `create()` | [basic_embeddings.py](https://github.com/sethbang/venice-py/blob/main/examples/embeddings/basic_embeddings.py) |
 | `models` | Model discovery | `list()`, `get()` | [list_models.py](https://github.com/sethbang/venice-py/blob/main/examples/models/list_models.py) |
 | `billing` | Usage analytics | `get_balance()`, `get_usage_history()`, `get_usage_analytics()` | [usage_analytics.py](https://github.com/sethbang/venice-py/blob/main/examples/billing/usage_analytics.py) |
-| `api_keys` | Key management | `list()`, `get_rate_limits()` | [key_management.py](https://github.com/sethbang/venice-py/blob/main/examples/api_keys/key_management.py) |
+| `api_keys` | Key management | `list()`, `iter_all()`, `get_rate_limits()`, `update()`, `get_web3_token()`, `create_web3_key()` | [key_management.py](https://github.com/sethbang/venice-py/blob/main/examples/api_keys/key_management.py) |
 | `characters` | Character discovery & reviews | `list()`, `get()`, `reviews()` | [character_details.py](https://github.com/sethbang/venice-py/blob/main/examples/characters/character_details.py) |
 | `augment` | Web scrape / search / text-parser | `scrape()`, `search()`, `parse_text()` | [scrape.py](https://github.com/sethbang/venice-py/blob/main/examples/augment/scrape.py) |
 | `x402` | Wallet-billing (SIWE auth; `[x402]` extra) | `balance()`, `transactions()`, `top_up()` | [balance.py](https://github.com/sethbang/venice-py/blob/main/examples/x402/balance.py) |
@@ -611,13 +616,27 @@ from venice_ai.types.audio import Voice, ResponseFormat
 
 ## Testing
 
-```python
-from venice_ai import create_test_venice_client
-from venice_ai.core.config import SchedulerMode
+To test your own code without a network or an API key, point a real client at a local server that stands in for the API. The SDK's request building, response parsing and error mapping all still run. [`examples/basic/offline_testing.py`](examples/basic/offline_testing.py) has a complete stand-in and tests to copy.
 
-async with create_test_venice_client(api_key="test-key", scheduler_mode=SchedulerMode.BASIC) as client:
-    response = await client.chat.completions.create(...)
+```python
+from venice_ai import UserMessage, VeniceClient, create_testing_config
+
+async with VeniceClient(
+    config=create_testing_config(),
+    api_key="test-key",
+    base_url="http://127.0.0.1:8080/api/v1",  # your stand-in server
+    timeout=5.0,
+) as client:
+    model = await client.models.resolve_chat()
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[UserMessage(content="Hello!")],
+    )
 ```
+
+Passing `api_key` and `base_url` explicitly keeps the test off the real API whatever the environment holds. Don't use `create_test_venice_client()` for this: it takes no `base_url`, so unless `VENICE_API_BASE_URL` is set it reaches `api.venice.ai`.
+
+To test the SDK itself:
 
 ```bash
 make test           # All tests (parallel)

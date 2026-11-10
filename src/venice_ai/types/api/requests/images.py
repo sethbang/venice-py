@@ -295,8 +295,9 @@ class ImageEditRequest(BaseModel):
     aspect_ratio: str | None = Field(
         default=None,
         description=(
-            "Aspect ratio for the output (e.g. '1:1', '16:9'). Omit to use the "
-            "model's default; supported values vary per model."
+            "Aspect ratio for the output (e.g. '1:1', '16:9'), or 'auto' to use the "
+            "closest supported ratio to the input image. Omit to use the model's "
+            "default; supported values vary per model."
         ),
     )
     safe_mode: bool | None = Field(
@@ -376,10 +377,12 @@ class ImageBackgroundRemoveRequest(BaseModel):
 class ImageMultiEditRequest(BaseModel):
     """Request model for ``POST /image/multi-edit``.
 
-    The endpoint accepts an ``images`` array of 1–3 base64 / URL inputs (the
-    first is the base image; remaining ones are layered on top). ``modelId``
-    selects the edit model. ``safe_mode`` blurs adult outputs (server default
-    ``True``).
+    The endpoint accepts an ``images`` array of base64 / URL inputs (the first
+    is the base image; remaining ones are layered on top). The maximum is per
+    model: the catalog's ``model_spec.constraints.maxInputImages``, or 3 when
+    absent (1 when ``combineImages`` is false). It is not checked here; the API
+    rejects too many inputs. ``modelId`` selects the edit model. ``safe_mode``
+    blurs adult outputs (server default ``True``).
     """
 
     prompt: str = Field(
@@ -391,10 +394,10 @@ class ImageMultiEditRequest(BaseModel):
     images: list[str] = Field(
         ...,
         min_length=1,
-        max_length=3,
         description=(
-            "1–3 layered images. Each is a base64 string or http(s) URL. The "
-            "first image is treated as the base; remaining images are edit layers."
+            "Layered images, at least one; the maximum is per model. Each is a base64 "
+            "string or http(s) URL. The first image is treated as the base; remaining "
+            "images are edit layers."
         ),
     )
     modelId: str | None = Field(
@@ -420,8 +423,9 @@ class ImageMultiEditRequest(BaseModel):
     aspect_ratio: str | None = Field(
         default=None,
         description=(
-            "Aspect ratio for the output (e.g. '1:1', '16:9'). Omit to infer "
-            "from the first input image; supported values vary per model."
+            "Aspect ratio for the output (e.g. '1:1', '16:9'), or 'auto'. Omit "
+            "or pass 'auto' to infer it from the first input image; supported "
+            "values vary per model."
         ),
     )
     output_format: Literal["jpeg", "png", "webp"] | None = Field(

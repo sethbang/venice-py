@@ -15,9 +15,8 @@ what the queue call returned and resume with that:
 
 **What you have to persist.** At queue time, save the ``model``, the
 ``queue_id`` and, if the response has one, the ``download_url``. Capture them
-from ``client.video.submit()``, whose response has all three. A ``VideoJob`` from
-``client.video.run()`` exposes ``model`` and ``queue_id``, but keeps the link
-private.
+from ``client.video.submit()``, whose response has all three, or from the same
+attributes on the ``VideoJob`` that ``client.video.run()`` returns.
 
 **``retrieve()`` does not rebuild a** ``VideoJob``. It returns a status object,
 with no ``wait()``, ``download()`` or ``cancel()``, and it knows nothing about
@@ -48,8 +47,9 @@ Set these to resume a job::
     VENICE_VIDEO_RESUME_DOWNLOAD_URL   its download_url, for models that return one
 
 ``text_to_video.py`` and the other video examples print the ``queue_id`` of each
-job they queue, but not its link. A job they queued on a ``download_url`` model
-therefore cannot be collected here.
+job they queue, but never its link, so a job they queue on a ``download_url`` model
+cannot be collected here. To resume such a job, queue it from your own code and save
+``job.download_url``.
 
 **Cost: nothing new.** This example never submits a job, so every call only reads
 or releases one you already paid for. Without a queue ID it makes no request at
@@ -66,6 +66,7 @@ import sys
 from pathlib import Path
 
 import aiohttp
+from _helpers import SKIPPED, check_video, download_video, print_progress
 
 from venice_ai import VeniceClient, VideoJob
 from venice_ai.exceptions import InvalidRequestError, VeniceError
@@ -75,9 +76,6 @@ from venice_ai.types.api.video import (
     VideoProcessingStatus,
     VideoQueueResponse,
 )
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import SKIPPED, check_video, download_video, print_progress  # noqa: E402
 
 # All example scripts live one level below examples/ (e.g., examples/video/).
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
@@ -113,12 +111,9 @@ async def _release(client: VeniceClient, job: VideoJob, *, has_link: bool) -> bo
         if has_link:
             # /video/complete does not know these jobs: the file lives behind the
             # link, and VideoJob.cancel() sends the DELETE there first.
-            # It raises if that DELETE fails. /video/complete then answers
-            # success=False even though the file is gone, so that answer says nothing.
-            await job.cancel()
-            print("🧹 Stored copy deleted through its link")
-            return True
-        result = await client.video.cancel(model=job.model, queue_id=job.queue_id)
+            result = await job.cancel()
+        else:
+            result = await client.video.cancel(model=job.model, queue_id=job.queue_id)
     except InvalidRequestError as e:
         if _is_unknown_queue_id(e):
             print("✅ The server no longer knows this queue ID, so nothing is left to release")
@@ -142,7 +137,7 @@ async def _save_and_check(job: VideoJob, status: VideoCompletedStatus) -> bool:
     try:
         saved = await download_video(job, path, status)
     except aiohttp.ClientResponseError as e:
-        # Only the status: the error's text contains the link, which grants access.
+        # The error shows the storage host at most, never the link.
         print(f"❌ The download answered HTTP {e.status}; the link may have expired")
         print("   Nothing was released.")
         return False

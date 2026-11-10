@@ -15,20 +15,23 @@ not produce accented English, it produces garbled speech.
 
 With no TTS model that carries that metadata, or no ASR model to check the clips,
 the example skips and exits 77.
+
+Cost: every clip bills per input character and most are transcribed back. The
+number of clips depends on how many languages and accents the model lists, so
+it is not fixed. With about 40 clips of 70 characters on the cheapest listed TTS price
+($3.50 per million characters), plus their transcriptions, a run costs about $0.03.
 """
 
 import asyncio
-import re
 import sys
 from collections import defaultdict
 from pathlib import Path
 
+from _helpers import EXIT_SKIPPED, tts_default_format, tts_spec, word_overlap
+
 from venice_ai import NoMatchingModelError, VeniceClient
 from venice_ai.exceptions import VeniceError
 from venice_ai.types.api.audio import VoiceDetail
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import tts_default_format, tts_spec  # noqa: E402
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/audio/).
@@ -64,9 +67,6 @@ MIN_OVERLAP = 0.6
 
 GENDER_ICONS = {"female": "♀️", "male": "♂️"}
 
-#: Exit status for a run that skipped because a prerequisite is missing.
-EXIT_SKIPPED = 77
-
 #: Paths written by this run, listed at the end on success.
 WRITTEN: list[Path] = []
 
@@ -75,16 +75,6 @@ UNCHECKED: list[Path] = []
 
 #: Languages whose clips were transcribed back during this run.
 TRANSCRIBED: set[str] = set()
-
-
-def _words(text: str) -> list[str]:
-    return re.findall(r"\w+", text.lower())
-
-
-def word_overlap(expected: str, actual: str) -> float:
-    want = _words(expected)
-    got = set(_words(actual))
-    return sum(w in got for w in want) / len(want) if want else 0.0
 
 
 class VoiceDemo:
@@ -185,6 +175,12 @@ async def list_available_voices(demo: VoiceDemo) -> bool:
         everything = (await demo.client.audio.get_voices()).data
         female = (await demo.client.audio.get_voices(model_id=demo.model_id, gender="female")).data
         male = (await demo.client.audio.get_voices(model_id=demo.model_id, gender="male")).data
+        region = next((v.region_code for v in demo.voices if v.region_code), None)
+        regional = (
+            (await demo.client.audio.get_voices(model_id=demo.model_id, region_code=region)).data
+            if region
+            else []
+        )
     except VeniceError as e:
         print(f"❌ Error listing voices: {e}")
         return False
@@ -208,6 +204,12 @@ async def list_available_voices(demo: VoiceDemo) -> bool:
     print("\n🔍 Filter example: get_voices(model_id=..., gender=...)")
     print(f"   Female voices: {len(female)}")
     print(f"   Male voices: {len(male)}")
+    if region:
+        print(f"🔍 Filter example: get_voices(model_id=..., region_code={region!r})")
+        print(f"   Voices in that region: {len(regional)}")
+        if not regional or any(v.region_code != region for v in regional):
+            print(f"❌ The region_code filter did not return only {region!r} voices")
+            return False
     return bool(demo.voices)
 
 
@@ -327,7 +329,7 @@ async def main() -> int:
 
     print("\n✨ Voice options examples completed!")
     print("\n💡 Key concepts demonstrated:")
-    print("   - Voice discovery with get_voices() and its model/gender filters")
+    print("   - Voice discovery with get_voices() and its model, gender and region filters")
     print("   - Female and male voices per language, each given native text")
     print("   - English accent variations")
     print("   - Different voices reading lines written for different tones")

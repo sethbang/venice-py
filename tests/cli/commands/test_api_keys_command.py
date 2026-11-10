@@ -875,7 +875,9 @@ class TestDeleteKeyAsyncWithYesFlag:
             _setup_client_patch(MockClient, mock_client)
 
             ctx = _make_ctx(plain=True)
-            await _delete_key_async(ctx, key_id="key-fail", yes=True)
+            with pytest.raises(SystemExit) as exit_info:
+                await _delete_key_async(ctx, key_id="key-fail", yes=True)
+            assert exit_info.value.code == 1
 
             calls_str = "".join(str(c) for c in mock_echo.call_args_list)
             assert "Failed to delete" in calls_str
@@ -895,7 +897,9 @@ class TestDeleteKeyAsyncWithYesFlag:
             _setup_client_patch(MockClient, mock_client)
 
             ctx = _make_ctx(plain=False)
-            await _delete_key_async(ctx, key_id="key-fail-rich", yes=True)
+            with pytest.raises(SystemExit) as exit_info:
+                await _delete_key_async(ctx, key_id="key-fail-rich", yes=True)
+            assert exit_info.value.code == 1
 
             assert mock_console.print.called
             args_str = str(mock_console.print.call_args_list)
@@ -915,7 +919,9 @@ class TestDeleteKeyAsyncWithYesFlag:
             _setup_client_patch(MockClient, mock_client)
 
             ctx = _make_ctx(plain=True)
-            await _delete_key_async(ctx, key_id="key-fail-dict", yes=True)
+            with pytest.raises(SystemExit) as exit_info:
+                await _delete_key_async(ctx, key_id="key-fail-dict", yes=True)
+            assert exit_info.value.code == 1
 
             calls_str = "".join(str(c) for c in mock_echo.call_args_list)
             assert "Failed to delete" in calls_str

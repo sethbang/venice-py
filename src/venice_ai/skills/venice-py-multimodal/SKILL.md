@@ -42,7 +42,7 @@ async with VeniceClient() as client:
 Other image methods:
 - `client.image.upscale(image=..., scale=..., creativity=...)` — no `model` param
 - `client.image.edit(prompt=..., model=..., image=...)` — returns raw bytes
-- `client.image.multi_edit(prompt=..., model=..., image=..., image_2=..., image_3=..., ...)`
+- `client.image.multi_edit(prompt=..., model=..., image=..., image_2=..., image_3=..., ...)`, or `images=[...]` in place of those three to send more; the maximum is per model
 - `client.image.list_styles()` → `ImageStylesResponse` (preset catalog)
 - Background removal, batch generation, style variants — see `examples/image/`.
 
@@ -217,7 +217,7 @@ Other patterns:
   Seedance 2.0 R2V models — each 2–15s `.wav`/`.mp3`, **must be paired with a
   reference image/video**), `end_image_url` (transitions), and `elements` /
   `scene_image_urls` (element-aware models). Each accepts a public URL or a `data:` URL.
-- **Release a finished job's stored media**: `await job.cancel()` on the `VideoJob` (the `async with` block does it on a clean exit once the job finished). It does not stop generation or refund the job, and before the job finishes it deletes nothing. Models whose queue response carries a `download_url` keep the file behind that link: `job.cancel()` sends `DELETE` to it (no API key) before `/video/complete`, which answers 400 "Request ID is invalid" for such jobs. The resource-level `client.video.cancel(model=..., queue_id=...)` (keyword-only) only calls `/video/complete`.
+- **Release a finished job's stored media**: `await job.cancel()` on the `VideoJob` (the `async with` block does it on a clean exit once the job finished). It does not stop generation or refund the job, and before the job finishes it deletes nothing. Models whose queue response carries a `download_url` keep the file behind that link: `job.cancel()` sends `DELETE` to it (no API key) before `/video/complete`, which does not know such a job: it answers 400 "Request ID is invalid" or `success: false`. `job.cancel()` accepts either once the file is gone; a 404 counts as gone only for a finished job. The resource-level `client.video.cancel(model=..., queue_id=...)` (keyword-only) only calls `/video/complete`.
 - `client.video.quote(...)` returns USD cost before launching.
 
 ## Cost-quote-before-run

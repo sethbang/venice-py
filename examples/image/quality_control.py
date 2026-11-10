@@ -12,7 +12,7 @@ This example:
    then reads its ``ImageModelConstraints.qualities`` and ``defaultQuality``.
    No model ID is hardcoded.
 2. **Quotes** every tier from the model's catalog pricing, then **generates**
-   the ``low`` and ``high`` tiers with ``client.image.create(..., quality=...)``
+   its cheapest listed tier and ``high`` with ``client.image.create(..., quality=...)``
    using the same prompt, seed, resolution and aspect ratio. Each render must
    come back in the requested aspect ratio, and the request the server echoes
    in ``response.request["data"]`` must carry the tier that was sent. That
@@ -59,11 +59,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from venice_ai import NoMatchingModelError, VeniceClient, VeniceError, detect_image_format
-from venice_ai.types.api import ImageModelSpec, InpaintModelSpec
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import (  # noqa: E402
+from _helpers import (
     SKIPPED,
     catalog_price_usd,
     format_price,
@@ -74,14 +70,18 @@ from _helpers import (  # noqa: E402
     spendable_usd,
 )
 
+from venice_ai import NoMatchingModelError, VeniceClient, VeniceError, detect_image_format
+from venice_ai.types.api import ImageModelSpec, InpaintModelSpec
+
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
 PROMPT = "A single ripe pomegranate on a marble countertop, soft window light"
 SEED = 20260928
 
-#: The two tiers rendered: the cheapest and the most expensive one.
-Tier = Literal["low", "high"]
-RENDERED_TIERS: tuple[Tier, ...] = ("low", "high")
+Tier = Literal["low", "medium", "high"]
+#: Tiers from cheapest to dearest. The cheapest one a model lists is rendered
+#: next to ``high``; not every model lists ``low``.
+TIER_ORDER: tuple[Tier, ...] = ("low", "medium", "high")
 
 # High-quality renders are slow and can exceed the SDK's default 120s request
 # timeout, so the tier renders pass a wider per-call ``timeout``.
@@ -110,14 +110,14 @@ def _drop(before: float | None, after: float | None) -> float | None:
 
 
 async def quality_tiers(client: VeniceClient, written: list[Path], measured: list[str]) -> bool:
-    """Render the ``low`` and ``high`` quality tiers on a model that offers ``high``.
+    """Render the cheapest listed tier and ``high`` on a model that offers ``high``.
 
-    Every tier is quoted; only ``low`` and ``high`` are rendered. Returns ``True``
+    Every tier is quoted; only the cheapest one and ``high`` are rendered. Returns ``True``
     only if both renders succeeded, came back in the requested aspect ratio and
     echoed the requested tier. Appends each tier whose billed amount was
     measured to ``measured``.
 
-    :raises NoModel: If no image model offers the ``high`` tier.
+    :raises NoModel: If no image model offers ``high`` and a cheaper tier.
     """
     print("🎨 Image quality tiers")
     print("-" * 40)
@@ -145,9 +145,10 @@ async def quality_tiers(client: VeniceClient, written: list[Path], measured: lis
     for tier, price in prices.items():
         shown = f"${price:.2f}" if price is not None else "not listed"
         print(f"   💰 quality='{tier}': {shown}")
-    rendered: list[Tier] = [tier for tier in RENDERED_TIERS if tier in tiers]
-    if len(rendered) < len(RENDERED_TIERS):
-        raise NoModel(f"{model} does not list both 'low' and 'high' tiers")
+    cheaper: list[Tier] = [tier for tier in TIER_ORDER[:-1] if tier in tiers]
+    if not cheaper:
+        raise NoModel(f"{model} lists no tier below 'high' to compare it with")
+    rendered: list[Tier] = [cheaper[0], "high"]
     known = [price for tier in rendered if (price := prices[tier]) is not None]
     if known:
         print(f"   💰 Estimated total to render {', '.join(rendered)}: ${sum(known):.2f}\n")

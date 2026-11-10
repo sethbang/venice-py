@@ -45,6 +45,8 @@ degrade to baseline trust and defeat the entire feature (fail-closed).
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 import time
 import warnings
 from types import ModuleType
@@ -74,6 +76,11 @@ _TDX_DEBUG_BIT = 0x1
 
 #: ``mr_config_id`` embeds the dstack compose hash as ``0x01 || sha256 || pad``.
 _COMPOSE_PREFIX = b"\x01"
+
+#: One PEM certificate's base64 body.
+_PEM_CERTIFICATE = re.compile(
+    r"-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----", re.DOTALL
+)
 
 
 def _require_dcap() -> ModuleType:
@@ -116,6 +123,16 @@ class DcapTdxVerifier:
     reads the evidence off the attestation. :meth:`verify` is **synchronous and
     offline** (it never touches the network); collateral is *injected*, either
     directly or via the async :meth:`with_fetched_collateral` factory.
+
+    **Reusing one verifier.** Collateral describes a platform type (its FMSPC) and
+    a PCK CA, not one machine, so a verifier can check quotes from every machine
+    of that type, including a re-attestation that lands on another machine. Each
+    quote is checked against the PCK certificate chain it embeds, validated to the
+    pinned root; a chain attached to the collateral belongs to the machine it was
+    fetched for and is not used. A quote from another FMSPC or PCK CA raises
+    :class:`TeeError` that says so: build a verifier for it with
+    :meth:`with_fetched_collateral`. So does collateral past its validity window,
+    which limits how long one verifier lasts.
 
     **Checks may not be bool.** The ``"checks"`` mapping in :attr:`last_result`
     usually holds ``bool`` values, but ``checks["compose_binding"]`` may instead
@@ -258,9 +275,10 @@ class DcapTdxVerifier:
                 "refusing to downgrade to baseline trust (fail-closed). Supply "
                 "collateral or use DcapTdxVerifier.with_fetched_collateral(...)."
             )
+        collateral = self._collateral_for_quote(dcap, quote)
         try:
             verified = dcap.verify_with_root_ca(
-                raw_quote, self._collateral, self._root_ca_der, self._now()
+                raw_quote, collateral, self._root_ca_der, self._now()
             )
         except Exception as exc:  # noqa: BLE001 - any crypto failure is fatal
             raise TeeError(
@@ -295,13 +313,23 @@ class DcapTdxVerifier:
         workload_identity_pinned = self._check_expected(report, compose_hash)
         checks["workload_identity_pinned"] = workload_identity_pinned
 
+        # fmspc() reads the PCK chain embedded in the quote, which collateral can
+        # supply in its place, so it can fail on a quote that passed the gate.
+        try:
+            fmspc = quote.fmspc() if hasattr(quote, "fmspc") else None
+        except ValueError as exc:
+            raise TeeError(
+                "This TDX quote carries no embedded PCK chain, so its FMSPC could not be "
+                f"read (fail-closed): {exc}"
+            ) from exc
+
         self.last_result = {
             "checks": checks,
             "schema": evidence.schema,
             "tcb_status": verified.status,
             "advisory_ids": advisory_ids,
             "workload_identity_pinned": workload_identity_pinned,
-            "fmspc": quote.fmspc() if hasattr(quote, "fmspc") else None,
+            "fmspc": fmspc,
             "unsigned_metadata": {
                 "os_image_hash": evidence.os_image_hash,
                 "repo_commit": evidence.repo_commit,
@@ -310,6 +338,57 @@ class DcapTdxVerifier:
         return True
 
     # --- step helpers --------------------------------------------------------
+
+    def _collateral_for_quote(self, dcap: ModuleType, quote: Any) -> Any:
+        """Return the collateral to verify ``quote`` with, or refuse a mismatch.
+
+        ``dcap_qvl.get_collateral`` attaches the probe machine's PCK chain to the
+        collateral, and ``verify_with_root_ca`` prefers it to the chain in the
+        quote, so a quote from any other machine fails on its signature. Dropping
+        the attached chain makes the library use the quote's own, which it
+        validates to the pinned root. A quote without an embedded chain keeps the
+        collateral as it is.
+
+        Nothing here trusts the parsed quote: these comparisons can only refuse,
+        and the crypto gate still decides. They exist so a quote that needs other
+        collateral says so, instead of failing with a generic error or, for the PCK
+        CA, being checked against the CRL of a CA that did not issue its PCK.
+        """
+        collateral: Any = self._collateral
+        embedded = getattr(quote, "cert_chain_pem_bytes", lambda: None)()
+        if not embedded or not hasattr(collateral, "to_json"):
+            return collateral
+
+        try:
+            stored = json.loads(collateral.to_json())
+            collateral_fmspc = json.loads(stored["tcb_info"])["fmspc"]
+            issuer_chain = _PEM_CERTIFICATE.findall(stored["pck_crl_issuer_chain"])
+            quote_chain = _PEM_CERTIFICATE.findall(embedded.decode("ascii", "replace"))
+            quote_fmspc = quote.fmspc()
+        except Exception as exc:  # noqa: BLE001 - unreadable collateral is fatal
+            raise TeeError(
+                f"TEE collateral could not be read for this quote (fail-closed): {exc!r}"
+            ) from exc
+
+        needs_own = (
+            "Build a verifier for it with DcapTdxVerifier.with_fetched_collateral(...) "
+            "(fail-closed)."
+        )
+        if collateral_fmspc.upper() != quote_fmspc.upper():
+            raise TeeError(
+                f"TEE collateral is for FMSPC {collateral_fmspc}, but this quote is from "
+                f"FMSPC {quote_fmspc}. {needs_own}"
+            )
+        # A PCK chain runs leaf, PCK CA, root; a CRL issuer chain starts at the PCK CA.
+        pck_ca = "".join(quote_chain[1].split()) if len(quote_chain) > 1 else None
+        if not issuer_chain or "".join(issuer_chain[0].split()) != pck_ca:
+            raise TeeError(
+                f"TEE collateral's revocation data is for a different PCK CA than the one "
+                f"that issued this quote's certificate. {needs_own}"
+            )
+
+        stored.pop("pck_certificate_chain", None)
+        return dcap.QuoteCollateralV3.from_json(json.dumps(stored))
 
     def _evaluate_tcb_status(self, status: str, advisory_ids: list[str]) -> None:
         if status == self.ACCEPT_TCB_STATUS:

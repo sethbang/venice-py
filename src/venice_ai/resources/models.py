@@ -496,6 +496,7 @@ class Models(APIResource["VeniceClient"]):
         require_prompt_caching: bool = False,
         require_multiple_images: bool = False,
         require_e2ee: bool = False,
+        exclude_e2ee: bool = False,
         exclude_reasoning: bool = False,
         # Chat and image
         exclude_uncensored: bool = False,
@@ -553,6 +554,9 @@ class Models(APIResource["VeniceClient"]):
             several images in one request (``capabilities.supportsMultipleImages``).
         :param require_e2ee: Chat only. Only consider end-to-end encrypted models
             (``capabilities.supportsE2EE``), which need the client-side encryption flow.
+        :param exclude_e2ee: Chat only. Skip end-to-end encrypted models under any
+            ranking, for endpoints that reject them such as ``/responses``. Raises
+            ``ValueError`` with ``require_e2ee``.
         :param exclude_reasoning: Chat only. Only consider models that never reason
             (``capabilities.supportsReasoning`` is false), for callers that need
             visible ``content`` under a small token budget. Raises ``ValueError``
@@ -701,6 +705,7 @@ class Models(APIResource["VeniceClient"]):
                     require_prompt_caching=require_prompt_caching,
                     require_multiple_images=require_multiple_images,
                     require_e2ee=require_e2ee,
+                    exclude_e2ee=exclude_e2ee,
                     exclude_reasoning=exclude_reasoning,
                     exclude_uncensored=exclude_uncensored,
                 )
@@ -999,6 +1004,7 @@ class Models(APIResource["VeniceClient"]):
         require_prompt_caching: bool = False,
         require_multiple_images: bool = False,
         require_e2ee: bool = False,
+        exclude_e2ee: bool = False,
         exclude_reasoning: bool = False,
         exclude_uncensored: bool = False,
         preferred_models: builtins.list[str] | None = None,
@@ -1020,6 +1026,9 @@ class Models(APIResource["VeniceClient"]):
         :param require_multiple_images: Only consider models that accept several
             images in one request.
         :param require_e2ee: Only consider end-to-end encrypted models.
+        :param exclude_e2ee: Skip end-to-end encrypted models, for endpoints that
+            reject them such as ``/responses``. Raises ``ValueError`` with
+            ``require_e2ee``.
         :param exclude_reasoning: Only consider models that never reason; see
             :meth:`resolve`.
         :param exclude_uncensored: Skip models Venice flags as ``uncensored``.
@@ -1036,6 +1045,7 @@ class Models(APIResource["VeniceClient"]):
             require_prompt_caching=require_prompt_caching,
             require_multiple_images=require_multiple_images,
             require_e2ee=require_e2ee,
+            exclude_e2ee=exclude_e2ee,
             require_function_calling=require_function_calling,
             require_vision=require_vision,
             require_reasoning=require_reasoning,

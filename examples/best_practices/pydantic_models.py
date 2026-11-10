@@ -41,6 +41,13 @@ IMPORTANT NOTES
 - USE proper type hints for better IDE support and type checking
 - READ the inline comments - they explain WHY things work this way
 
+Cost: five short chat requests on cheap models, usually under $0.001. The two
+tool-calling requests may land on a reasoning model, which can think for several
+thousand tokens first.
+
+Exit status: ``0`` when every section that ran passed, ``1`` when any failed, ``77``
+(with a ``SKIPPED:`` line) when the catalog has no model for any live section. One
+section without a model prints ``Section skipped:`` and the others still count.
 """
 
 import ast
@@ -48,11 +55,11 @@ import asyncio
 import json
 import operator
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
-from venice_ai import VeniceClient
+from venice_ai import VeniceClient, tool_from_model
 from venice_ai.exceptions import NoMatchingModelError, VeniceError
 from venice_ai.types.api.chat import ChatCompletionResponse
 from venice_ai.types.api.requests import (
@@ -110,12 +117,12 @@ def may_be_truncated(response: ChatCompletionResponse, max_tokens: int) -> bool:
 # =============================================================================
 
 
-async def example_message_models_correct():
+async def example_message_models_correct() -> None:
     """
     ✅ CORRECT: Demonstrates proper message model construction.
 
-    All messages in the Venice AI SDK are Pydantic models, not dicts!
-    This provides type safety, validation, and clear structure.
+    Build messages with the SDK's Pydantic models. Requests accept plain dicts as
+    well, but a model validates where you write it and gives editor completion.
     """
     print("\n" + "=" * 70)
     print("Section 1: Message Models - CORRECT Patterns")
@@ -179,7 +186,7 @@ async def example_message_models_correct():
         print(f"   Message {i + 1}: {msg.role}")
 
 
-def example_message_models_anti_patterns():
+def example_message_models_anti_patterns() -> None:
     """
     ❌ ANTI-PATTERNS: What NOT to do with message models.
 
@@ -373,7 +380,7 @@ async def example_response_access_correct() -> bool:
     return True
 
 
-def example_response_access_anti_patterns():
+def example_response_access_anti_patterns() -> None:
     """
     ❌ ANTI-PATTERNS: Unsafe response access patterns.
 
@@ -423,7 +430,7 @@ def example_response_access_anti_patterns():
 # =============================================================================
 
 
-async def example_tool_definition_correct():
+async def example_tool_definition_correct() -> None:
     """
     ✅ PREFERRED: Define tools using Tool and ToolFunction Pydantic models.
 
@@ -500,6 +507,12 @@ async def example_tool_definition_correct():
         print(f"   Tool {i + 1}: {tool.function.name}")
 
 
+class CalculateArgs(BaseModel):
+    """The arguments of the ``calculate`` tool."""
+
+    expression: str = Field(description="Arithmetic expression to evaluate")
+
+
 _OPERATORS = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
@@ -543,24 +556,12 @@ async def example_tool_calling_correct() -> bool:
     print("Section 3: Tool Calling - CORRECT Patterns")
     print("=" * 70)
 
-    calc_tool = Tool(
-        type="function",
-        function=ToolFunction(
-            name="calculate",
-            description="Evaluate a basic arithmetic expression such as '12 * 7'",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "expression": {
-                        "type": "string",
-                        "description": "Arithmetic expression to evaluate",
-                    }
-                },
-                "required": ["expression"],
-            },
-            strict=False,
-        ),
-        id=None,
+    # ✅ tool_from_model builds the Tool from a Pydantic model, so the schema sent
+    # to the model and the class that parses its arguments cannot drift apart.
+    calc_tool = tool_from_model(
+        CalculateArgs,
+        name="calculate",
+        description="Evaluate a basic arithmetic expression such as '12 * 7'",
     )
     expected = str(42 * 137)
 
@@ -569,7 +570,7 @@ async def example_tool_calling_correct() -> bool:
             model = await client.models.resolve_chat(
                 require_function_calling=True, prefer="cheapest"
             )
-            messages: list = [
+            messages: list[UserMessage | AssistantMessage | ToolMessage] = [
                 UserMessage(content="What is 42 * 137? Use the calculate tool."),
             ]
             # Tool-capable models are often reasoning models, which spend
@@ -604,14 +605,12 @@ async def example_tool_calling_correct() -> bool:
                 print(f"   Call ID: {tool_call.id}")
                 print(f"   Arguments (JSON string): {func_args_str}")
 
-                # ✅ CORRECT: Parse and validate the arguments. A model can send
-                # anything here, so a bad call becomes an error result it can read.
+                # ✅ CORRECT: parse_as validates the arguments against the model. A
+                # model can send anything here, so a bad call becomes an error result
+                # it can read. ValidationError, for bad JSON too, is a ValueError.
                 try:
-                    args = json.loads(func_args_str)  # JSONDecodeError is a ValueError
-                    expression = args.get("expression") if isinstance(args, dict) else None
-                    if not isinstance(expression, str):
-                        raise ValueError("arguments need a string 'expression'")
-                    result = safe_calculate(expression)
+                    args = tool_call.function.parse_as(CalculateArgs)
+                    result = safe_calculate(args.expression)
                     content = str(int(result)) if result == int(result) else str(result)
                 except (ValueError, ZeroDivisionError, OverflowError, RecursionError) as e:
                     content = f"error: {e}"
@@ -648,7 +647,7 @@ async def example_tool_calling_correct() -> bool:
     return True
 
 
-def example_tool_calling_anti_patterns():
+def example_tool_calling_anti_patterns() -> None:
     """
     ❌ ANTI-PATTERNS: Tool-call mistakes to avoid.
     """
@@ -687,8 +686,8 @@ def example_tool_calling_anti_patterns():
     print("   # args = tool_call.function.arguments  # This is a JSON string!")
     print("   # value = args['param']  # ❌ Can't index a string!")
     print("   # INSTEAD USE:")
-    print("   # args = json.loads(tool_call.function.arguments)")
-    print("   # value = args['param']  # ✅ Now it's a dict!")
+    print("   # args = tool_call.function.parse_as(MyArgs)  # ✅ Validated Pydantic model")
+    print("   # value = tool_call.function.arguments_dict['param']  # ✅ Or a plain dict")
 
     print("\n❌ WRONG: Not checking if tool_calls exists")
     print("   # DON'T DO THIS:")
@@ -741,8 +740,7 @@ async def example_streaming_correct() -> bool:
             accumulated_content = ""
             finish_reason = None
 
-            # ✅ CORRECT: Type-annotated async iteration
-            # Each chunk is a ChatCompletionChunk Pydantic model
+            # ✅ CORRECT: async iteration; each chunk is a typed ChatCompletionChunk
             async for chunk in stream:
                 # ✅ CORRECT: Check if choices exist
                 if chunk.choices:
@@ -780,7 +778,7 @@ async def example_streaming_correct() -> bool:
     return True
 
 
-def example_streaming_anti_patterns():
+def example_streaming_anti_patterns() -> None:
     """
     ❌ ANTI-PATTERNS: Unsafe streaming patterns.
 
@@ -806,7 +804,8 @@ def example_streaming_anti_patterns():
     print("   #     content = chunk['choices'][0]['delta']['content']")
     print("   # INSTEAD USE:")
     print("   # async for chunk in stream:")
-    print("   #     content = chunk.choices[0].delta.content")
+    print("   #     if chunk.choices:")
+    print("   #         content = chunk.choices[0].delta.content")
 
     print("\n❌ WRONG: Assuming choices always exists")
     print("   # DON'T DO THIS:")
@@ -964,7 +963,7 @@ async def example_request_config_correct() -> bool:
 # =============================================================================
 
 
-async def example_type_hints_correct():
+async def example_type_hints_correct() -> None:
     """
     ✅ CORRECT: Full type annotations for Venice AI SDK code.
     """
@@ -1001,7 +1000,7 @@ async def example_type_hints_correct():
 # =============================================================================
 
 
-def common_pitfalls_reference():
+def common_pitfalls_reference() -> None:
     """
     📚 QUICK REFERENCE: Common Pitfalls and Solutions
 
@@ -1036,8 +1035,8 @@ def common_pitfalls_reference():
 
 6. TOOL ARGUMENTS PARSING
    ❌ args = tool_call.function.arguments['param']
-   ✅ args = json.loads(tool_call.function.arguments)
-       value = args['param']
+   ✅ args = tool_call.function.parse_as(MyArgs)   # validated Pydantic model
+   ✅ value = tool_call.function.arguments_dict['param']   # plain dict
 
 7. STREAMING CONTENT ACCESS
    ❌ print(chunk.choices[0].delta.content)
@@ -1108,29 +1107,46 @@ async def main() -> int:
     This demonstrates all the patterns in sequence, showing both correct
     approaches and anti-patterns (the anti-patterns are not executed, just shown).
 
-    Returns 0 if every live section succeeded, 1 if any live section failed.
+    Returns 0 if every live section that ran succeeded, 1 if any failed, and 77 if
+    the catalog had no model for any of them. A section whose model is missing is
+    skipped on its own, so it cannot hide another section's failure.
     """
     print("=" * 70)
     print("Venice AI SDK - Pydantic Model Best Practices")
     print("=" * 70)
 
-    live_results: list[tuple[str, bool]] = []
+    # Each section returns True (passed), False (failed) or None (skipped).
+    async def run_section(name: str, section: Callable[[], Awaitable[bool]]) -> bool | None:
+        try:
+            return await section()
+        except NoMatchingModelError as e:
+            print(f"\nSection skipped: {name} needs a model the catalog lacks ({e})")
+            return None
 
     await example_message_models_correct()
     example_message_models_anti_patterns()
-    live_results.append(("Validation Rejections", example_validation_rejections_live()))
+    validation_ok = example_validation_rejections_live()
 
-    live_results.append(("Response Access", await example_response_access_correct()))
+    api_results: list[tuple[str, bool | None]] = [
+        ("Response Access", await run_section("Response Access", example_response_access_correct))
+    ]
     example_response_access_anti_patterns()
 
     await example_tool_definition_correct()
-    live_results.append(("Tool Calling", await example_tool_calling_correct()))
+    api_results.append(
+        ("Tool Calling", await run_section("Tool Calling", example_tool_calling_correct))
+    )
     example_tool_calling_anti_patterns()
 
-    live_results.append(("Streaming", await example_streaming_correct()))
+    api_results.append(("Streaming", await run_section("Streaming", example_streaming_correct)))
     example_streaming_anti_patterns()
 
-    live_results.append(("Request Configuration", await example_request_config_correct()))
+    api_results.append(
+        (
+            "Request Configuration",
+            await run_section("Request Configuration", example_request_config_correct),
+        )
+    )
 
     await example_type_hints_correct()
     common_pitfalls_reference()
@@ -1155,17 +1171,21 @@ async def main() -> int:
     print("   - examples/basic/quick_start.py - Getting started guide")
 
     print("\n" + "=" * 70)
-    passed = sum(1 for _, ok in live_results if ok)
-    failed = len(live_results) - passed
-    if failed:
-        print(f"❌ {passed}/{len(live_results)} live sections succeeded; {failed} failed")
-        for name, ok in live_results:
-            print(f"   {'✓' if ok else '✗'} {name}")
-    else:
-        print(f"✅ All {passed} live sections succeeded")
+    results = [("Validation Rejections", validation_ok), *api_results]
+    passed = sum(1 for _, ok in results if ok)
+    failed = sum(1 for _, ok in results if ok is False)
+    skipped = sum(1 for _, ok in results if ok is None)
+    for name, ok in results:
+        print(f"   {'✓' if ok else ('✗' if ok is False else '-')} {name}")
+    print(f"{passed} passed, {failed} failed, {skipped} skipped")
     print("=" * 70)
 
-    return 0 if failed == 0 else 1
+    if failed:
+        return 1
+    if skipped == len(api_results):
+        print("SKIPPED: the catalog has no model for any live section")
+        return 77
+    return 0
 
 
 if __name__ == "__main__":
@@ -1174,7 +1194,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n\n👋 Goodbye!")
         sys.exit(130)
-    except NoMatchingModelError as e:
-        # The catalog has no model of the kind this example needs.
-        print(f"SKIPPED: {e}")
-        sys.exit(77)
+    except Exception as e:
+        print(f"\n❌ Error: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(1)

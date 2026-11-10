@@ -1,10 +1,13 @@
 """Unit tests for SyncVeniceClient and its proxy classes."""
 
-from unittest.mock import AsyncMock, Mock, patch
+import inspect
+import threading
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
-from venice_ai._sync_client import SyncVeniceClient, _SyncProxy, _SyncStreamProxy
+from venice_ai._sync_client import SyncVeniceClient, _SyncProxy, _SyncStreamProxy, _wrap_result
+from venice_ai.streaming import Stream
 
 
 @pytest.fixture
@@ -41,6 +44,39 @@ def sync_client(mock_async_client):
 def test_init_starts_background_thread(sync_client):
     assert sync_client._thread.is_alive()
     assert sync_client._is_closed is False
+
+
+def test_failed_construction_leaves_no_thread():
+    """A client that fails to build must not leave its loop thread behind."""
+    before = set(threading.enumerate())
+
+    with (
+        patch("venice_ai._sync_client.VeniceClient", side_effect=ValueError("no key")),
+        pytest.raises(ValueError, match="no key"),
+    ):
+        SyncVeniceClient()
+
+    assert set(threading.enumerate()) - before == set()
+
+
+def test_rejected_key_leaves_no_thread(monkeypatch):
+    """The same holds for the real validation in ``VeniceClient``."""
+    monkeypatch.delenv("VENICE_API_KEY", raising=False)
+    before = set(threading.enumerate())
+
+    with pytest.raises(ValueError, match="No authentication provided"):
+        SyncVeniceClient()
+
+    assert set(threading.enumerate()) - before == set()
+
+
+def test_half_built_client_finalizes_quietly():
+    """``__del__`` and attribute lookup work on an instance ``__init__`` never finished."""
+    half_built = SyncVeniceClient.__new__(SyncVeniceClient)
+
+    half_built.__del__()
+
+    assert not hasattr(half_built, "chat")
 
 
 def test_context_manager_calls_close(mock_async_client):
@@ -244,3 +280,76 @@ def test_sync_stream_proxy_context_manager_forwards_args():
     proxy.__exit__(type(err), err, None)
     assert captured[0][0] is ValueError
     assert captured[0][1] is err
+
+
+# ---------------------------------------------------------------------------
+# _wrap_result: what becomes a blocking iterator
+# ---------------------------------------------------------------------------
+
+
+class _CustomStream:
+    """A ``stream_cls`` that is not a ``Stream``, with a surface of its own."""
+
+    def __init__(self, iterator, client) -> None:
+        self.iterator = iterator
+        self.client = client
+
+    def __aiter__(self):
+        return self.iterator
+
+    def custom_method(self) -> str:
+        return "custom"
+
+
+@pytest.mark.parametrize("make", [MagicMock, AsyncMock], ids=["MagicMock", "AsyncMock"])
+def test_wrap_result_leaves_a_mock_alone(make):
+    mock = make()
+    assert _wrap_result(mock, None) is mock
+
+
+def test_a_mocked_resource_method_returns_its_mock_through_the_client():
+    with SyncVeniceClient(api_key="k", base_url="http://127.0.0.1:9/api/v1") as client:
+        listing = MagicMock(data=[1, 2])
+        client._async_client.models.list = AsyncMock(return_value=listing)
+        assert client.models.list() is listing
+
+
+def test_wrap_result_wraps_an_async_generator():
+    async def agen():
+        yield 1
+
+    with SyncVeniceClient(api_key="k", base_url="http://127.0.0.1:9/api/v1") as client:
+        wrapped = _wrap_result(agen(), client._run)
+        assert inspect.isgenerator(wrapped)
+        assert list(wrapped) == [1]
+
+
+def test_a_custom_stream_cls_that_is_not_a_stream_comes_back_unchanged():
+    """It keeps its own surface and stays async-only: nothing here can know what it offers."""
+    with SyncVeniceClient(api_key="k", base_url="http://127.0.0.1:9/api/v1") as client:
+        stream = client.chat.completions.create(
+            model="stub-model",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+            stream_cls=_CustomStream,
+        )
+        assert isinstance(stream, _CustomStream)
+        assert stream.custom_method() == "custom"
+        assert stream.client is client._async_client
+        client._run(stream.iterator.aclose())
+
+
+def test_a_custom_stream_cls_that_is_a_stream_gets_the_blocking_proxy():
+    class _MyStream(Stream):
+        pass
+
+    with SyncVeniceClient(api_key="k", base_url="http://127.0.0.1:9/api/v1") as client:
+        stream = client.chat.completions.create(
+            model="stub-model",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+            stream_cls=_MyStream,
+        )
+        assert isinstance(stream, _SyncStreamProxy)
+        assert isinstance(stream._stream, _MyStream)
+        stream.close()

@@ -33,8 +33,15 @@ class TestBuildModelId:
             build_model_id("model:existing_suffix")
 
     def test_bool_param(self):
-        result = build_model_id("model", flag=True)
-        assert result == "model:flag=True"
+        assert build_model_id("model", flag=True) == "model:flag=true"
+        assert build_model_id("model", flag=False) == "model:flag=false"
+
+    def test_bool_param_among_others(self):
+        result = build_model_id("model", reasoning_effort="high", flag=False, tokens=1)
+        assert result == "model:reasoning_effort=high&flag=false&tokens=1"
+
+    def test_string_param_is_left_as_given(self):
+        assert build_model_id("model", flag="True") == "model:flag=True"
 
     def test_int_param(self):
         result = build_model_id("model", tokens=1024)

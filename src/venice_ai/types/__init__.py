@@ -100,6 +100,7 @@ from .api import (
     # From characters module
     CharacterStats,
     ChatChoice,
+    ChatChoiceLogprobs,
     ChatCompletionChoiceLogprobs,
     ChatCompletionChunk,
     ChatCompletionChunkChoice,
@@ -423,6 +424,7 @@ __all__ = [
     "ChatMessageImageContent",
     "ChatMessageImageUrl",
     "ChatMessageTextContent",
+    "ChatChoiceLogprobs",
     "LogProbToken",
     "ChatChoice",
     "ChatUsage",

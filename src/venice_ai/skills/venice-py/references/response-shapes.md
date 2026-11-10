@@ -54,11 +54,13 @@ balance = await client.billing.get_balance()
 #   balance.balances             : BillingBalances | None  ← NESTED
 #   balance.diem_epoch_allocation: float | None
 # BillingBalances:
-#   balance.balances.usd  : float | None
-#   balance.balances.diem : float | None
+#   balance.balances.usd            : float | None
+#   balance.balances.diem           : float | None
+#   balance.balances.bundledCredits : float | None
+#   balance.balances.earnedCredits  : float | None
 ```
 
-**The trap:** `balance.usd` does not exist. Read `balance.balances.usd` (with a None-check on `balances`). `BillingBalanceResponse` uses `populate_by_name=True`, so the snake_case attribute names work even though the wire is `canConsume` / `consumptionCurrency` / `diemEpochAllocation` (alias-mapped).
+**The trap:** `balance.usd` does not exist. Read `balance.balances.usd` (with a None-check on `balances`). `BillingBalanceResponse` uses `populate_by_name=True`, so the snake_case attribute names work even though the wire is `canConsume` / `consumptionCurrency` / `diemEpochAllocation` (alias-mapped). `BillingBalances` has no such aliases: read `bundledCredits` and `earnedCredits` as written.
 
 This is a different surface from x402 prepaid balance (`client.x402.balance(...)`), which has its own shape — see `venice-py-x402/references/balance-and-topup.md`. Don't confuse the two.
 

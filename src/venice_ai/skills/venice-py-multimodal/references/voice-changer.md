@@ -18,7 +18,7 @@ async with VeniceClient() as client:
     print(quote.quote)          # USD estimate
 
     async with await client.voice_changer.run(model=model, file="source.mp3") as job:
-        print(job.duration_seconds)      # server-measured — what you are billed
+        print(job.duration_seconds)      # server-measured; billing rounds it up to the next whole minute
         status = await job.wait()
         await job.download("converted.mp3", status)
 ```

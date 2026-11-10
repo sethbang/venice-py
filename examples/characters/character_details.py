@@ -16,12 +16,15 @@ This example demonstrates how to access individual character details with
 - Pricing the chat request before sending it, since a character can name any
   model, then chatting with the character once, live
 - Handling a missing slug
+- Reading a character's public reviews, one page with ``characters.reviews()`` and
+  across pages with ``characters.iter_reviews()``
 
 ``photoUrl`` and ``shareUrl`` are for rendering in a browser (an ``<img>`` tag
 or a link). Do not fetch them from server-side code: the image host refuses
 programmatic requests.
 
-The live chat in the integration section is the only billed call here.
+The live chat in the integration section is the only billed call here, budgeted at
+one cent or less (see ``MAX_REQUEST_USD``). The lookups and reviews are free.
 
 Exit status: ``0`` when every demo passed, ``1`` otherwise. If the catalog has
 no chat model to fall back on within budget, the live chat prints
@@ -91,8 +94,10 @@ async def _text_models(client: VeniceClient) -> dict[str, ModelResponse]:
 def model_status(model_id: str, text_models: dict[str, ModelResponse]) -> str | None:
     """Why a character's ``modelId`` should not be used, or ``None`` if it can be.
 
-    A listed model can still be deprecated (Venice routes it to a replacement)
-    or offline, so being listed is not enough.
+    A listed model can still be offline, or deprecated (Venice may remap one to
+    its replacement, only when ``deprecation.autoRemap`` is set, and it is removed
+    later), so being listed is not enough. The compatibility mapping
+    (``models.list_compatibility()``) is another thing: it maps external names.
     """
     entry = text_models.get(model_id)
     if entry is None:
@@ -200,6 +205,74 @@ async def character_metadata_showcase(client: VeniceClient) -> bool:
     return True
 
 
+async def character_reviews(client: VeniceClient) -> bool | None:
+    """Read reviews for the most-reviewed character in the featured sample.
+
+    Reviews are user-written and shown as the API returns them. Returns ``None``
+    (section skipped) when no character in the sample has any.
+    """
+    print("\n💬 Character Reviews")
+    print("-" * 40)
+
+    try:
+        sample = await _featured(client, 20)
+    except VeniceError as e:
+        print(f"❌ Error listing characters: {e}")
+        return False
+    reviewed = [c for c in sample if (c.stats.ratingCount or 0) > 0]
+    if not reviewed:
+        print("Section skipped: no featured character in the sample has been rated")
+        return None
+    char = max(reviewed, key=lambda c: c.stats.ratingCount or 0)
+
+    page_size = 5
+    try:
+        page = await client.characters.reviews(char.slug, page=1, page_size=page_size)
+        # max_items stops the walk early, and the walk crosses a page boundary
+        # whenever the character has more reviews than one page holds.
+        walked = [
+            review
+            async for review in client.characters.iter_reviews(
+                char.slug, page_size=page_size, max_items=page_size + 2
+            )
+        ]
+    except VeniceError as e:
+        print(f"❌ Error reading reviews for {char.slug}: {e}")
+        return False
+
+    if not page.data:
+        print(f"Section skipped: {char.slug} has ratings but no written reviews to read")
+        return None
+
+    info = page.pagination
+    print(f"📋 {char.name} ({char.slug})")
+    print(f"   Average rating: {page.summary.averageRating:.2f}")
+    print(f"   Reviews:        {page.summary.totalReviews} in the summary, {info.total} listed")
+    print(f"   Page:           {info.page} of {info.totalPages}, {len(page.data)} shown")
+    for review in page.data[:3]:
+        print(f"   • {review.rating}/5 {review.createdAt}: {_short(review.message, 100)}")
+
+    problems = []
+    if info.page != 1 or len(page.data) > page_size:
+        problems.append(f"page {info.page} with {len(page.data)} reviews, asked for page 1")
+    if any(not 1 <= review.rating <= 5 for review in page.data):
+        problems.append("a rating outside 1 to 5")
+    expected = min(page_size + 2, info.total)
+    if len(walked) != expected:
+        problems.append(f"iter_reviews yielded {len(walked)}, expected {expected}")
+    ids = [review.id for review in walked]
+    if len(set(ids)) != len(ids):
+        problems.append("iter_reviews yielded the same review twice")
+    if ids[: len(page.data)] != [review.id for review in page.data]:
+        problems.append("iter_reviews does not start with the reviews on page 1")
+    for problem in problems:
+        print(f"   ❌ {problem}")
+    if problems:
+        return False
+    print(f"   ✅ iter_reviews(max_items={page_size + 2}) walked {len(walked)} distinct reviews")
+    return True
+
+
 async def safe_character_access(client: VeniceClient, char_slug: str) -> Character | None:
     """Return a character, or None if the slug does not exist.
 
@@ -215,7 +288,7 @@ async def safe_character_access(client: VeniceClient, char_slug: str) -> Charact
 
 def _list_price(entry: ModelResponse, key: str) -> Decimal | None:
     """A text model's listed USD price per million ``key`` tokens, if any."""
-    price = (entry.model_dump().get("model_spec") or {}).get("pricing", {}).get(key)
+    price = ((entry.model_dump().get("model_spec") or {}).get("pricing") or {}).get(key)
     usd = price.get("usd") if isinstance(price, dict) else None
     return Decimal(str(usd)) if isinstance(usd, int | float) else None
 
@@ -347,8 +420,8 @@ async def advanced_character_integration(client: VeniceClient) -> IntegrationRes
     try:
         model, why, estimate = await choose_chat_model(client, char, text_models, messages)
         # Only the character is set. include_venice_system_prompt=False is not
-        # sent: in a character chat the billed prompt is the same with or
-        # without it, and the persona is kept either way.
+        # sent: a character's persona replaces Venice's system prompt, so a
+        # character chat bills the same prompt tokens with the flag on or off.
         response = await client.chat.completions.create(
             model=model,
             venice_parameters={"character_slug": char.slug},
@@ -380,10 +453,11 @@ async def advanced_character_integration(client: VeniceClient) -> IntegrationRes
                 f"   Prompt:    estimated {estimate.prompt_tokens} tokens, "
                 f"billed {usage.prompt_tokens}"
             )
+            # A persona can be longer than the estimate's system-prompt allowance,
+            # and only the bill shows its size. That is why the budget is an estimate.
             if usage.prompt_tokens > estimate.prompt_tokens:
-                print("   ❌ The billed prompt exceeded the estimate, so the budget")
-                print("      check above understated this request.")
-                ok = False
+                print("   ℹ️ This persona is longer than the estimate allowed for, so the")
+                print("      budget check above understated this request.")
         if response.cost is not None and response.cost.usd is not None:
             print(f"   Billed:    ${response.cost.usd:.6f}")
         print(f"   Reply: {reply}")
@@ -448,14 +522,16 @@ async def main() -> int:
     print("=" * 60)
 
     async with VeniceClient() as client:
-        results: list[tuple[str, bool]] = [
+        results: list[tuple[str, bool | None]] = [
             ("get_character_details", await get_character_details(client)),
             ("character_metadata_showcase", await character_metadata_showcase(client)),
+            ("character_reviews", await character_reviews(client)),
         ]
         integration = await advanced_character_integration(client)
         results.append(("advanced_character_integration", integration.ok))
 
-    failed = [name for name, ok in results if not ok]
+    failed = [name for name, ok in results if ok is False]
+    reviews_ran = dict(results)["character_reviews"] is True
 
     if failed:
         print(f"\n❌ {len(failed)} of {len(results)} demos failed: {', '.join(failed)}")
@@ -472,6 +548,10 @@ async def main() -> int:
     else:
         print("   ℹ️ The live character chat did not run (see 'Section skipped:' above)")
     print("   - Handling a missing slug without hiding other errors")
+    if reviews_ran:
+        print("   - Public reviews with reviews() and iter_reviews(max_items=...)")
+    else:
+        print("   ℹ️ The reviews section did not run (see 'Section skipped:' above)")
     return 0
 
 

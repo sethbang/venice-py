@@ -7,12 +7,21 @@ This example demonstrates performance optimization techniques.
 Learn how to maximize throughput and minimize latency for your applications.
 
 The live sections measure sequential vs concurrent requests, timing each
-request on the wire with an ``aiohttp.TraceConfig``, and streaming vs
-non-streaming time to first token. Any failed, truncated or wrong answer fails
-its section, as does a concurrent batch whose requests were not all on the
-wire at once, and the script exits 1 if any section failed. Requests pass
+request on the wire with an ``aiohttp.TraceConfig``, send a bounded batch through
+``client.chat.completions.batch``, and compare streaming with non-streaming time
+to first token. Any failed, truncated or wrong answer fails its section, as does
+a concurrent batch whose requests were not all on the wire at once, and the
+script exits 1 if any section failed. Requests pass
 ``include_venice_system_prompt=False``, so only the prompts shown here are
-billed and timed.
+billed and timed. The remaining sections only print guidance, so they are not
+counted as passed or failed.
+
+Cost: 11 short chat requests on the cheapest model that answers directly, two of
+them about 120 words, under $0.001 in total. One request in the batch names an
+unknown model on purpose; it fails before any billing.
+
+Exit status: ``0`` when every checked section passed, ``1`` when any failed,
+``77`` (with a ``SKIPPED:`` line) when the catalog has no chat model to use.
 """
 
 import asyncio
@@ -25,8 +34,11 @@ from types import SimpleNamespace
 import aiohttp
 
 from venice_ai import (
+    BackendType,
     ChatCompletionResponse,
     NoMatchingModelError,
+    NotFoundError,
+    RateLimiterMode,
     RetryOptions,
     UserMessage,
     VeniceClient,
@@ -40,6 +52,9 @@ OWN_PROMPT_ONLY = VeniceParameters(include_venice_system_prompt=False)
 
 # Completion budget for each "count from 1 to n" request.
 COUNT_MAX_TOKENS = 32
+
+# A name that is not in the model catalog: the request fails before any billing.
+UNKNOWN_MODEL = "no-such-model-performance-demo"
 
 PRODUCTION_SNIPPET = """\
 import os
@@ -59,7 +74,7 @@ client = VeniceClientFactory.create_client(config=config, account_id="my-service
 """
 
 
-def connection_pooling_optimization() -> bool:
+def connection_pooling_optimization() -> None:
     """Explain connection pool settings. No API calls."""
     print("🔌 Connection Pooling Optimization")
     print("-" * 40)
@@ -80,7 +95,6 @@ def connection_pooling_optimization() -> bool:
     print("   ```python")
     print("   HttpClientConfig(timeout=30.0, max_connections=100)")
     print("   ```")
-    return True
 
 
 def check_completion(label: str, response: ChatCompletionResponse, max_tokens: int) -> bool:
@@ -99,11 +113,21 @@ def check_completion(label: str, response: ChatCompletionResponse, max_tokens: i
 
 
 def check_count(label: str, response: ChatCompletionResponse, n: int) -> bool:
-    """Fail a "count from 1 to n" answer that is cut off or counts wrongly."""
+    """Fail a "count from 1 to n" answer that is cut off or counts wrongly.
+
+    Some models restate the range around the count ("The numbers from 1 to 3
+    are: 1, 2, 3"), and some write the digits with nothing between them ("123").
+    So the answer passes when 1 to n appears in order as a run of its numbers, or
+    as one number spelling them out.
+    """
     if not check_completion(label, response, COUNT_MAX_TOKENS):
         return False
-    digits = re.findall(r"\d", response.text or "")
-    if digits != [str(i) for i in range(1, n + 1)]:
+    tokens = re.findall(r"\d+", response.text or "")
+    numbers = [int(x) for x in tokens]
+    expected = list(range(1, n + 1))
+    runs = (numbers[i : i + n] for i in range(len(numbers) - n + 1))
+    run_together = "".join(str(i) for i in expected)
+    if expected not in runs and run_together not in tokens:
         print(f"   ❌ {label}: expected 1 to {n}, got {(response.text or '').strip()!r}")
         return False
     return True
@@ -117,6 +141,10 @@ class WireTimer:
     waiting for a free pooled connection is not counted. Timing around
     ``create()`` instead would count that wait, and a batch the pool
     serializes would still look concurrent.
+
+    One interval is recorded per ``create()`` that got an answer. A request that
+    ends in a connection error or timeout records none, and a resend by the
+    retry middleware does not add one: the interval covers the last attempt.
     """
 
     def __init__(self) -> None:
@@ -159,6 +187,22 @@ def peak_overlap(intervals: list[tuple[float, float]]) -> int:
     return peak
 
 
+def timed_session(timer: WireTimer) -> aiohttp.ClientSession:
+    """Build an HTTP session that reports each request to *timer*.
+
+    A session of your own lets you attach instrumentation such as a
+    TraceConfig. The client authenticates each request it sends through the
+    session, so the session needs no credentials. This one carries the SDK's
+    retry middleware, and its connector's limit is the pool size, which caps
+    how many requests can be on the wire at once.
+    """
+    return aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(limit=100),
+        middlewares=[create_retry_middleware(RetryOptions())],
+        trace_configs=[timer.config],
+    )
+
+
 async def concurrent_requests_pattern() -> bool:
     """Compare sequential and concurrent execution of the same requests.
 
@@ -173,16 +217,7 @@ async def concurrent_requests_pattern() -> bool:
 
     timer = WireTimer()
     request_count = 3
-    # A session of your own lets you attach instrumentation such as a
-    # TraceConfig. The client authenticates each request it sends through the
-    # session, so the session needs no credentials. This one carries the SDK's
-    # retry middleware, and its connector's limit is the pool size, which caps
-    # how many requests can be on the wire at once.
-    session = aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(limit=100),
-        middlewares=[create_retry_middleware(RetryOptions())],
-        trace_configs=[timer.config],
-    )
+    session = timed_session(timer)
 
     async with session, VeniceClient(http_client=session, timeout=30.0) as client:
         chat_model = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
@@ -237,7 +272,10 @@ async def concurrent_requests_pattern() -> bool:
         times = ", ".join(f"{end - start:.2f}s" for start, end in wire)
         print(f"   On the wire, {name}: {times}; at most {peak_overlap(wire)} at once")
     if len(sequential_wire) != request_count or len(concurrent_wire) != request_count:
-        print(f"   ❌ Expected {request_count} timed requests per batch (a retry adds one)")
+        print(
+            f"   ❌ Expected {request_count} timed requests per batch "
+            "(a request that gets no answer records none)"
+        )
         ok = False
     elif peak_overlap(sequential_wire) != 1:
         print("   ❌ The sequential requests overlapped on the wire")
@@ -278,38 +316,95 @@ async def concurrent_requests_pattern() -> bool:
             )
 
     print("\n💡 Best Practice:")
-    print("   - Use asyncio.gather() for independent requests")
-    print("   - Bound concurrency with asyncio.Semaphore or max_connections")
+    print("   - For more than a few requests, bound the concurrency: see the next section")
     print("   - Watch response_rate_limits to stay under the limit")
     return ok
 
 
-def batching_strategies() -> bool:
-    """Explain request batching. No API calls."""
-    print("\n📦 Request Batching Strategies")
+async def bounded_chat_batch() -> bool:
+    """Send a chat batch with ``client.chat.completions.batch``.
+
+    ``batch`` takes one kwargs dict per request, runs at most ``max_concurrency``
+    at a time and returns results in input order. A failed request lands in its
+    own slot as an exception and the others carry on, which the unknown-model
+    request here shows. The section fails if the limit was exceeded on the wire,
+    if a good request did not answer correctly, or if the bad one did not fail.
+    """
+    print("\n📦 Bounded Chat Batch (chat.completions.batch)")
     print("-" * 40)
 
-    print("✅ Batching Approaches:")
+    timer = WireTimer()
+    max_concurrency = 2
+    session = timed_session(timer)
+    async with session, VeniceClient(http_client=session, timeout=30.0) as client:
+        chat_model = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
+        print(f"✅ Model: {chat_model}")
+        timer.take()  # Drop the catalog request.
+
+        def request(model: str, n: int) -> dict[str, object]:
+            return {
+                "model": model,
+                "messages": [UserMessage(content=f"Count from 1 to {n}, digits only.")],
+                "max_completion_tokens": COUNT_MAX_TOKENS,
+                "venice_parameters": OWN_PROMPT_ONLY,
+            }
+
+        results = await client.chat.completions.batch(
+            [request(chat_model, 1), request(UNKNOWN_MODEL, 2), request(chat_model, 3)],
+            max_concurrency=max_concurrency,
+        )
+        wire = timer.take()
+
+    ok = True
+    for slot, expected_n in ((0, 1), (2, 3)):
+        result = results[slot]
+        if isinstance(result, ChatCompletionResponse):
+            if check_count(f"slot {slot}", result, expected_n):
+                print(f"   ✓ Slot {slot}: {(result.text or '').strip()!r}")
+            else:
+                ok = False
+        else:
+            print(f"   ❌ Slot {slot}: {type(result).__name__}: {result}")
+            ok = False
+    if isinstance(results[1], NotFoundError):
+        print("   ✓ Slot 1: the unknown model failed alone, as NotFoundError")
+    else:
+        print(f"   ❌ Slot 1: expected NotFoundError, got {type(results[1]).__name__}")
+        ok = False
+    peak = peak_overlap(wire)
+    print(f"   On the wire: at most {peak} at once (limit {max_concurrency})")
+    if peak > max_concurrency:
+        print("   ❌ More requests were on the wire than max_concurrency allows")
+        ok = False
+    return ok
+
+
+def batching_guidance() -> None:
+    """Explain which batching helper fits which job. No API calls."""
+    print("\n📦 Choosing a Batching Helper")
+    print("-" * 40)
+
+    print("1. client.chat.completions.batch(requests, max_concurrency=N)")
+    print("   Chat only. One kwargs dict per request; no streaming.")
+    print("2. client.gather(awaitables, max_concurrency=N)")
+    print("   Anything else, or a mix: images, embeddings, your own coroutines.")
+    print("   examples/production/async_patterns.py runs it.")
     print()
-    print("1. Size-based: send a batch once N requests are waiting")
-    print("2. Time-based: send whatever arrived in the last T seconds")
-    print("3. Hybrid: whichever of N or T comes first")
+    print("Both keep input order and return a failure in its own slot, so check")
+    print("each result with isinstance(result, BaseException). Pass")
+    print("return_exceptions=False to stop at the first failure instead.")
+    print("Prefer them over a hand-written asyncio.Semaphore and asyncio.gather().")
     print()
-    print("💡 Example Implementation:")
+    print("💡 Example:")
     print("   ```python")
-    print("   async def process_in_batches(coros, batch_size=10):")
-    print("       results = []")
-    print("       for i in range(0, len(coros), batch_size):")
-    print("           batch = coros[i : i + batch_size]")
-    print("           results += await asyncio.gather(*batch, return_exceptions=True)")
-    print("       return results")
+    print("   results = await client.chat.completions.batch(")
+    print('       [{"model": model, "messages": [UserMessage(content=q)]} for q in questions],')
+    print("       max_concurrency=5,")
+    print("   )")
     print("   ```")
     print()
-    print("📊 Benefits:")
-    print("   ✓ Bounded concurrency and memory")
-    print("   ✓ Easier rate limit management")
-    print("   ✓ Failures are collected per request, not lost")
-    return True
+    print("Pick max_concurrency from response_rate_limits and your pool size. A limit")
+    print("above max_connections only moves the waiting into the connection pool.")
 
 
 async def streaming_for_large_responses() -> bool:
@@ -385,20 +480,19 @@ async def streaming_for_large_responses() -> bool:
     return ok
 
 
-def memory_management() -> bool:
+def memory_management() -> None:
     """Explain memory-efficient patterns. No API calls."""
     print("\n💾 Memory Management")
     print("-" * 40)
 
     print("1. Stream long responses: handle chunks as they arrive")
-    print("2. Bound in-flight work: asyncio.Semaphore or batches, not one giant gather()")
+    print("2. Bound in-flight work: chat.completions.batch or client.gather, not asyncio.gather()")
     print("3. Close clients: `async with VeniceClient() as client:` releases the pool")
     print("4. Keep only what you need from each response, not the whole object")
     print("5. max_connections bounds the pool; each connection holds buffers")
-    return True
 
 
-def performance_monitoring() -> bool:
+def performance_monitoring() -> None:
     """Explain what to measure. No API calls."""
     print("\n📊 Performance Monitoring")
     print("-" * 40)
@@ -419,7 +513,6 @@ def performance_monitoring() -> bool:
     print("   if limits and limits.remaining_requests is not None:")
     print("       metrics.record_rate_limit_headroom(limits.remaining_requests)")
     print("   ```")
-    return True
 
 
 def production_configuration() -> bool:
@@ -439,10 +532,17 @@ def production_configuration() -> bool:
         max_concurrent_executions=100,
         max_queue_size=5000,
     )
-    assert config.rate_limiter is not None
+    limiter = config.rate_limiter
+    if (
+        config.backend.backend_type != BackendType.REDIS
+        or limiter is None
+        or limiter.mode != RateLimiterMode.ADAPTIVE
+    ):
+        print("\n   ❌ The config does not pair the Redis backend with the ADAPTIVE limiter")
+        return False
     print(
         f"\n   ✓ Config builds: backend={config.backend.backend_type.value}, "
-        f"rate_limiter={config.rate_limiter.mode.value}"
+        f"rate_limiter={limiter.mode.value}"
     )
     print("   Run it against a live Redis with examples/advanced/redis_backend.py.")
     print("   Measure throughput and latency under your own rate limits before sizing.")
@@ -455,15 +555,17 @@ async def main() -> int:
     print("Venice AI SDK - Performance Optimization Examples")
     print("=" * 60)
 
+    # Only the sections that check something count towards the result.
+    connection_pooling_optimization()
     results = [
-        ("connection_pooling_optimization", connection_pooling_optimization()),
         ("concurrent_requests_pattern", await concurrent_requests_pattern()),
-        ("batching_strategies", batching_strategies()),
-        ("streaming_for_large_responses", await streaming_for_large_responses()),
-        ("memory_management", memory_management()),
-        ("performance_monitoring", performance_monitoring()),
-        ("production_configuration", production_configuration()),
+        ("bounded_chat_batch", await bounded_chat_batch()),
     ]
+    batching_guidance()
+    results.append(("streaming_for_large_responses", await streaming_for_large_responses()))
+    memory_management()
+    performance_monitoring()
+    results.append(("production_configuration", production_configuration()))
     failed = [name for name, ok in results if not ok]
 
     print("\n" + "=" * 60)
@@ -471,12 +573,12 @@ async def main() -> int:
         print(f"❌ {len(failed)} of {len(results)} sections failed: {', '.join(failed)}")
         print("=" * 60)
         return 1
-    print(f"✅ All {len(results)} sections passed")
+    print(f"✅ All {len(results)} checked sections passed")
     print("=" * 60)
     print()
     print("📚 Key Takeaways:")
     print("   1. Reuse one client so connections are pooled")
-    print("   2. Use asyncio.gather() for independent requests, with bounded concurrency")
+    print("   2. Run independent requests concurrently: chat.completions.batch or client.gather")
     print("   3. Stream long responses to cut time to first token")
     print("   4. Monitor latency, errors and rate-limit headroom in production")
     return 0

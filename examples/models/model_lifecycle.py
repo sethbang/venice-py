@@ -26,6 +26,9 @@ them straight off ``client.models.list(...)`` and the per-model lookups
   :class:`ChatCapabilities`) so you can introspect feature flags directly
   instead of probing ``resolve_chat(require_function_calling=True)`` etc.
 
+``get_capabilities`` is shown for a chat model and then for image, video, inpaint
+and embedding models, each of which returns its own class.
+
 All of this is a read-only ``GET /models`` — running this example costs nothing.
 
 See also ``models/model_selection.py`` for resolver-based selection, and
@@ -35,8 +38,16 @@ See also ``models/model_selection.py`` for resolver-based selection, and
 import asyncio
 import sys
 from collections import Counter
+from collections.abc import Awaitable, Callable
 
-from venice_ai import NoMatchingModelError, VeniceClient
+from venice_ai import (
+    GenericCapabilities,
+    ImageCapabilities,
+    InpaintCapabilities,
+    NoMatchingModelError,
+    VeniceClient,
+    VideoCapabilities,
+)
 from venice_ai.exceptions import VeniceError
 from venice_ai.types.api import ImageModelSpec, TextModelSpec
 
@@ -227,6 +238,65 @@ async def model_detail_and_capabilities() -> bool | None:
     return True
 
 
+async def capabilities_for_other_types() -> bool | None:
+    """Read ``get_capabilities`` for image, video, inpaint and embedding models.
+
+    Each model type returns its own class. The section fails if a model comes back
+    as the wrong class or its ``type`` disagrees with the catalog, and returns
+    ``None`` (section skipped) when no model of these types exists.
+    """
+    print("\n\n🧭 get_capabilities() beyond chat")
+    print("-" * 40)
+
+    ok = True
+    shown = 0
+    async with VeniceClient() as client:
+        # (catalog type, resolver, the class get_capabilities must return)
+        cases: list[tuple[str, Callable[[], Awaitable[str]], type]] = [
+            ("image", client.models.resolve_image, ImageCapabilities),
+            ("video", client.models.resolve_video, VideoCapabilities),
+            ("inpaint", client.models.resolve_inpaint, InpaintCapabilities),
+            ("embedding", client.models.resolve_embedding, GenericCapabilities),
+        ]
+        for model_type, resolve, expected in cases:
+            try:
+                model_id = await resolve()
+                caps = await client.models.get_capabilities(model_id)
+            except NoMatchingModelError:
+                print(f"\nℹ️ {model_type}: no model in the catalog")
+                continue
+            except (VeniceError, ValueError) as e:
+                print(f"\n❌ {model_type}: {type(e).__name__}: {e}")
+                ok = False
+                continue
+
+            shown += 1
+            print(f"\n📦 {model_type}: {model_id} → {type(caps).__name__}")
+            if not isinstance(caps, expected) or caps.type != model_type:
+                print(f"   ❌ Expected {expected.__name__} with type={model_type!r}, got {caps!r}")
+                ok = False
+                continue
+            # match reads the type-specific fields without casts.
+            match caps:
+                case ImageCapabilities():
+                    print(f"   prompt limit: {caps.prompt_character_limit} characters")
+                    print(f"   transparent background: {caps.supports_transparent_background}")
+                case VideoCapabilities():
+                    print(f"   kind: {caps.model_type}, audio: {caps.supports_audio}")
+                    print(f"   durations: {', '.join(caps.durations) or '—'}")
+                    print(f"   resolutions: {', '.join(caps.resolutions) or '—'}")
+                case InpaintCapabilities():
+                    print(f"   combines several images: {caps.combine_images}")
+                case GenericCapabilities():
+                    # Types without flags of their own report only the type and privacy.
+                    print(f"   privacy: {caps.privacy}")
+
+    if ok and not shown:
+        print("Section skipped: no image, video, inpaint or embedding model in the catalog")
+        return None
+    return ok
+
+
 async def main() -> int:
     """Run the model-lifecycle metadata report (read-only, no cost).
 
@@ -243,6 +313,7 @@ async def main() -> int:
         ("image_quality_tiers", await image_quality_tiers()),
         ("deprecation_report", await deprecation_report()),
         ("model_detail_and_capabilities", await model_detail_and_capabilities()),
+        ("capabilities_for_other_types", await capabilities_for_other_types()),
     ]
 
     failed = [name for name, ok in results if ok is False]
@@ -262,7 +333,7 @@ async def main() -> int:
     print("   - defaultQuality / qualities for quality-aware image models")
     print("   - ModelDeprecation: startsAt / removesAt / replacementModelId")
     print("   - models.get(model_id) for a single model's full detail")
-    print("   - models.get_capabilities(model_id) for typed feature flags")
+    print("   - models.get_capabilities(model_id) for typed feature flags, per model type")
     return 0
 
 

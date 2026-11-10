@@ -20,7 +20,7 @@ class ModelFormatter:
             return "N/A"
 
         usd = f"${pricing.usd:.2f}" if hasattr(pricing, "usd") else "N/A"
-        diem = f"Ð{pricing.diem:.2f}" if hasattr(pricing, "diem") else "N/A"
+        diem = f"Ð{pricing.diem:.2f}" if getattr(pricing, "diem", None) is not None else "N/A"
 
         if currency == "usd":
             return usd
@@ -36,7 +36,7 @@ class ModelFormatter:
             return "N/A"
 
         usd = f"${pricing.usd:.3f}" if hasattr(pricing, "usd") else "N/A"
-        diem = f"Ð{pricing.diem:.3f}" if hasattr(pricing, "diem") else "N/A"
+        diem = f"Ð{pricing.diem:.3f}" if getattr(pricing, "diem", None) is not None else "N/A"
 
         if currency == "usd":
             return usd

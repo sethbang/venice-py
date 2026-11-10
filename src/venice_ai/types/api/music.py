@@ -24,7 +24,7 @@ class MusicQueueResponse(VeniceBaseModel):
     needed to poll for results.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
 
     model: str = Field(..., description="Model ID used for generation")
     queue_id: str = Field(..., description="Unique queue ID for tracking")
@@ -53,7 +53,7 @@ class MusicProcessingStatus(VeniceBaseModel):
     polling continues until it finishes or the poll limit is reached.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
 
     status: str = Field(..., description='Current status, normally ``"PROCESSING"``')
     average_execution_time: float = Field(
@@ -83,7 +83,7 @@ class MusicProcessingStatus(VeniceBaseModel):
 class MusicFailedStatus(VeniceBaseModel):
     """Status response when music generation failed."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
 
     status: Literal["FAILED"] = Field(..., description="Failed status")
     error: str | None = Field(default=None, description="Error message if available")
@@ -96,12 +96,14 @@ class MusicCompletedStatus(VeniceBaseModel):
     The completed audio may be delivered in one of two ways:
 
     1. **JSON with download URL** — ``url`` is set; download separately.
+       The URL can grant access on its own: the SDK does not log it, and a
+       validation error on this model does not quote it.
     2. **Inline binary** — the API streams the audio bytes directly.
        In this case ``url`` is ``None`` and the raw bytes are accessible
        via :attr:`data`.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
 
     status: Literal["COMPLETED"] = Field(..., description="Completed status")
     url: str | None = Field(default=None, description="Download URL if provided")

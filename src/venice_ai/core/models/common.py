@@ -536,6 +536,17 @@ class VeniceParameters(VeniceBaseModel):
         description="Enable X (Twitter) search to augment responses with real-time posts",
     )
 
+    def to_wire(self) -> dict[str, Any]:
+        """Return the fields sent to the API: only those the caller set.
+
+        A field left at its default stays off the wire so the server's own
+        default applies and it cannot contradict a top-level option such as
+        ``web_search=True``. A field set to a value equal to its default, such
+        as ``enable_web_search="off"``, is sent. Unrecognized keys are sent as
+        given. A field or key set to ``None`` is not sent.
+        """
+        return self.model_dump(exclude_unset=True, exclude_none=True)
+
 
 KNOWN_WEB_SEARCH_MODES: Final[tuple[str, ...]] = ("auto", "off", "on")
 """:attr:`VeniceParametersResponse.enable_web_search` values this SDK release knows about.

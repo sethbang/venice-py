@@ -253,11 +253,14 @@ What it deletes depends on the model:
 - **Inline or `url` models**: it calls `/video/complete`, which deletes the
   stored media and queue entry.
 - **Models whose queue response carries a `download_url`**: the file lives
-  behind that link for up to 24 hours, and `/video/complete` answers 400
-  "Request ID is invalid" for the job whether it is running or finished.
-  `job.cancel()` first sends `DELETE` to the `download_url` without the API key
-  (the link authorizes itself; a 404 means it is already gone), then calls
-  `/video/complete` and accepts that 400. The link is never logged.
+  behind that link for up to 24 hours, and `/video/complete` does not know the
+  job: it answers 400 "Request ID is invalid" or `success: false`. `job.cancel()`
+  first sends `DELETE` to the `download_url` without the API key (the link
+  authorizes itself; a 404 means it is already gone, or for an unfinished job not
+  there yet), then calls `/video/complete` and accepts either answer once the file
+  is gone. The SDK never logs the link, and a failed download's error shows the
+  host at most. Read it from `job.download_url` to save it, and treat it like a
+  password.
 
 The resource-level `client.video.cancel(model=..., queue_id=...)` only calls
 `/video/complete`, so for a `download_url` job either use `job.cancel()` or
@@ -276,19 +279,11 @@ async with await client.video.run(...) as job:
 # stored media released here
 ```
 
-## Video transcription
+## Video transcription is retired
 
-Distinct from job-based generation — synchronous for hosted URLs:
+`client.video.transcribe(url)` wraps `POST /video/transcriptions`, which Venice has retired. It answers every request with a 410, so the call raises `ModelGoneError` and returns nothing. Retrying or changing the model does not help.
 
-```python
-result = await client.video.transcribe(
-    "https://example.com/video.mp4",
-    response_format="json",
-)
-print(result.transcript)
-```
-
-`response_format` accepts `"json"` (the default; returns `VideoTranscriptionResponse`) or `"text"` (returns plain string). Useful for caption generation / search indexing.
+For analysis, summarization or questions about a video, call `client.chat.completions.create` with the URL in a `video_url` content part, on a model whose `model_spec.capabilities.supportsVideoInput` is true.
 
 ## Concurrent video jobs
 

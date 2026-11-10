@@ -12,9 +12,8 @@ Key correctness note
 to make the SDK use Redis at runtime: it also requires
 ``RateLimiterConfig(mode=RateLimiterMode.ADAPTIVE, redis_url=...)``. Without
 ADAPTIVE mode the SDK uses the in-memory SimpleRateLimiter and Redis is never
-contacted. The config validator flags that combination as an error (see
-``venice_ai.validation.config_validator``); the production preset wires both
-pieces and is the canonical entrypoint.
+contacted. The production preset wires both pieces and is the canonical
+entrypoint.
 
 Run
 ---
@@ -69,11 +68,11 @@ if importlib.util.find_spec("adaptive_rate_limiter") is None:
 # the end after stderr already flushed).
 sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
 
+from venice_ai import BackendType, RateLimiterMode  # noqa: E402
 from venice_ai.exceptions import NoMatchingModelError  # noqa: E402
 from venice_ai.factory import VeniceClientFactory  # noqa: E402
 from venice_ai.presets import create_production_config  # noqa: E402
 from venice_ai.types.api import UserMessage, VeniceParameters  # noqa: E402
-from venice_ai.validation.config_validator import validate_config  # noqa: E402
 
 REDIS_URL_ENV_VARS = ("VENICE_BACKEND__REDIS__REDIS_URL", "VENICE_REDIS_URL", "REDIS_URL")
 DEFAULT_REDIS_URL = "redis://localhost:6379"
@@ -158,18 +157,15 @@ async def run_redis_backed_request(redis_url: str, verifier: redis.Redis) -> boo
         _allow_localhost_for_testing=True,
     )
 
-    # With both pieces wired the validator reports no errors.
-    validation = validate_config(config)
-    print(
-        f"   Config validation: errors={len(validation.errors)} warnings={len(validation.warnings)}"
-    )
-    for warning in validation.warnings:
-        print(f"   WARNING: {warning}")
-    if validation.errors:
-        for err in validation.errors:
-            # A validator message can quote the URL, password included.
-            message = str(err).replace(redis_url, redis_endpoint(redis_url))
-            print(f"   ERROR: {message}", file=sys.stderr)
+    limiter = config.rate_limiter
+    print(f"   Backend: {config.backend.backend_type.value}")
+    print(f"   Rate limiter: {limiter.mode.value if limiter else 'none'}")
+    if (
+        config.backend.backend_type != BackendType.REDIS
+        or limiter is None
+        or limiter.mode != RateLimiterMode.ADAPTIVE
+    ):
+        print("   ERROR: Redis is used only with both pieces wired", file=sys.stderr)
         return False
 
     client = VeniceClientFactory.create_client(

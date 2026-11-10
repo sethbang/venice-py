@@ -2260,21 +2260,23 @@ class TestContinueFromConversation:
             patch("venice_ai.cli.commands.chat.load_conversation", return_value=None),
             patch("venice_ai.cli.commands.chat.print_error") as mock_error,
         ):
-            await _chat_async(
-                ctx=mock_ctx,
-                model="test-model",
-                select_model=False,
-                system_prompt=None,
-                temperature=None,
-                max_completion_tokens=None,
-                stream=True,
-                show_thinking=False,
-                animation="smooth",
-                animation_speed=0.03,
-                show_stats=False,
-                initial_message=None,
-                continue_id="nonexistentid",
-            )
+            with pytest.raises(SystemExit) as exit_info:
+                await _chat_async(
+                    ctx=mock_ctx,
+                    model="test-model",
+                    select_model=False,
+                    system_prompt=None,
+                    temperature=None,
+                    max_completion_tokens=None,
+                    stream=True,
+                    show_thinking=False,
+                    animation="smooth",
+                    animation_speed=0.03,
+                    show_stats=False,
+                    initial_message=None,
+                    continue_id="nonexistentid",
+                )
+            assert exit_info.value.code == 1
             mock_error.assert_called()
             call_args = str(mock_error.call_args)
             assert "nonexistentid" in call_args
@@ -3370,7 +3372,7 @@ class TestChatHistoryCommand:
             patch("venice_ai.cli.commands.chat.print_error"),
         ):
             result = cli_runner.invoke(cli, ["chat", "history", "--delete", "nonexistent"])
-            assert result.exit_code == 0
+            assert result.exit_code == 1
 
     def test_chat_history_delete_plain_mode(self, cli_runner):
         """Test delete in plain mode - covers lines 1031-1032"""

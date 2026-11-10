@@ -46,9 +46,9 @@ from ..types.api.requests.music import (
     MusicQuoteRequest,
     MusicRetrieveRequest,
 )
-from ..utils.errors import read_body
+from ..utils.errors import forget_parsed_text, parse_json, read_body, validate_hiding_input
 from ..validation.validators import validate_model_id
-from ._inline_audio import read_inline_audio
+from ._inline_audio import read_inline_audio, sniff_audio_format
 from .video import _is_unknown_request_id
 
 if TYPE_CHECKING:
@@ -462,7 +462,11 @@ class MusicJob:
 
         Raises:
             MusicGenerationError: If the status carries neither inline data
-                nor a ``url``; nothing is written in that case.
+                nor a ``url``, or if what the URL served is not a known audio
+                format, such as a gateway's HTML page or an empty body. Nothing
+                is written in either case and the error holds none of the body.
+                Raised through an ``async with`` block, it leaves the stored
+                audio in place.
             APITimeoutError: If the URL fetch times out.
             APIConnectionError: If the connection fails during the URL fetch.
             aiohttp.ClientResponseError: If the URL answers with an error
@@ -481,6 +485,12 @@ class MusicJob:
             await asyncio.to_thread(path.write_bytes, status.data)
         elif status.url:
             data = await self._client.fetch_external(status.url)
+            if sniff_audio_format(data) is None:
+                raise MusicGenerationError(
+                    f"Music job {self.queue_id}: the download link answered with {len(data)} "
+                    "bytes that are not audio. Nothing was written, and the stored audio "
+                    "is untouched."
+                )
             await asyncio.to_thread(path.write_bytes, data)
         return path
 
@@ -721,30 +731,32 @@ class Music(APIResource["VeniceClient"]):
         # is an APITimeoutError, and a body that is not JSON is a parse error.
         body_bytes = await read_body(raw_response)
         try:
-            response_data = await raw_response.json()
+            response_data = await parse_json(raw_response)
         except (aiohttp.ContentTypeError, ValueError) as e:
+            # The body can hold the download link, which grants access on its own.
             logger.error(
                 "Failed to parse JSON from music.retrieve response: %s. "
-                "Content-Type: %r, Body preview: %.500s",
+                "Content-Type: %r, body length: %d",
                 e,
                 content_type,
-                body_bytes[:500].decode("utf-8", errors="replace"),
+                len(body_bytes),
             )
+            forget_parsed_text(e)
             raise
 
         if isinstance(response_data, dict):
             status = response_data.get("status")
             if status == "FAILED":
-                return MusicFailedStatus.model_validate(response_data)
+                return validate_hiding_input(MusicFailedStatus, response_data)
             if status == "COMPLETED":
-                return MusicCompletedStatus.model_validate(response_data)
+                return validate_hiding_input(MusicCompletedStatus, response_data)
             if isinstance(status, str):
                 if status != "PROCESSING":
                     logger.warning(
                         "music.retrieve returned unknown status %r; treating it as in progress",
                         status,
                     )
-                return MusicProcessingStatus.model_validate(response_data)
+                return validate_hiding_input(MusicProcessingStatus, response_data)
 
         for status_type in (
             MusicProcessingStatus,
@@ -757,7 +769,10 @@ class Music(APIResource["VeniceClient"]):
                 logger.debug("fallback validate against %s failed: %s", status_type.__name__, e)
                 continue
 
-        raise ValueError(f"Unable to parse music retrieve response: {response_data}")
+        raise ValueError(
+            f"Unable to parse music retrieve response: got {type(response_data).__name__}, "
+            "not a recognized status object"
+        )
 
     async def release(
         self,

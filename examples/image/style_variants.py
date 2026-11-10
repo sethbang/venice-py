@@ -11,13 +11,18 @@ renders in a section share a seed, so the style modifier is the only input
 that changes between them. How closely a modifier is followed depends on the
 model.
 
+The API also has named presets. ``client.image.list_styles()`` lists them for free
+on every run, and a paid run renders one with ``style_preset``. The catalog has no
+flag for which models apply a preset, so the check is that the server echoes the
+one sent; whether it changed the picture is for you to judge.
+
 Each returned image's format and pixel size are read from its bytes and
 checked against the 512x512 request.
 
 Generation costs real money, so by default this example only resolves the model
 (free), prints what it would run and exits 77 ("skipped"). Opt in to make the
-10 paid generations and write the outputs to ``examples/results/`` with a
-``style_`` prefix::
+11 paid generations, about $0.11 at the cheapest listed $0.01 per image, and write
+the outputs to ``examples/results/`` with a ``style_`` prefix::
 
     VENICE_RUN_PAID_IMAGES=1
 """
@@ -27,11 +32,10 @@ import os
 import sys
 from pathlib import Path
 
+from _helpers import SKIPPED, catalog_price_usd, format_price, image_dimensions
+
 from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
 from venice_ai.types.api import ImageGenerationResponse
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import SKIPPED, catalog_price_usd, format_price, image_dimensions  # noqa: E402
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).
@@ -151,6 +155,47 @@ async def render_section(
     return results
 
 
+async def list_presets(client: VeniceClient) -> list[str]:
+    """List the named style presets (a free call) and print the first few."""
+    print("\n🗂️  Style presets from client.image.list_styles() (free)")
+    styles = (await client.image.list_styles()).data
+    shown = ", ".join(styles[:8])
+    print(f"   {len(styles)} presets: {shown}{', …' if len(styles) > 8 else ''}")
+    return styles
+
+
+async def render_preset(
+    client: VeniceClient, model: str, preset: str, written: list[Path]
+) -> tuple[str, bool, str | None]:
+    """Render with a named ``style_preset`` and check the server echoes it."""
+    print(f"\n🎨 style_preset={preset!r}")
+    try:
+        response = await client.image.create(
+            model=model,
+            prompt="a quiet harbor at sunrise",
+            width=WIDTH,
+            height=HEIGHT,
+            style_preset=preset,
+            hide_watermark=True,
+            return_binary=False,
+        )
+    except VeniceError as e:
+        print(f"   ❌ Failed: {e}")
+        return preset, False, str(e)
+    data = response.bytes(0)
+    path = response.save(RESULTS_DIR / "style_preset", overwrite=True)
+    written.append(path)
+    size = image_dimensions(data)
+    print(f"   ✅ {path.name} ({size[0]}x{size[1]}, {len(data)} bytes)")
+    echo = response.request.get("data") if isinstance(response.request, dict) else None
+    echoed = echo.get("style_preset") if isinstance(echo, dict) else None
+    if echoed != preset:
+        print(f"   ❌ The server echoed style_preset={echoed!r}")
+        return preset, False, f"echoed {echoed!r}"
+    print("   ✔ The server echoed the preset")
+    return preset, True, None
+
+
 async def main() -> int:
     """Run all style variation examples.
 
@@ -160,7 +205,7 @@ async def main() -> int:
     """
     print("🚀 Venice AI Image Style Variations Examples")
     print("=" * 50)
-    total_paid = sum(len(section[4]) for section in SECTIONS)
+    total_paid = sum(len(section[4]) for section in SECTIONS) + 1
     if RUN_PAID:
         print(f"💸 VENICE_RUN_PAID_IMAGES=1 — this run makes {total_paid} paid generations.")
     else:
@@ -178,6 +223,14 @@ async def main() -> int:
             print(f"SKIPPED: no image model in the catalog takes width/height ({e})")
             return SKIPPED
         print(f"📍 Using image model: {image_model}")
+        try:
+            presets = await list_presets(client)
+        except VeniceError as e:
+            print(f"❌ Could not list style presets: {e}")
+            return 1
+        if not presets:
+            print("❌ client.image.list_styles() returned no presets")
+            return 1
 
         if not RUN_PAID:
             spec = (await client.models.get(image_model)).model_spec
@@ -185,6 +238,7 @@ async def main() -> int:
             for title, _prefix, subject, _seed, variants in SECTIONS:
                 names = ", ".join(name for name, _modifier in variants)
                 print(f"   - {title}: '{subject}' as {names}")
+            print(f"   - style_preset: {presets[0]!r}")
             print(f"💰 Catalog price per image: {format_price(catalog_price_usd(spec))}")
             print("⏭️  Not generated: set VENICE_RUN_PAID_IMAGES=1 to generate (incurs this cost).")
             print("SKIPPED: VENICE_RUN_PAID_IMAGES is not set, so no image was generated")
@@ -195,6 +249,9 @@ async def main() -> int:
                 client, image_model, title, prefix, subject, seed, variants, written
             )
             sections.append((title, results))
+        sections.append(
+            ("style_preset", [await render_preset(client, image_model, presets[0], written)])
+        )
 
     total = sum(len(r) for _, r in sections)
     succeeded = sum(1 for _, r in sections for _, ok, _ in r if ok)
@@ -218,6 +275,7 @@ async def main() -> int:
         print("   - Mood and atmosphere control")
         print("   - Color palette manipulation")
         print("   - A shared seed per section, so only the style modifier varies")
+        print("   - Named presets: client.image.list_styles() and style_preset")
 
     print("\n📁 Files written by this run:")
     for path in written:

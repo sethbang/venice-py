@@ -79,6 +79,7 @@ async def list_models(
             # Fetch every real model type so --type video|asr|music returns
             # results instead of silently empty.
             model_types_to_fetch: list[ModelListType] = concrete_model_types()
+            list_failures: dict[str, Exception] = {}
 
             for mtype in model_types_to_fetch:
                 try:
@@ -90,10 +91,23 @@ async def list_models(
                                 all_models.append(model)
                                 seen_ids.add(model.id)
                 except Exception as e:
-                    # Some model types might not be available — log and skip.
+                    # Reported below, once the listings that worked are known.
                     import logging
 
                     logging.getLogger(__name__).debug("models.list(type=%s) failed: %s", mtype, e)
+                    list_failures[mtype] = e
+
+            first_failure = next(iter(list_failures.values()), None)
+            if first_failure is not None and not all_models:
+                raise first_failure
+
+            for named_type in model_type or ():
+                if named_type in list_failures:
+                    print_error(f"Could not list {named_type} models: {list_failures[named_type]}")
+                    raise SystemExit(1)
+
+            for failed_type, failure in list_failures.items():
+                click.echo(f"WARNING: Could not list {failed_type} models: {failure}", err=True)
 
             if not all_models:
                 print_info("No models found")
@@ -162,6 +176,9 @@ async def list_models(
             filtered_models = ModelFilter.apply_all_filters(all_models, filter_opts)
 
             if not filtered_models:
+                # Without --type, the type that failed might have held a match.
+                if first_failure is not None and not model_type:
+                    raise first_failure
                 print_info("No models match the specified filters")
                 return
 

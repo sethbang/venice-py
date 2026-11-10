@@ -6,7 +6,7 @@ Sourced from `VeniceBaseModel` in `src/venice_ai/core/models/base.py`. Every Ven
 
 | Property | Type | Source headers | When to read |
 |---|---|---|---|
-| `response.headers` | `dict[str, str] \| None` | raw HTTP response headers (case-sensitive lookup) | Custom server headers; one-off correlation IDs |
+| `response.headers` | `dict[str, str] \| None` | HTTP response headers: a `dict` subclass, names stored lowercase, looked up in any casing | Custom server headers; one-off correlation IDs |
 | `response.response_rate_limits` | `RateLimitInfo \| None` | `x-ratelimit-*` parsed | Proactive throttling before you hit a 429 |
 | `response.balance_info` | `BalanceInfo \| None` | `x-venice-balance-usd` / `-diem`: what the calling key can still spend | Cost tracking without `CostTracker` |
 | `response.deprecation_info` | `DeprecationInfo \| None` | model-deprecation headers | Logging "your model is being retired" warnings |
@@ -19,12 +19,12 @@ All five return `None` when the relevant headers are absent. **Always null-check
 ```python
 response = await client.chat.completions.create(...)
 if response.headers:
-    request_id = response.headers.get("x-request-id")
+    request_id = response.request_id
     server_version = response.headers.get("x-venice-version")
     log.info("venice.call", request_id=request_id, server=server_version)
 ```
 
-The dict is case-sensitive on lookup but stores keys in their original case — Venice sends lowercase header names, so match the wire spelling (e.g. `.get("x-request-id")`). For correlation with Venice's server logs, `x-request-id` is the canonical header.
+The mapping is a `dict` subclass with names stored lowercase: look a name up in any casing, and iterating gives lowercase names. Every Venice response carries `CF-RAY`, exposed as `response.request_id`, for correlation with Venice's server logs.
 
 ## `response_rate_limits` — `RateLimitInfo`
 
@@ -163,7 +163,6 @@ The raw `aiohttp.ClientResponse` (or equivalent) is on `response._response` for 
 
 - **Treating a property as required**: `response.balance_info.usd` raises `AttributeError` when `balance_info` is `None`. Always null-check.
 - **Assuming `balance_info.usd` is the cost of THIS call, or the account balance**: it's what the key could spend before the call. Compute deltas between responses; read the account balance from `client.billing.get_balance()`.
-- **Reading `.headers["X-Request-Id"]` and getting `KeyError`**: use `.get()`, and the dict is a plain (case-sensitive) dict and Venice sends lowercased header names, so use `x-request-id`.
 - **Trying to read `final_response.usage` after `text_deltas()`**: doesn't populate. See `streaming.md`.
 
 ## Related references

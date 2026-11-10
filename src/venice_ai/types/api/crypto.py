@@ -103,11 +103,11 @@ class JsonRpcResponse(VeniceBaseModel):
     Exactly one of ``result`` or ``error`` is populated; ``result`` may legitimately
     be ``None`` for some methods, so check ``error`` first to disambiguate.
 
-    Inherits header-extraction helpers from :class:`VeniceBaseModel`. The four
-    crypto-proxy billing headers (documented at
-    ``api-reference/endpoint/crypto/rpc.md``) are surfaced via the typed
-    accessors :attr:`rpc_credits`, :attr:`rpc_cost_usd`,
-    :attr:`venice_request_id`, and :attr:`idempotent_replayed`.
+    Inherits header-extraction helpers from :class:`VeniceBaseModel`. The
+    response headers Venice documents for this endpoint (in the OpenAPI spec and
+    at ``api-reference/endpoint/crypto/rpc.md``) are surfaced via the typed
+    accessors :attr:`rpc_credits` and :attr:`rpc_cost_usd` for billing,
+    :attr:`venice_request_id` for correlation, and :attr:`idempotent_replayed`.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -133,10 +133,11 @@ class JsonRpcResponse(VeniceBaseModel):
 
     @property
     def venice_request_id(self) -> str | None:
-        """Correlation ID (``X-Request-ID``).
+        """Correlation ID (``X-Request-ID``), or ``None`` if the response has no such header.
 
-        Distinct from :attr:`VeniceBaseModel.request_id`, which reads the
-        Cloudflare ``cf-ray`` header.
+        Venice documents this header for ``/crypto/rpc`` as the ID to quote in
+        support correspondence. Distinct from :attr:`VeniceBaseModel.request_id`,
+        which reads the Cloudflare ``cf-ray`` header.
         """
         return _venice_request_id(self)
 
@@ -149,7 +150,7 @@ class JsonRpcResponse(VeniceBaseModel):
 class BatchJsonRpcResponse(VeniceBaseModel):
     """Wrapper for a JSON-RPC 2.0 batch response.
 
-    The Venice proxy returns one HTTP response per batch, so the four billing
+    The Venice proxy returns one HTTP response per batch, so its documented
     headers (``X-Venice-RPC-Credits``, ``X-Venice-RPC-Cost-USD``,
     ``X-Request-ID``, ``Idempotent-Replayed``) cover the whole batch and are
     surfaced here rather than on individual items. Iterate or index this
@@ -174,7 +175,7 @@ class BatchJsonRpcResponse(VeniceBaseModel):
 
     @property
     def venice_request_id(self) -> str | None:
-        """Correlation ID (``X-Request-ID``)."""
+        """Correlation ID (``X-Request-ID``), or ``None`` if the response has no such header."""
         return _venice_request_id(self)
 
     @property

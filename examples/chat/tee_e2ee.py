@@ -5,8 +5,20 @@ Venice AI SDK - TEE Client-Side End-to-End Encryption (E2EE)
 
 Demonstrates Venice confidential-compute (TEE) chat with client-side E2EE.
 Messages are encrypted in-process to the attested model key and the streamed
-response deltas are decrypted locally — Venice's infrastructure never sees the
-plaintext of your ``user`` / ``system`` content.
+response deltas are decrypted locally, so Venice's infrastructure receives your
+``user`` / ``system`` content only as ciphertext. That holds as far as the
+attestation does (see the security note below). The model ID, token counts,
+message roles and timing stay in the clear.
+
+What this script can and cannot show: the session section shows the encrypted
+form the SDK produces locally, and the chats show that replies decrypt and read
+correctly. Nothing here observes the wire, so the checks cannot by themselves
+tell an encrypted exchange from a plaintext one.
+
+Cost: two short chats capped at 512 tokens on the cheapest E2EE model that
+answers, typically under $0.001. Attestation and signature reads are not known to
+bill (read ``x-venice-balance-usd`` if that matters), but ``/tee/attestation``
+rate-limits after about 10 quick reads, across all models.
 
 Requires the ``[e2ee]`` extra (pulls in ``cryptography``)::
 
@@ -25,6 +37,9 @@ Features Demonstrated:
       attached to the chat calls with e2ee=TeeOptions(verifier=...)
     - Streaming encrypted chat, consuming decrypted text deltas
     - A stream=False call returning a reassembled (decrypted) response
+    - client.tee.get_signature(...) for a completion's enclave signature, with a
+      fabricated request ID as the control
+    - client.tee.open_session(...) for a manually managed session
 
 Security note:
     The *baseline* attestation verifier TRUSTS Venice's server-side ``verified``
@@ -38,10 +53,17 @@ Security note:
 import asyncio
 import math
 import sys
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 
 from venice_ai import VeniceClient, model_price
-from venice_ai.exceptions import APIError, TeeAttestationError, TeeError
+from venice_ai.exceptions import (
+    APIError,
+    APIResponseValidationError,
+    TeeAttestationError,
+    TeeEncryptionError,
+    TeeError,
+)
 from venice_ai.tee import DcapTdxVerifier, TeeOptions
 from venice_ai.tee.types import TeeAttestation
 from venice_ai.types.api import SystemMessage, TextModelSpec, UserMessage
@@ -62,11 +84,6 @@ def reached_cap(response: object) -> bool:
     return used is None or used >= MAX_COMPLETION_TOKENS
 
 
-#: Consecutive 429s after which the walk stops. A second model answering 429
-#: points at the account's rate limit, which trying more models only makes worse.
-MAX_CONSECUTIVE_RATE_LIMITS = 2
-
-
 class NodeUnavailableError(Exception):
     """A confidential-compute node answered with a transient server error."""
 
@@ -76,7 +93,11 @@ class NodeUnavailableError(Exception):
 
 
 def _is_transient(error: APIError) -> bool:
-    """True for errors that another E2EE model may not share (5xx, overload)."""
+    """True for errors the caller handles as an outage, not a bad request (5xx, 429).
+
+    A 5xx is local to a node, so another model may answer. A 429 is on the
+    account: ``tee_e2ee_demo`` stops at the first one rather than trying more.
+    """
     status = error.status_code
     return status is not None and (status >= 500 or status == 429)
 
@@ -88,6 +109,27 @@ class DemoResult:
     ok: bool
     full_verification: bool
     skipped: bool = False
+    #: Optional surfaces this run really exercised, for the closing summary.
+    exercised: list[str] = field(default_factory=list)
+
+
+def _ppid(attestation: TeeAttestation) -> str:
+    """The machine identity in a quote, as hex. Read it only after ``verify()`` passes.
+
+    ``parse_quote`` checks no signature, so before that this is an unproven claim.
+    Only called once a verifier exists, which means ``dcap-qvl`` is installed.
+    """
+    import dcap_qvl
+
+    quote = attestation.intel_quote
+    raw = bytes.fromhex(quote) if isinstance(quote, str) else quote
+    if not isinstance(raw, bytes):
+        return "unavailable (no raw quote)"
+    try:
+        extension = dcap_qvl.parse_quote(raw).pck_extension()
+    except ValueError as e:
+        return f"unavailable ({e})"
+    return extension.ppid.hex() if extension is not None else "unavailable (no PCK extension)"
 
 
 async def build_full_verifier(attestation: TeeAttestation) -> DcapTdxVerifier | None:
@@ -135,6 +177,8 @@ async def discover_e2ee_models(client: VeniceClient) -> list[str]:
         if not isinstance(m.model_spec, TextModelSpec):
             continue
         caps = m.model_spec.capabilities
+        if m.model_spec.beta or m.model_spec.offline:
+            continue
         if caps is not None and caps.supportsE2EE:
             price = model_price(m.model_dump())
             candidates.append(
@@ -143,15 +187,128 @@ async def discover_e2ee_models(client: VeniceClient) -> list[str]:
     return [model_id for _reasoning, _price, model_id in sorted(candidates)]
 
 
+def _normalized_address(address: str) -> str:
+    """A signing address in lowercase with no ``0x`` prefix, for comparing."""
+    return address.lower().removeprefix("0x")
+
+
+async def completion_signature(
+    client: VeniceClient, model: str, request_id: str, attestation: TeeAttestation
+) -> bool | None:
+    """Fetch the enclave's signature for one completion, with a fabricated ID as control.
+
+    The signature covers ``text`` and comes from ``signing_address``. Checking it
+    needs secp256k1 recovery, which the SDK does not ship, so this confirms what
+    was signed for and compares addresses; it does not verify the signature.
+    A different address from this run's attestation read is reported and does not
+    fail the run, because the two reads may reach different nodes.
+
+    Returns ``None`` (section skipped) on a transient server error from either read,
+    on a 404 for this completion, whose signature may not be ready, and when the
+    fabricated ID gets a signature too, since one then says nothing about this
+    completion.
+    """
+    print("\n✍️  Completion signature (client.tee.get_signature)...")
+    try:
+        signature = await client.tee.get_signature(model=model, request_id=request_id)
+    except (APIError, APIResponseValidationError) as e:
+        if isinstance(e, APIError) and _is_transient(e):
+            print(f"Section skipped: signature read unavailable ({type(e).__name__}: {e})")
+            return None
+        if isinstance(e, APIError) and e.status_code == 404:
+            print("Section skipped: no signature available yet")
+            return None
+        print(f"   ❌ No signature for this completion ({type(e).__name__}: {e})")
+        return False
+    print(f"   requested_request_id: {signature.requested_request_id}")
+    print(f"   signing_algo: {signature.signing_algo}")
+    print(f"   signing_address: {signature.signing_address}")
+    if signature.requested_request_id not in (None, request_id):
+        print(f"   ❌ The signature is for another completion, not {request_id}")
+        return False
+    if not signature.signature or not signature.signing_address:
+        print("   ❌ The response carries no signature")
+        return False
+    same = _normalized_address(signature.signing_address) == _normalized_address(
+        attestation.signing_address
+    )
+    print(f"   📏 Same signing address as this run's attestation read: {same}")
+
+    fabricated = f"chatcmpl-{uuid.uuid4()}"
+    try:
+        await client.tee.get_signature(model=model, request_id=fabricated)
+    except APIResponseValidationError as e:
+        # A body that does not parse is not a refusal, so it proves nothing.
+        print(f"Section skipped: the control read returned an unreadable body ({e})")
+        return None
+    except APIError as e:
+        if _is_transient(e):
+            # An outage or a rate limit says nothing about the fabricated ID.
+            print(f"Section skipped: the control read did not answer ({type(e).__name__}: {e})")
+            return None
+        print(f"   ✅ A fabricated request ID gets no signature ({type(e).__name__})")
+        return True
+    print(
+        "   ℹ️ A fabricated request ID also returned a signature, so its presence proves "
+        "nothing here"
+    )
+    return None
+
+
+async def manual_session(client: VeniceClient, model: str) -> bool | None:
+    """Open and close an E2EE session by hand with ``client.tee.open_session``.
+
+    ``e2ee=`` on a chat call does all of this for you. A manual session is for
+    code that builds its own encrypted requests. Opening one verifies the
+    attestation fail-closed. Sends no chat: a message encrypted here goes to the
+    model's key and only the enclave can read it, so the checks cover its form.
+
+    Returns ``None`` (section skipped) on a transient server error.
+    """
+    print("\n🔧 Manual session (client.tee.open_session)...")
+    secret = "this sentence stays on this machine"
+    try:
+        session = await client.tee.open_session(model=model)
+    except APIError as e:
+        if _is_transient(e):
+            print(f"Section skipped: attestation read unavailable ({type(e).__name__}: {e})")
+            return None
+        raise
+    with session:
+        headers = session.request_headers()
+        first, second = session.encrypt_message(secret), session.encrypt_message(secret)
+    print(f"   Request headers: {sorted(headers)}")
+    print(f"   Ciphertext: {first[:32]}... ({len(first)} hex chars)")
+    ok = True
+    if len(headers) != 3 or session.session_public_key_hex not in headers.values():
+        print("   ❌ Expected three headers including the session public key")
+        ok = False
+    if secret.encode().hex() in first or first == second:
+        print("   ❌ Ciphertext must hide the text and differ per message")
+        ok = False
+    try:
+        session.encrypt_message(secret)
+    except TeeEncryptionError:
+        print("   ✅ Each message encrypts differently, and a closed session refuses to encrypt")
+    else:
+        print("   ❌ A closed session still encrypted a message")
+        ok = False
+    return ok
+
+
 async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
     """Attest *model*, verify its quote, then run streaming and non-streaming E2EE chat.
 
-    Returns a failed result when full quote verification rejects the enclave
-    or an encrypted reply is truncated or wrong. Raises
-    ``NodeUnavailableError`` on a transient server error so the caller can try
-    another model, and lets ``TeeAttestationError`` propagate: a failed
-    attestation check is a security failure, never something to route around.
+    Returns a failed result when full quote verification rejects the enclave,
+    an encrypted reply is truncated or wrong, a signature check fails, or the
+    second paid call fails after the first was billed (moving to another model
+    would pay for both again). Raises ``NodeUnavailableError`` on a transient
+    server error before that, so the caller can try another model, and lets
+    ``TeeAttestationError`` propagate: a failed attestation check is a security
+    failure, never something to route around.
     """
+    streamed = None
+    full_verification = False
     try:
         # --- (1) Attestation ----------------------------------------------------
         # Fetch and BASELINE-verify the enclave's attestation. fail_closed=True
@@ -177,7 +334,6 @@ async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
         # Apple Silicon (dcap-qvl ships an arm64 wheel).
         verifier = await build_full_verifier(attestation)
         e2ee: bool | TeeOptions = True
-        full_verification = False
         if verifier is not None:
             # verify() is fail-closed: a rejected quote raises TeeError, which
             # fails the demo. A verifier that rejected this enclave must never
@@ -199,6 +355,12 @@ async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
             print(
                 f"   checks['compose_binding']: {result.get('checks', {}).get('compose_binding')!r}"
             )
+            print(
+                f"   machine (PPID, trustworthy only after verify() passes): {_ppid(attestation)}"
+            )
+            print("   ♻️  One verifier covers every machine with the same FMSPC and PCK CA, within")
+            print("      the collateral's validity window. A quote from another FMSPC raises")
+            print("      TeeError; build a verifier for it with with_fetched_collateral.")
             print("   ℹ️  Tier B: this proves GENUINE non-debug Intel TDX hardware +")
             print("      a self-consistent dstack workload — but NOT that it is the")
             print("      legitimate Venice image. For per-dimension Tier A, pin an")
@@ -256,6 +418,10 @@ async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
     except TeeAttestationError:
         raise
     except APIError as e:
+        if streamed is not None:
+            print(f"\n   ❌ The second encrypted call failed ({type(e).__name__}): {e}")
+            print("      Not trying another model: the first call here was already billed.")
+            return DemoResult(ok=False, full_verification=full_verification)
         if _is_transient(e):
             raise NodeUnavailableError(
                 f"{type(e).__name__}: {e}", rate_limited=e.status_code == 429
@@ -278,7 +444,19 @@ async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
     if finish != "stop" or "ENCRYPTED OK" not in reply.upper():
         print("   ❌ The non-streaming E2EE reply was not the requested text")
         ok = False
-    return DemoResult(ok=ok, full_verification=full_verification)
+
+    exercised: list[str] = []
+    signed = await completion_signature(client, model, response.id, attestation)
+    if signed is False:
+        ok = False
+    elif signed:
+        exercised.append("client.tee.get_signature for a completion's enclave signature")
+    opened = await manual_session(client, model)
+    if opened is False:
+        ok = False
+    elif opened:
+        exercised.append("client.tee.open_session for a manually managed session")
+    return DemoResult(ok=ok, full_verification=full_verification, exercised=exercised)
 
 
 async def tee_e2ee_demo() -> DemoResult:
@@ -303,16 +481,15 @@ async def tee_e2ee_demo() -> DemoResult:
             return DemoResult(ok=True, full_verification=False, skipped=True)
         print(f"🔎 Found {len(candidates)} E2EE-capable model(s)")
 
-        rate_limits = 0
         for model in candidates:
             print(f"\n📍 Using E2EE model: {model}")
             try:
                 return await run_encrypted_demo(client, model)
             except NodeUnavailableError as e:
                 print(f"\n   ⚠️  {model} is unavailable right now ({e}).")
-                rate_limits = rate_limits + 1 if e.rate_limited else 0
-                if rate_limits >= MAX_CONSECUTIVE_RATE_LIMITS:
-                    print("\n❌ Rate limited on consecutive models. Wait a minute and re-run.")
+                if e.rate_limited:
+                    print("\n❌ Rate limited, and that is on the account, not this model.")
+                    print("   Wait a minute and re-run.")
                     return DemoResult(ok=False, full_verification=False)
                 print("      Trying the next one.")
             except ImportError as e:
@@ -356,6 +533,8 @@ async def main() -> int:
         print("   - e2ee=TeeOptions(verifier=...) to verify every encrypted session")
     print("   - Streaming E2EE chat with locally decrypted deltas")
     print("   - Non-streaming E2EE chat with a reassembled response")
+    for line in result.exercised:
+        print(f"   - {line}")
     if result.full_verification:
         print("   - Tier B vs caller-pinned Tier A verification")
     else:
@@ -369,11 +548,17 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n👋 Goodbye!")
         sys.exit(130)
-    except TeeError as e:
+    except TeeAttestationError as e:
         # Attestation is fail-closed: a failed baseline check, or a session
         # rejected by the attached verifier, raises and MUST surface loudly
         # (non-zero exit), never silently degrade.
-        print(f"\n❌ TEE verification failed ({type(e).__name__}): {e}", file=sys.stderr)
+        print(f"\n❌ TEE verification failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    except TeeEncryptionError as e:
+        print(f"\n❌ TEE encryption or decryption failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    except TeeError as e:
+        print(f"\n❌ TEE error ({type(e).__name__}): {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"\n❌ Error: {e}", file=sys.stderr)

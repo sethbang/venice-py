@@ -23,6 +23,7 @@ Two-layer rejection structure (mirrors the design doc §7):
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -543,3 +544,135 @@ async def test_with_fetched_collateral_call_shape(monkeypatch: pytest.MonkeyPatc
     assert captured["raw"] == bytes.fromhex(att.intel_quote)
     # The returned verifier is offline-ready: it verifies the real fixture True.
     assert v.verify(att) is True
+
+
+# --------------------------------------------------------------------------- #
+# Reusing one verifier across machines (real crypto, offline)
+# --------------------------------------------------------------------------- #
+
+# Two captures from different machines on the same FMSPC and PCK CA.
+_MACHINE_A = "gemma_3_27b_p"
+_MACHINE_B = "gpt_oss_120b_p"
+# The same machine as _MACHINE_A, serving another model.
+_MACHINE_A_AGAIN = "qwen3_vl_30b_a3b_p"
+# A capture on another FMSPC.
+_OTHER_FMSPC = "live_evidence"
+
+
+def _quote(slug: str) -> Any:
+    att, _nonce = _build_attestation(slug)
+    return dcap_qvl.parse_quote(bytes.fromhex(att.intel_quote))
+
+
+def test_fixtures_cover_two_machines_on_one_fmspc() -> None:
+    """Pins what these tests rely on, and how dcap_qvl exposes platform identity."""
+    a, b, again = _quote(_MACHINE_A), _quote(_MACHINE_B), _quote(_MACHINE_A_AGAIN)
+
+    assert a.fmspc() == b.fmspc() == again.fmspc()
+    assert a.ca() == b.ca()
+    assert a.pck_extension().ppid != b.pck_extension().ppid
+    assert a.pck_extension().platform_instance_id != b.pck_extension().platform_instance_id
+    assert a.pck_extension().ppid == again.pck_extension().ppid
+    assert _quote(_OTHER_FMSPC).fmspc() != a.fmspc()
+
+
+def test_one_verifier_accepts_quotes_from_two_machines_on_one_fmspc() -> None:
+    verifier = _verifier(_MACHINE_A)
+
+    for slug in (_MACHINE_A, _MACHINE_B, _MACHINE_A):
+        att, _nonce = _build_attestation(slug)
+        assert verifier.verify(att) is True
+        assert verifier.last_result is not None
+        assert verifier.last_result["checks"]["signature_chain"] is True
+
+
+def test_reuse_does_not_change_the_callers_collateral() -> None:
+    collateral = _collateral(_MACHINE_A)
+    before = collateral.to_json()
+    att, _nonce = _build_attestation(_MACHINE_B)
+
+    assert _verifier(_MACHINE_A, collateral=collateral).verify(att) is True
+
+    assert collateral.to_json() == before
+
+
+def test_collateral_without_a_pck_chain_verifies() -> None:
+    stored = json.loads(load_collateral_json(_MACHINE_A))
+    del stored["pck_certificate_chain"]
+    collateral = dcap_qvl.QuoteCollateralV3.from_json(json.dumps(stored))
+    att, _nonce = _build_attestation(_MACHINE_B)
+
+    assert _verifier(_MACHINE_A, collateral=collateral).verify(att) is True
+
+
+def test_quote_from_another_machine_is_still_checked_against_the_pinned_root() -> None:
+    # A root that still parses, holding another public key: the byte after the
+    # marker of an uncompressed EC point is inside the key.
+    key_at = INTEL_SGX_ROOT_CA_DER.index(b"\x03\x42\x00\x04") + 4
+    wrong_root = bytearray(INTEL_SGX_ROOT_CA_DER)
+    wrong_root[key_at] ^= 0xFF
+    att, _nonce = _build_attestation(_MACHINE_B)
+
+    with pytest.raises(TeeError, match="fail-closed"):
+        _verifier(_MACHINE_A, root_ca_der=bytes(wrong_root)).verify(att)
+
+
+def test_tampered_quote_from_another_machine_is_rejected() -> None:
+    att, _nonce = _build_attestation(_MACHINE_B)
+    raw = bytearray(bytes.fromhex(att.intel_quote))
+    raw[700] ^= 0xFF
+    tampered = att.model_copy(update={"intel_quote": raw.hex()})
+
+    with pytest.raises(TeeError, match="fail-closed"):
+        _verifier(_MACHINE_A).verify(tampered)
+
+
+def test_verified_quote_with_no_embedded_chain_raises_tee_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``fmspc()`` reads the chain in the quote; collateral can verify one without it."""
+
+    class _NoChainQuote(_FakeQuote):
+        def fmspc(self) -> str:
+            raise ValueError("no embedded PCK chain")
+
+    slug = "gemma_3_27b_p"
+    att, _ = _build_attestation(slug)
+    report = _real_report(slug)
+    _stub_crypto(monkeypatch, report)
+    monkeypatch.setattr(verify_mod.dcap_qvl, "parse_quote", lambda raw: _NoChainQuote(report))
+
+    with pytest.raises(TeeError, match="FMSPC"):
+        _verifier(slug).verify(att)
+
+
+def test_quote_on_another_fmspc_is_refused_and_says_what_to_do(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def must_not_run(*_args: Any) -> None:
+        pytest.fail("verified with collateral for another FMSPC")
+
+    monkeypatch.setattr(verify_mod.dcap_qvl, "verify_with_root_ca", must_not_run)
+    att, _nonce = _build_attestation(_OTHER_FMSPC)
+
+    with pytest.raises(TeeError, match="FMSPC") as excinfo:
+        _verifier(_MACHINE_A).verify(att)
+
+    assert _quote(_OTHER_FMSPC).fmspc() in str(excinfo.value)
+    assert "with_fetched_collateral" in str(excinfo.value)
+
+
+def test_collateral_from_another_pck_ca_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    def must_not_run(*_args: Any) -> None:
+        pytest.fail("verified with revocation data for another PCK CA")
+
+    monkeypatch.setattr(verify_mod.dcap_qvl, "verify_with_root_ca", must_not_run)
+    stored = json.loads(load_collateral_json(_MACHINE_A))
+    # A chain whose first certificate is not the one that issued the quote's PCK.
+    root_only = stored["pck_crl_issuer_chain"].split("-----END CERTIFICATE-----")[1]
+    stored["pck_crl_issuer_chain"] = f"{root_only.strip()}\n-----END CERTIFICATE-----\n"
+    collateral = dcap_qvl.QuoteCollateralV3.from_json(json.dumps(stored))
+    att, _nonce = _build_attestation(_MACHINE_B)
+
+    with pytest.raises(TeeError, match="PCK CA"):
+        _verifier(_MACHINE_A, collateral=collateral).verify(att)

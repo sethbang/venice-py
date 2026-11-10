@@ -9,12 +9,19 @@ the Venice AI SDK in production:
 3. Model selection by price, using catalog pricing
 4. Usage analytics and reporting
 5. Budget management via :class:`venice_ai.BudgetManager`
+6. Automatic tracking with ``client.attach_cost_tracker()``
 
 Dollar figures labelled "tracked" are catalog math: :class:`venice_ai.CostTracker`
 prices the server's reported token counts at the catalog's rates and never reads
 the charge itself. Non-streaming responses also carry the server's own figure in
 ``response.cost``, split into USD and DIEM, and it is printed beside the tracked
 one wherever it is present.
+
+Cost: Pattern 1 sends up to four requests with a 2.4k-token prefix on a cache-priced
+model from the catalog's default ranking, about $0.003 on today's default pick; a
+costlier default raises it. The schema comparison also takes the default ranking. The
+other patterns use models priced at or under
+``COMPARISON_PRICE_CEILING`` with short completions, a few tenths of a cent in all.
 
 Requirements:
     pip install venice-py
@@ -72,6 +79,10 @@ HANDBOOK_PREFIX = (
 # so a few warm attempts are allowed, about two seconds apart.
 CACHE_DEMO_MAX_REQUESTS = 4
 CACHE_DEMO_DELAY_S = 2.0
+
+# One routing key for all of Pattern 1, so its requests aim for the backend that
+# cached the prefix. It raises the odds of a hit, so the warm attempts above stay.
+PROMPT_CACHE_KEY = f"cost-demo-{uuid.uuid4().hex}"
 
 
 class UnitTestBenefits(BaseModel):
@@ -190,6 +201,7 @@ async def example_basic_cost_tracking(client: VeniceClient, tracker: CostTracker
             model=model,
             messages=[SystemMessage(content=HANDBOOK_PREFIX), UserMessage(content=question)],
             max_completion_tokens=150,
+            prompt_cache_key=PROMPT_CACHE_KEY,
             venice_parameters=OWN_PROMPT_ONLY,
         )
         cost = await tracker.track(response, metadata={"prompt": question})
@@ -584,7 +596,8 @@ async def example_cost_optimization(
     print("\n   Other levers:")
     print("   ✅ Set max_completion_tokens to what the task needs")
     print("   ✅ Keep prompts short, and reuse prefixes so they hit the prompt cache")
-    print("   ✅ Batch similar requests")
+    print("   ℹ️ chat.completions.batch() and client.gather() save time, not money:")
+    print("      each request in them is still sent and billed on its own")
     return ok, pair
 
 
@@ -717,6 +730,76 @@ async def example_budget_management(client: VeniceClient, tracker: CostTracker) 
     return stopped_by_budget and completed > 0 and within_cap
 
 
+async def example_automatic_tracking() -> bool:
+    """Let the client feed a tracker, with ``client.attach_cost_tracker()``.
+
+    It has limits worth knowing:
+
+    - Streams are not tracked, so add those to a tracker yourself or use usage
+      from the final chunk.
+    - It loads chat prices only. Add embedding prices to ``tracker.pricing_map``
+      yourself before relying on the cost of an embeddings response.
+    - Calling ``track()`` as well, on the same tracker, counts a response twice.
+
+    This pattern opens its own client and tracker: a client has no way to detach
+    a tracker, and the other patterns track by hand.
+    """
+    print("\n" + "=" * 60)
+    print("Pattern 6: Automatic Tracking — client.attach_cost_tracker()")
+    print("=" * 60)
+
+    auto = CostTracker()
+    messages = [UserMessage(content="Name one primary colour. Reply with one word.")]
+    async with VeniceClient() as client:
+        await client.attach_cost_tracker(auto)
+        print(f"\nPrices loaded for {len(auto.pricing_map)} chat models")
+        model = await client.models.resolve_chat(prefer="cheapest", exclude_reasoning=True)
+
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_completion_tokens=30,
+            venice_parameters=OWN_PROMPT_ONLY,
+        )
+        ok = check_answer(response)
+        after_create = await auto.summary()
+        print(
+            f"   After create(): {after_create.total_requests} request tracked, "
+            f"${after_create.total_cost_usd:.6f}"
+        )
+
+        stream = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_completion_tokens=30,
+            venice_parameters=OWN_PROMPT_ONLY,
+            stream=True,
+        )
+        streamed = ""
+        async for chunk in stream:
+            streamed += chunk.text or ""
+        after_stream = await auto.summary()
+        print(
+            f"   After a stream ({len(streamed)} characters): "
+            f"{after_stream.total_requests} request tracked"
+        )
+
+    expected_tokens = response.usage.total_tokens if response.usage else 0
+    if after_create.total_requests != 1 or after_create.total_tokens != expected_tokens:
+        print("   ❌ create() was not tracked exactly once with its reported tokens")
+        ok = False
+    if after_create.total_cost_usd <= 0:
+        print("   ❌ The tracked request has no cost, so its price was not loaded")
+        ok = False
+    if not streamed.strip():
+        print("   ❌ The stream returned no text")
+        ok = False
+    if after_stream.total_requests != after_create.total_requests:
+        print("   ❌ The stream changed the tracked total")
+        ok = False
+    return ok
+
+
 async def show_best_practices(client: VeniceClient) -> None:
     print("\n" + "=" * 60)
     print("Cost Management Best Practices")
@@ -762,7 +845,8 @@ async def show_best_practices(client: VeniceClient) -> None:
         (
             "Monitoring",
             [
-                "✅ Track every response with CostTracker.track()",
+                "✅ Track every response with CostTracker.track(), or attach one tracker "
+                "with client.attach_cost_tracker() and track streams yourself",
                 "✅ For one-off calculations use venice_ai.costs.calculate_completion_cost",
                 "✅ Reserve budget with estimate_cost() plus a measured template floor: "
                 "an estimate meant to err high, not a guarantee",
@@ -814,6 +898,7 @@ async def main() -> int:
         )
         await tracker.reset()
         results.append(("Budget Management", await example_budget_management(client, tracker)))
+        results.append(("Automatic Tracking", await example_automatic_tracking()))
         await show_best_practices(client)
 
     print("\n" + "=" * 60)

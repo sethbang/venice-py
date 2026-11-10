@@ -52,6 +52,7 @@ Example:
 from __future__ import annotations
 
 import asyncio
+import warnings
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -613,6 +614,21 @@ class BudgetRemaining(BaseModel):
     )
 
 
+async def _token_pricing_map(client: VeniceClient) -> dict[str, ModelPricing]:
+    """Fetch ``{model_id: pricing}`` for every model a :class:`CostTracker` can bill.
+
+    These are the chat and embedding models, the two response types it records.
+    """
+    pricing_map: dict[str, ModelPricing] = {}
+    for model_type in ("chat", "embedding"):
+        catalog = await client.models.list(type=model_type)
+        for entry in catalog.data:
+            spec = entry.model_spec
+            if spec and spec.pricing and isinstance(spec.pricing, ModelPricing):
+                pricing_map[entry.id] = spec.pricing
+    return pricing_map
+
+
 class CostTracker:
     """Stateful, async-safe accumulator for per-request API costs.
 
@@ -626,15 +642,18 @@ class CostTracker:
     * **From-client factory** — :meth:`from_client` builds a tracker
       pre-populated with the live pricing map.
 
+    A response from a model absent from the map is recorded at $0, with one
+    ``UserWarning`` per model until :meth:`reset`.
+
     All mutating operations take a single :class:`asyncio.Lock` so concurrent
     in-flight requests can update state safely.
     """
 
     def __init__(self, pricing_map: dict[str, ModelPricing] | None = None) -> None:
         """:param pricing_map: ``{model_id: LLMModelPricing}``. Models absent
-        from the map produce zero-cost records (the underlying helpers
-        gracefully handle missing pricing)."""
+        from the map produce zero-cost records and a warning."""
         self.pricing_map: dict[str, ModelPricing] = dict(pricing_map or {})
+        self._warned_unpriced: set[str] = set()
         self.requests: list[CostRecord] = []
         self.total_cost_usd: Decimal = Decimal("0.00")
         self.total_tokens: int = 0
@@ -642,14 +661,8 @@ class CostTracker:
 
     @classmethod
     async def from_client(cls, client: VeniceClient) -> CostTracker:
-        """Build a tracker pre-populated with the live chat-pricing map."""
-        catalog = await client.models.list(type="chat")
-        pricing_map: dict[str, ModelPricing] = {}
-        for entry in catalog.data:
-            spec = entry.model_spec
-            if spec and spec.pricing and isinstance(spec.pricing, ModelPricing):
-                pricing_map[entry.id] = spec.pricing
-        return cls(pricing_map=pricing_map)
+        """Build a tracker pre-populated with live chat and embedding prices."""
+        return cls(pricing_map=await _token_pricing_map(client))
 
     async def track(
         self,
@@ -702,6 +715,17 @@ class CostTracker:
             self.requests.append(record)
             self.total_cost_usd += cost
             self.total_tokens += total_tokens
+            warn_unpriced = pricing is None and model_id not in self._warned_unpriced
+            if warn_unpriced:
+                self._warned_unpriced.add(model_id)
+        if warn_unpriced:
+            warnings.warn(
+                f"CostTracker has no pricing for model {model_id!r}, so it records $0 for it. "
+                "Add the model to pricing_map, or build the tracker with from_client() or "
+                "attach_cost_tracker().",
+                UserWarning,
+                stacklevel=2,
+            )
         return cost
 
     async def summary(self) -> CostSummary:
@@ -738,14 +762,21 @@ class CostTracker:
             self.requests.clear()
             self.total_cost_usd = Decimal("0.00")
             self.total_tokens = 0
+            self._warned_unpriced.clear()
 
 
 class BudgetManager:
-    """Daily / monthly USD-cap enforcement layered on a :class:`CostTracker`.
+    """USD caps checked against one :class:`CostTracker`'s running total.
 
-    Either ``daily_usd`` or ``monthly_usd`` may be ``None`` to disable that
-    cap. The tracker is shared, not owned — ``BudgetManager`` does not call
-    :meth:`CostTracker.reset`; callers manage rollover themselves.
+    ``BudgetManager`` has no clock. ``daily_usd`` and ``monthly_usd`` are only
+    names: both caps are compared with the same in-memory total, whatever period
+    it was spent over, so the lower cap decides and neither resets by itself. The
+    total also ends with the process and counts only what that tracker recorded.
+
+    Nothing blocks a request unless the caller checks :meth:`can_afford` first.
+    Either cap may be ``None`` to disable it. The tracker is shared, not owned:
+    ``BudgetManager`` does not call :meth:`CostTracker.reset`, so for a daily
+    budget the caller resets the tracker at the start of each day.
     """
 
     def __init__(

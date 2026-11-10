@@ -4,11 +4,13 @@ Venice AI SDK - Multi-Image Editing
 ===================================
 
 This example demonstrates ``client.image.multi_edit()``. Unlike the
-single-image ``edit()`` method, ``multi_edit()`` accepts up to **three input
-images** (``image``, ``image_2``, ``image_3``) plus a text prompt. The first
-image is the base; the others are references the model draws on. It is
-prompt-driven editing, not pixel compositing: the model decides how to
-combine the inputs from the instruction and may invent new detail.
+single-image ``edit()`` method, ``multi_edit()`` accepts **several input images**
+(``image``, ``image_2``, ``image_3``) plus a text prompt. To send more than
+three, pass ``images=[...]`` instead, up to the model's limit: its catalog entry's
+``constraints.maxInputImages``, or 3 when that is absent. The first image is the
+base; the others are references the model draws on. It is prompt-driven editing,
+not pixel compositing: the model decides how to combine the inputs from the
+instruction and may invent new detail.
 
 Only edit models whose ``constraints.combineImages`` is true accept more than
 one image, so the multi-image demos select their model with
@@ -22,35 +24,65 @@ lanterns) and reused by every demo.
 extension detected from the bytes. Outputs are written to
 ``examples/results/``.
 
-Each run makes 6 paid calls: 3 generations for the inputs and 3 multi-image edits.
+Each run makes 6 paid calls: 3 generations for the inputs and 3 multi-image edits,
+about $0.07 at the cheapest listed prices. With ``VENICE_RUN_PAID_IMAGES=1`` a seventh
+sends four inputs with ``images=[...]`` to the cheapest model that lists
+``maxInputImages`` of 4 or more; it reuses images already made, and its catalog price
+is printed first, about $0.02 when this was written. Without the opt-in that section
+prints its price and is skipped.
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
-from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
-from venice_ai.types.api import InpaintModelSpec
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import (  # noqa: E402
+from _helpers import (
     SKIPPED,
     catalog_price_usd,
+    format_price,
     generate_base_image,
-    image_dimensions,
-    save_image,
+    save_and_report,
 )
+
+from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
+from venice_ai.types.api import InpaintModelSpec
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
 
+RUN_PAID = os.environ.get("VENICE_RUN_PAID_IMAGES") == "1"
+
+#: The input count of the images=[...] demo: above the three named parameters.
+MANY_INPUTS = 4
+
+
 def _save(data: bytes, stem: str, written: list[Path]) -> None:
-    path = save_image(RESULTS_DIR / stem, data)
-    written.append(path)
-    width, height = image_dimensions(data)
-    print(f"   💾 {path.name}: {width}x{height}, {len(data)} bytes")
+    save_and_report(data, RESULTS_DIR / stem, written)
+
+
+def max_input_images(constraints: object) -> int:
+    """The ``maxInputImages`` a catalog entry lists, or ``0`` if it lists none."""
+    value = getattr(constraints, "maxInputImages", None)
+    return int(value) if value else 0
+
+
+async def _cheapest_taking(client: VeniceClient, inputs: int) -> tuple[str, float | None] | None:
+    """The lowest-priced edit model that lists at least ``inputs`` input images."""
+    candidates: list[tuple[float, str]] = []
+    for entry in (await client.models.list(type="inpaint")).data:
+        spec = entry.model_spec
+        if not isinstance(spec, InpaintModelSpec) or spec.constraints is None:
+            continue
+        if spec.constraints.combineImages and max_input_images(spec.constraints) >= inputs:
+            price = catalog_price_usd(spec, input_images=inputs)
+            candidates.append((float("inf") if price is None else price, entry.id))
+    if not candidates:
+        return None
+    price, model = min(candidates)
+    return model, None if price == float("inf") else price
 
 
 async def _quote(client: VeniceClient, model: str, input_images: int) -> None:
@@ -167,7 +199,47 @@ async def three_image_composition(
 
 
 # ---------------------------------------------------------------------------
-# 4. Model selection for multi-edit
+# 4. More than three input images
+# ---------------------------------------------------------------------------
+
+
+async def many_image_composition(
+    client: VeniceClient, inputs: list[bytes], written: list[Path]
+) -> bool | None:
+    """Send more than three inputs with ``images=[...]``, on a model that takes them.
+
+    Returns ``None`` when no model lists that many inputs or the opt-in is unset.
+    """
+    print(f"\n🧩 {len(inputs)} Input Images with images=[...]")
+    print("-" * 30)
+    found = await _cheapest_taking(client, len(inputs))
+    if found is None:
+        print(f"Section skipped: no edit model lists maxInputImages of {len(inputs)} or more")
+        return None
+    model, price = found
+    print(f"📍 {model}, catalog {format_price(price)} with {len(inputs)} input images")
+    if not RUN_PAID:
+        print("Section skipped: images=[...]: set VENICE_RUN_PAID_IMAGES=1 to run it.")
+        return None
+
+    try:
+        final = await client.image.multi_edit(
+            prompt=(
+                "Combine the desert from the first image, the sky from the second and the "
+                "lanterns from the third, in the style of the fourth"
+            ),
+            model=model,
+            images=inputs,
+        )
+    except VeniceError as e:
+        print(f"❌ Error: {e}")
+        return False
+    _save(final, "multi_edit_many_images", written)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 5. Model selection for multi-edit
 # ---------------------------------------------------------------------------
 
 
@@ -250,7 +322,7 @@ async def main() -> int:
         desert, sky, lanterns = inputs["desert"], inputs["sky"], inputs["lanterns"]
         print()
 
-        results: list[tuple[str, bool]] = [
+        results: list[tuple[str, bool | None]] = [
             ("basic_multi_edit", await basic_multi_edit(client, desert, written)),
             (
                 "two_image_editing",
@@ -260,10 +332,18 @@ async def main() -> int:
                 "three_image_composition",
                 await three_image_composition(client, multi_model, desert, sky, lanterns, written),
             ),
+            (
+                "many_image_composition",
+                # The fourth input is the latest image this run wrote, so it costs nothing extra.
+                await many_image_composition(
+                    client, [desert, sky, lanterns, written[-1].read_bytes()], written
+                ),
+            ),
             ("model_selection", await model_selection(client)),
         ]
 
-    failed = [name for name, ok in results if not ok]
+    failed = [name for name, ok in results if ok is False]
+    skipped = [name for name, ok in results if ok is None]
 
     print("\n" + "=" * 50)
     if failed:
@@ -274,6 +354,8 @@ async def main() -> int:
         print("   - Single-image multi-edit (simplest case)")
         print("   - Two input images (image + image_2)")
         print("   - Three input images (image + image_2 + image_3)")
+        if "many_image_composition" not in skipped:
+            print("   - More inputs with images=[...], up to the model's maxInputImages")
         print("   - resolve_inpaint(require_combine_images=True, prefer='cheapest')")
         print("   - Self-contained generate → multi-edit workflow")
 

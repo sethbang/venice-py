@@ -11,6 +11,8 @@ Key features covered:
 - prompt_cache_key: routing hint that makes a cache hit more likely
 - cache_control: a marker on a system message's content block, needed by some
   providers
+- cache_control on an assistant message, and its ``ttl``: ``"5m"`` (the default)
+  or ``"1h"``, billed higher on writes where a model has a write price
 - Reading cache reads and writes from ``response.usage.cached_tokens`` and
   ``response.usage.cache_write_tokens``
 
@@ -20,8 +22,8 @@ Model choice
 entry lists a cached-input price (``pricing.cache_input``). That price is the
 only caching signal the catalog has: Venice exposes no caching capability flag,
 and some of the cheapest cache-priced models do not actually serve cache hits.
-So this example takes the catalog's default ranking (``prefer=None``) rather
-than ``prefer="cheapest"``.
+The hit tests fail without a hit, so this example takes the catalog's default
+ranking (``prefer=None``) rather than ``prefer="cheapest"``.
 
 How a hit is measured
 ---------------------
@@ -39,7 +41,15 @@ three warm requests about two seconds apart, and stop at the first hit. A hit
 test passes only when a warm request reads at least
 ``MIN_CACHED_PREFIX_TOKENS`` more tokens from cache than its cold request did,
 which can only come from this example's own prompt. The monitoring section
-measures and prices whatever hit rate a short session gets.
+measures and prices whatever hit rate a short session gets. The message-marker
+section checks that the marker is in the request and is accepted; it does not
+require a hit, because Venice caches long history on some models with no marker
+at all, so a hit there says nothing about the marker.
+
+Cost: up to 18 requests of about 2.6k prompt tokens each and a short reply. On the
+catalog's default cache-priced pick at the last measured prices ($0.21/1M input,
+$1.90/1M output), roughly $0.01 to $0.02 in total. A costlier default raises it: about
+$0.92 if the default were the costliest cache-priced model listed.
 """
 
 import asyncio
@@ -47,6 +57,8 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
+
+from pydantic import ValidationError
 
 from venice_ai import NoMatchingModelError, VeniceClient
 from venice_ai.types.api import (
@@ -56,8 +68,8 @@ from venice_ai.types.api import (
     SystemMessage,
     TextModelSpec,
     UserMessage,
-    VeniceParameters,
 )
+from venice_ai.types.api.requests import VeniceParameters
 from venice_ai.types.api.requests.common import TextContent
 
 # Type alias for message lists accepted by the API
@@ -69,7 +81,7 @@ RUN_ID = uuid.uuid4().hex[:8]
 
 # Bill only the prompt shown here. Venice's own system prompt is shared by all
 # traffic and often already cached, which would hide whether *this* prompt hit.
-OWN_PROMPT_ONLY = VeniceParameters(include_venice_system_prompt=False)
+NO_VENICE_PROMPT = VeniceParameters(include_venice_system_prompt=False)
 
 # Completion budget for every request in this example.
 MAX_TOKENS = 300
@@ -155,7 +167,7 @@ async def select_model(client: VeniceClient) -> tuple[str, LLMModelPricing] | No
     Returns None when no catalog model lists a cached-input price.
     """
     try:
-        model_id = await client.models.resolve_chat(require_prompt_caching=True)
+        model_id = await client.models.resolve_chat(require_prompt_caching=True, exclude_e2ee=True)
     except NoMatchingModelError as e:
         print(f"SKIPPED: no chat model in the catalog lists a cached-input price ({e})")
         return None
@@ -169,12 +181,14 @@ async def select_model(client: VeniceClient) -> tuple[str, LLMModelPricing] | No
 def report(response: ChatCompletionResponse, label: str, elapsed: float) -> bool:
     """Print the answer and cache usage; fail an empty, truncated or unmeasured reply.
 
+    A reply with no choices has no finish reason and no text, so it fails too.
+
     ``prompt_tokens == 0`` is treated as a failed measurement, not a cache
     miss: some providers report zero usage on a truncated reasoning reply. A
     reply that used the whole budget counts as truncated, because some backends
     report ``finish_reason="stop"`` at the token cap.
     """
-    finish = response.choices[0].finish_reason
+    finish = response.choices[0].finish_reason if response.choices else None
     text = (response.text or "").strip()
     usage = response.usage
     print(f"   ⏱️  Latency: {elapsed:.2f}s   finish_reason: {finish}")
@@ -236,14 +250,14 @@ async def timed_create(
             model=model,
             messages=messages,
             max_completion_tokens=MAX_TOKENS,
-            venice_parameters=OWN_PROMPT_ONLY,
+            venice_parameters=NO_VENICE_PROMPT,
         )
     else:
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
             max_completion_tokens=MAX_TOKENS,
-            venice_parameters=OWN_PROMPT_ONLY,
+            venice_parameters=NO_VENICE_PROMPT,
             prompt_cache_key=cache_key,
         )
     return response, time.perf_counter() - start
@@ -430,6 +444,58 @@ async def cache_control_markers(client: VeniceClient, model: str, unmarked_hit: 
     return ok
 
 
+async def message_level_markers(client: VeniceClient, model: str) -> bool:
+    """Mark an assistant message with ``cache_control`` and each ``ttl``.
+
+    A marker on a message sets a breakpoint at the end of that message. The API
+    validates this form on assistant and tool messages; on a user message it is
+    accepted but its effect is unproven. Venice caches long history on some
+    models with no marker at all, so a read or write here is reported, not
+    credited to the marker. The checks are that the marker is in the request
+    body, a ``ttl`` outside ``5m`` and ``1h`` never leaves the SDK, the request is
+    accepted, and the marked message reached the model.
+    """
+    print("\n\n🔖 Message-Level Markers and ttl")
+    print("-" * 50)
+
+    ok = True
+    try:
+        AssistantMessage(content="x", cache_control={"type": "ephemeral", "ttl": "2h"})  # type: ignore[typeddict-item]
+    except ValidationError:
+        print('   ✅ ttl="2h" rejected before sending: only "5m" and "1h" exist')
+    else:
+        print('   ❌ ttl="2h" was accepted')
+        ok = False
+
+    # No hyphen: models often rewrite one as U+2011, which would fail the match below.
+    codeword = f"MARIGOLD{RUN_ID}"
+    for ttl in ("5m", "1h"):
+        print(f'\n📤 assistant message with cache_control ttl="{ttl}"')
+        assistant = AssistantMessage(
+            content=f"The codeword is {codeword}.",
+            cache_control={"type": "ephemeral", "ttl": "5m" if ttl == "5m" else "1h"},
+        )
+        body = assistant.model_dump(exclude_none=True)
+        if body.get("cache_control") != {"type": "ephemeral", "ttl": ttl}:
+            print(f"   ❌ The marker is not in the request body: {body}")
+            ok = False
+        messages: list[Message] = [
+            SystemMessage(content=system_prompt(f"message-marker-{ttl}")),
+            UserMessage(content="Tell me the codeword."),
+            assistant,
+            UserMessage(content="Repeat the codeword, and nothing else."),
+        ]
+        response, elapsed = await timed_create(client, model, messages, None)
+        ok = report(response, f"ttl {ttl}", elapsed) and ok
+        if codeword not in (response.text or ""):
+            print("   ❌ The answer does not repeat the codeword from the marked message")
+            ok = False
+
+    print("\n💡 Use one marker at the end of the part that repeats. Compare 1h with 5m only")
+    print("   where reuse is more than 5 minutes apart: a 1h write is billed higher.")
+    return ok
+
+
 async def monitor_cache_performance(
     client: VeniceClient, model: str, pricing: LLMModelPricing
 ) -> bool:
@@ -494,7 +560,7 @@ async def monitor_cache_performance(
     return ok
 
 
-def best_practices() -> bool:
+def best_practices() -> None:
     """Print best-practice tips for prompt caching (no API calls needed)."""
     print("\n\n📚 Prompt Caching Best Practices")
     print("-" * 50)
@@ -540,7 +606,6 @@ def best_practices() -> bool:
     for title, detail in tips:
         print(f"\n   {title}")
         print(f"      {detail}")
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -576,9 +641,11 @@ async def main() -> int:
             ("Basic Prompt Caching", basic_ok),
             ("Multi-Turn Caching", multi_turn_ok),
             ("Cache Control Markers", await cache_control_markers(client, model, unmarked_hit)),
+            ("Message-Level Markers", await message_level_markers(client, model)),
             ("Monitor Cache Performance", await monitor_cache_performance(client, model, pricing)),
-            ("Best Practices", best_practices()),
         ]
+
+    best_practices()
 
     failed = [name for name, ok in results if not ok]
     print()
@@ -591,7 +658,8 @@ async def main() -> int:
     print("\n✨ All prompt caching sections passed")
     print("\n💡 Key concepts demonstrated:")
     print("   - prompt_cache_key for routing affinity (top-level create() param)")
-    print("   - cache_control markers on TextContent blocks")
+    print("   - cache_control markers on TextContent blocks and assistant messages")
+    print('   - cache_control ttl: "5m" or "1h"')
     print("   - usage.cached_tokens / usage.cache_write_tokens")
     print("   - Multi-turn conversation caching patterns")
     return 0

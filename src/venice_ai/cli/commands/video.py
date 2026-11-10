@@ -2,14 +2,19 @@
 
 import asyncio
 import base64
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
+import aiohttp
 import click
 
+from venice_ai.cli import _video_jobs
 from venice_ai.cli.utils.console import open_file
 from venice_ai.cli.utils.output import OutputManager
+from venice_ai.exceptions import VeniceError, VideoGenerationError
 
 # Default poll settings
 _DEFAULT_POLL_INTERVAL = 5.0
@@ -55,57 +60,78 @@ async def _poll_and_save(
     queue_id: str,
     output_path: str,
     plain: bool,
+    download_url: str | None = None,
     poll_interval: float = _DEFAULT_POLL_INTERVAL,
     max_polls: int = _DEFAULT_MAX_POLLS,
 ) -> bool:
     """Poll for video completion, download the result, and save to disk.
 
-    Returns True on success, False on failure or timeout.
-    """
-    import aiohttp
+    The download goes through the client, so its proxy, SSL, timeout and retry
+    settings apply, and a failure does not carry the link. Nothing printed here
+    contains the link either.
 
+    Args:
+        download_url: The link from the queue response, for a model that hands it
+            out only there.
+
+    Returns True on success. On failure, on timeout, when a finished job has
+    nothing to download, or when its link serves something other than a video, it
+    reports why and returns False, and the command exits 1. Nothing is released in
+    that last case, and a link only the queue response gave is saved for a retry.
+
+    Raises:
+        aiohttp.ClientResponseError: If the link answers with an error status.
+        APITimeoutError: If the download times out.
+        APIConnectionError: If the connection fails during the download.
+    """
     from venice_ai.cli.utils.console import enable_plain_mode, is_plain_mode
+    from venice_ai.resources.video import VideoJob
+    from venice_ai.types.api.video import VideoQueueResponse
 
     if plain and not is_plain_mode():
         enable_plain_mode()
 
+    job = VideoJob(
+        client, VideoQueueResponse(model=model, queue_id=queue_id, download_url=download_url)
+    )
+
     for _poll_num in range(max_polls):
-        status = await client.video.retrieve(model=model, queue_id=queue_id)
+        status: Any = await job.poll()
 
         if status.status == "COMPLETED":
-            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-
-            if status.data:
-                with open(output_path, "wb") as f:
-                    f.write(status.data)
-                file_size = len(status.data)
-                OutputManager.success(f"Video saved: {output_path} ({file_size / 1024:.1f} KB)")
-            elif status.url:
-                OutputManager.echo("Downloading from URL...")
-                async with aiohttp.ClientSession() as session, session.get(status.url) as resp:
-                    resp.raise_for_status()
-                    data = await resp.read()
-
-                with open(output_path, "wb") as f:
-                    f.write(data)
-                file_size = len(data)
-                OutputManager.success(f"Video saved: {output_path} ({file_size / 1024:.1f} KB)")
-
-                try:
-                    complete_resp = await client.video.cancel(model=model, queue_id=queue_id)
-                    OutputManager.echo(
-                        f"Server cleanup: {'OK' if complete_resp.success else 'skipped'}"
-                    )
-                except Exception as e:
-                    # Server-side cleanup is best-effort; log and continue.
-                    import logging
-
-                    logging.getLogger(__name__).debug(
-                        "video.cancel(queue_id=%s) failed: %s", queue_id, e
-                    )
-            else:
+            if not (status.data or status.url or download_url):
                 OutputManager.warning("Video completed but no data or URL returned.")
                 return False
+
+            if status.data:
+                saved = await job.download(output_path, status)
+                _report_saved(saved)
+                return True
+
+            OutputManager.echo("Downloading video...")
+            try:
+                saved = await job.download(output_path, status)
+            except VideoGenerationError as e:
+                OutputManager.error(str(e))
+                _keep_for_retry(queue_id, model, download_url)
+                return False
+            except (aiohttp.ClientResponseError, VeniceError) as e:
+                # The link may be the only way to a paid video, and this failure may
+                # pass. Only a 410 says it is gone for good.
+                if getattr(e, "status", None) != 410:
+                    _keep_for_retry(queue_id, model, download_url)
+                raise
+            _report_saved(saved)
+
+            try:
+                complete_resp = await job.cancel()
+                OutputManager.echo(
+                    f"Server cleanup: {'OK' if complete_resp.success else 'skipped'}"
+                )
+            except Exception as e:
+                # The video is saved, so a failed cleanup does not fail the command.
+                OutputManager.echo("Server cleanup: skipped")
+                logging.getLogger(__name__).debug("job.cancel(queue_id=%s) failed: %s", queue_id, e)
 
             return True
 
@@ -128,6 +154,120 @@ async def _poll_and_save(
 
     OutputManager.warning("Timed out waiting for video generation.")
     return False
+
+
+def _report_saved(path: Path) -> None:
+    size = path.stat().st_size
+    OutputManager.success(f"Video saved: {path} ({size / 1024:.1f} KB)")
+
+
+def _keep_for_retry(queue_id: str, model: str, download_url: str | None) -> None:
+    """Keep what a later run needs to collect a job that was not delivered, and say how."""
+    retry = f"venice-py video status {queue_id} --model {model} --output <path>"
+    if download_url:
+        try:
+            _video_jobs.save_job(queue_id, model, download_url)
+        except (OSError, _video_jobs.VideoJobStoreError) as exc:
+            OutputManager.warning(
+                f"The link could not be saved for a retry ({type(exc).__name__}), so this video "
+                "cannot be downloaded from this machine later."
+            )
+            return
+    OutputManager.echo(f"The job was not released. Retry with: {retry}")
+
+
+def _report_no_poll(queue_resp) -> None:
+    """Tell the user how to follow a job queued with ``--no-poll``.
+
+    A model that hands out its download link only in the queue response has that
+    link saved here, and never printed. If it cannot be saved the video is out of
+    reach later, so the command exits 1.
+    """
+    follow = f"venice-py video status {queue_resp.queue_id} --model {queue_resp.model}"
+    download_url = getattr(queue_resp, "download_url", None)
+    if not download_url:
+        OutputManager.echo(f"Use '{follow}' to check progress.")
+        return
+    try:
+        _video_jobs.save_job(queue_resp.queue_id, queue_resp.model, download_url)
+    except (OSError, _video_jobs.VideoJobStoreError) as exc:
+        OutputManager.warning(
+            "This model hands out its download link only in the queue response, and the CLI "
+            f"could not save it ({type(exc).__name__}), so this video cannot be downloaded "
+            "later. Run the command without --no-poll to save the video when it finishes."
+        )
+        raise SystemExit(1) from None
+    protection = (
+        "an owner-only file"
+        if _video_jobs.files_are_owner_only()
+        else "a file, which on this platform the CLI cannot restrict to your user,"
+    )
+    OutputManager.warning(
+        "This model hands out its download link only in the queue response. The CLI saved the "
+        f"link, without printing it, in {protection} under {_video_jobs.jobs_dir()}. It grants "
+        "access to the video without credentials, so treat that file like a password."
+    )
+    OutputManager.echo(
+        f"Use '{follow}' to check progress, and add --output <path> once it has finished to "
+        "download the video, release it and delete the saved link."
+    )
+
+
+def _load_saved_job(job_id: str) -> _video_jobs.SavedVideoJob | None:
+    """Read a job's saved link, reporting anything wrong without stopping the command."""
+    try:
+        saved_job = _video_jobs.load_job(job_id)
+    except (OSError, _video_jobs.VideoJobStoreError) as exc:
+        OutputManager.warning(f"The saved link for job {job_id} could not be read: {exc}")
+        return None
+    if saved_job is not None and saved_job.was_exposed:
+        OutputManager.warning(
+            f"The saved link for job {job_id} was readable by other local users, so treat it "
+            "as exposed. Its file is owner-only from now on."
+        )
+    return saved_job
+
+
+def _report_missing_file(job_id: str, status: int) -> None:
+    """Say what a saved link's 404 or 410 means, deleting the entry only for a 410.
+
+    A 410 says the file is gone for good. A 404 from a storage host says less: the
+    file may not have reached the host yet, and the entry is the only way to a video
+    already paid for, so it stays until the job fails or a download succeeds.
+    """
+    if status == 410:
+        _video_jobs.remove_job(job_id)
+        OutputManager.error(
+            f"The saved link for job {job_id} no longer has a file behind it, so the video "
+            "cannot be downloaded. The saved link was deleted."
+        )
+        return
+    OutputManager.error(
+        f"The saved link for job {job_id} answered 404, which can mean the file has not "
+        "arrived yet or that it has expired. The saved link is kept, so running this command "
+        "again retries the download. If it keeps answering 404, the file is gone: delete "
+        f"{_video_jobs.entry_path(job_id)} to forget the link."
+    )
+
+
+async def _release_saved_job(job: Any) -> str:
+    """Release a saved video and delete its link, keeping the link if the release fails.
+
+    Returns the line that reports the outcome.
+    """
+    try:
+        released = (await job.cancel()).success
+    except Exception as e:
+        # The video is saved, so a failed cleanup does not fail the command.
+        released = False
+        logging.getLogger(__name__).debug("job.cancel(queue_id=%s) failed: %s", job.queue_id, e)
+    if released:
+        _video_jobs.remove_job(job.queue_id)
+        return "Server cleanup: OK"
+    return (
+        "Server cleanup: skipped. The saved link is kept, so running this command again "
+        "retries the release."
+    )
 
 
 def _determine_output_path(output: str | None, save_dir: str, ext: str = "mp4") -> str:
@@ -351,7 +491,7 @@ async def _generate_async(
         OutputManager.success(f"Job queued! Job ID: {queue_id}")
 
         if no_poll:
-            OutputManager.echo(f"Use 'venice-py video status {queue_id}' to check progress.")
+            _report_no_poll(queue_resp)
             return
 
         output_path = _determine_output_path(output, save_dir)
@@ -364,9 +504,12 @@ async def _generate_async(
             queue_id=queue_id,
             output_path=output_path,
             plain=plain,
+            download_url=getattr(queue_resp, "download_url", None),
         )
 
-        if success and auto_open:
+        if not success:
+            raise SystemExit(1)
+        if auto_open:
             open_file(output_path)
 
 
@@ -593,7 +736,7 @@ async def _from_image_async(
         OutputManager.success(f"Job queued! Job ID: {queue_id}")
 
         if no_poll:
-            OutputManager.echo(f"Use 'venice-py video status {queue_id}' to check progress.")
+            _report_no_poll(queue_resp)
             return
 
         output_path = _determine_output_path(output, save_dir)
@@ -606,9 +749,12 @@ async def _from_image_async(
             queue_id=queue_id,
             output_path=output_path,
             plain=plain,
+            download_url=getattr(queue_resp, "download_url", None),
         )
 
-        if success and auto_open:
+        if not success:
+            raise SystemExit(1)
+        if auto_open:
             open_file(output_path)
 
 
@@ -622,52 +768,121 @@ async def _from_image_async(
 @click.option(
     "--model",
     "-m",
-    default=None,
+    required=True,
     help="Model used when the job was queued",
 )
+@click.option(
+    "--output",
+    "-o",
+    default=None,
+    help="Save the video to this path if the job has finished",
+)
 @click.pass_context
-def status(ctx, job_id, model):
-    """Check the status of a video generation job.
+def status(ctx, job_id, model, output):
+    """Check the status of a video generation job, and save it once it has finished.
 
     JOB_ID is the queue ID returned when the job was submitted (e.g. with --no-poll).
 
+    A download link grants access on its own, so it is never printed. A model
+    that hands out its link only when the job is queued has that link saved by
+    --no-poll, in a file under ~/.venice-py/video_jobs, owner-only except on Windows,
+    where it is only as private as your home directory. --output uses it to download
+    the video, then releases the video and deletes the saved link. The saved link is
+    kept if the download does not produce a video, unless the link answers 410 Gone.
+
+    Exits 0 when the status was read, whatever it is. With --output, exits 1 if the
+    job failed, finished with nothing to save, or its link served no video; a job
+    still running exits 0.
+
     Examples:
 
-      venice-py video status abc123
+      venice-py video status abc123 --model <video-model>
 
-      venice-py video status abc123 --model <i2v-model>
+      venice-py video status abc123 --model <video-model> --output video.mp4
     """
-    asyncio.run(_status_async(ctx, job_id=job_id, model=model))
+    asyncio.run(_status_async(ctx, job_id=job_id, model=model, output=output))
 
 
-async def _status_async(ctx, *, job_id, model):
+async def _status_async(ctx, *, job_id, model, output=None):
     from venice_ai import VeniceClient
     from venice_ai.cli.config import get_client_kwargs
     from venice_ai.cli.utils.console import enable_plain_mode, is_plain_mode
+    from venice_ai.resources.video import VideoJob
+    from venice_ai.types.api.video import VideoQueueResponse
 
     plain = ctx.obj.get("plain", False) if ctx.obj else False
     if plain and not is_plain_mode():
         enable_plain_mode()
 
+    saved_job = _load_saved_job(job_id)
+    saved_link = saved_job.download_url if saved_job else None
+    saved = None
+    cleanup_report = None
     async with VeniceClient(**get_client_kwargs()) as client:
-        result = await client.video.retrieve(model=model, queue_id=job_id)
+        job = VideoJob(
+            client,
+            VideoQueueResponse(
+                model=saved_job.model if saved_job else model,
+                queue_id=job_id,
+                download_url=saved_link,
+            ),
+        )
+        result: Any = await job.poll()
+        url = getattr(result, "url", None)
+        inline_data = getattr(result, "data", None)
+        downloadable = bool(url or inline_data or saved_link)
+        if output and result.status == "COMPLETED" and downloadable:
+            try:
+                saved = await job.download(_determine_output_path(output, "."), result)
+            except VideoGenerationError as e:
+                OutputManager.error(str(e))
+                if saved_link:
+                    OutputManager.echo(
+                        "The saved link is kept, so running this command again retries the "
+                        "download."
+                    )
+                raise SystemExit(1) from None
+            except aiohttp.ClientResponseError as e:
+                if not saved_link or url or inline_data or e.status not in (404, 410):
+                    raise
+                _report_missing_file(job_id, e.status)
+                raise SystemExit(1) from None
+            if saved_link:
+                cleanup_report = await _release_saved_job(job)
 
     status_val = result.status
 
     if status_val == "COMPLETED":
-        url = getattr(result, "url", None)
         OutputManager.success(f"COMPLETED  Job: {job_id}")
-        if url:
-            OutputManager.echo(f"  Video URL: {url}")
-        else:
-            inline_data = getattr(result, "data", None)
+        if saved is not None:
+            _report_saved(saved)
+            if cleanup_report:
+                OutputManager.echo(cleanup_report)
+        elif downloadable:
             if inline_data:
                 OutputManager.echo(f"  (Inline binary data - {len(inline_data)} bytes)")
+            OutputManager.echo(
+                f"  Save it with: venice-py video status {job_id} --model {job.model} "
+                "--output <path>"
+            )
+        else:
+            OutputManager.warning(
+                "Venice returned no video data or link for this job and the CLI holds no saved "
+                "link for it, so it cannot be downloaded from its job ID. A model that hands out "
+                "a download link does so only in the queue response, and the CLI keeps that link "
+                "only for a job it queued with --no-poll, until the job is released."
+            )
+            if output:
+                raise SystemExit(1)
 
     elif status_val == "FAILED":
+        if saved_link:
+            _video_jobs.remove_job(job_id)
         error_msg = getattr(result, "error", None) or "unknown error"
         OutputManager.error(f"FAILED  Job: {job_id}")
         OutputManager.echo(f"  Error: {error_msg}")
+        if output:
+            raise SystemExit(1)
 
     else:
         progress = getattr(result, "progress_percent", 0) or 0

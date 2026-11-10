@@ -31,7 +31,17 @@ from typing import (
     TypeVar,
 )
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+)
 
 # Import ChatUsage from the chat module so streaming chunks expose the same
 # rich usage shape (detail + cache breakdowns, extra="allow") as non-streaming
@@ -148,6 +158,9 @@ class ChatCompletionTokenLogprob(BaseModel):
 class ChatCompletionChoiceLogprobs(BaseModel):
     """
     Aggregates log probability information for all tokens in a completion choice.
+
+    A value that does not fit does not lose the chunk: :attr:`content` is ``None``
+    and :attr:`raw` holds what was sent.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -156,6 +169,17 @@ class ChatCompletionChoiceLogprobs(BaseModel):
         default=None,
         description="List of token-level log probability information for each token in the completion",
     )
+
+    _raw: Any = PrivateAttr(default=None)
+
+    @property
+    def raw(self) -> Any:
+        """The value sent, when it did not fit; otherwise ``None``."""
+        return self._raw
+
+    @model_serializer(mode="wrap")
+    def _serialize_as_received(self, handler: SerializerFunctionWrapHandler) -> Any:
+        return handler(self) if self._raw is None else self._raw
 
 
 # --- Streaming Types ---
@@ -310,8 +334,19 @@ class ChatCompletionChunkChoice(BaseModel):
     """Log probability information for tokens in this chunk.
 
     Only present if ``logprobs`` parameter was enabled. Typically not included
-    in streaming responses but supported for completeness.
+    in streaming responses but supported for completeness. A value that does not
+    fit is kept in ``logprobs.raw`` instead of losing the chunk's text.
     """
+
+    @field_validator("logprobs", mode="wrap")
+    @classmethod
+    def _keep_unexpected_logprobs(cls, v: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+        try:
+            return handler(v)
+        except ValidationError:
+            unparsed = ChatCompletionChoiceLogprobs()
+            unparsed._raw = v
+            return unparsed
 
 
 class ChatCompletionChunk(BaseModel):

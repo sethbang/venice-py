@@ -4,26 +4,43 @@ Venice AI SDK - API Key Management and Monitoring
 =================================================
 
 This example demonstrates how to manage API keys in the Venice AI SDK:
-- Listing and retrieving existing API keys
+- Listing existing API keys with ``api_keys.iter_all()`` and retrieving one
 - Understanding API key metadata and usage statistics
 - Monitoring rate limits and consumption patterns
 - Managing key lifecycle (creation should be done carefully in production)
 - Running that lifecycle live: creating a real INFERENCE key with a one-day
-  expiry and a $1 lifetime spend cap, sending one small billed chat request with
-  it, then deleting it and confirming it is gone
+  expiry and a $1 lifetime USD spend cap, sending one small billed chat request
+  with it, changing its privacy tier and IP allowlist with ``api_keys.update()``,
+  then deleting it and confirming it is gone
+- Listing the keys an earlier run left behind when it was killed, and how to
+  delete them: see :func:`stale_ephemeral_keys` for exactly which keys qualify.
+  They are deleted only with ``VENICE_SWEEP_EXAMPLE_KEYS=1``
 
 Requires an ADMIN key in VENICE_API_KEY. Listing, creating and deleting keys are
 admin-only, so with any other valid key the example prints ``SKIPPED:`` and exits
 77 without creating anything.
+
+Cost: one chat request on the cheapest direct-answer model, capped at 64 tokens,
+well under $0.001. The key endpoints have no listed price. No document says whether
+``api_keys.update()`` is billed, so read ``x-venice-balance-usd`` around a run if
+that matters. Only the temporary key is ever updated.
 """
 
 import asyncio
+import ipaddress
 import os
 import sys
 from datetime import UTC, datetime, timedelta
 
+from pydantic import ValidationError
+
 from venice_ai import NoMatchingModelError, VeniceClient
-from venice_ai.exceptions import AuthenticationError, PermissionDeniedError, VeniceError
+from venice_ai.exceptions import (
+    ApiKeyIpRestrictedError,
+    AuthenticationError,
+    PermissionDeniedError,
+    VeniceError,
+)
 from venice_ai.types.api import ApiKey, ConsumptionLimit, CreateApiKeyRequest, UserMessage
 from venice_ai.types.api.requests import VeniceParameters
 
@@ -31,10 +48,26 @@ from venice_ai.types.api.requests import VeniceParameters
 # dashboard and trivially distinguishable from any real, pre-existing key.
 EPHEMERAL_KEY_DESCRIPTION = "venice-sdk-example-ephemeral"
 
-# Lifetime spend cap for the ephemeral key: a second safety net (alongside the
-# expiry) should cleanup ever fail. Leave generous headroom above the demo
-# call's cost; a cap of a few cents can be refused with a 402 up front.
+# Lifetime USD spend cap for the ephemeral key: a second safety net (alongside
+# the expiry) should cleanup ever fail. It limits USD only: DIEM and VCU have
+# their own fields on ConsumptionLimit, which this key leaves unset. Leave
+# generous headroom above the demo call's cost; a cap of a few cents can be
+# refused with a 402 up front.
 EPHEMERAL_KEY_USD_LIMIT = 1.0
+
+# Set to 1 to delete the leftover keys this example finds, rather than list them.
+SWEEP_ENV_VAR = "VENICE_SWEEP_EXAMPLE_KEYS"
+
+# The sweep leaves a key younger than this alone: another run may still be using it.
+SWEEP_MIN_AGE = timedelta(minutes=10)
+
+# This example's keys expire the next UTC day, so a key that outlives this window
+# is someone else's, whatever its description says.
+SWEEP_MAX_TIME_LEFT = timedelta(days=2)
+
+# Used only to see an allowlist refuse a request: the temporary key is restricted
+# to this one address, the spec's example, which is not where this script runs.
+ALLOWLIST_DEMO_ADDRESS = "11.22.33.44"
 
 # Exit codes: 0 = every section verified, 1 = a failure, 77 = skipped because
 # the key in VENICE_API_KEY is not an ADMIN key (key management needs one).
@@ -77,6 +110,94 @@ def _describe_limits(key: ApiKey) -> str | None:
     return ", ".join(parts) or None
 
 
+def _parse_timestamp(value: str | None) -> datetime | None:
+    """Parse an API timestamp, or return ``None`` if it is missing or has no timezone."""
+    try:
+        parsed = datetime.fromisoformat((value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def stale_ephemeral_keys(keys: list[ApiKey], own_suffix: str, now: datetime) -> list[ApiKey]:
+    """Pick the keys a killed run of this example left behind, and nothing else.
+
+    A key qualifies only when every one of these holds, so anything in doubt stays:
+
+    - its description is exactly ``EPHEMERAL_KEY_DESCRIPTION``
+    - it is an INFERENCE key
+    - it has the limit this example sets: ``EPHEMERAL_KEY_USD_LIMIT``, for its lifetime
+    - it is not the key this process is running with
+    - it was created at least ``SWEEP_MIN_AGE`` ago, so another run's key survives
+    - it has an expiry no more than ``SWEEP_MAX_TIME_LEFT`` away, as this example sets
+    """
+    stale: dict[str, ApiKey] = {}
+    for key in keys:
+        created = _parse_timestamp(key.createdAt)
+        expires = _parse_timestamp(key.expiresAt)
+        if (
+            key.description == EPHEMERAL_KEY_DESCRIPTION
+            and key.apiKeyType == "INFERENCE"
+            and key.limitPeriod == "LIFETIME"
+            and key.consumptionLimits is not None
+            and key.consumptionLimits.usd == EPHEMERAL_KEY_USD_LIMIT
+            and bool(own_suffix)
+            and key.last6Chars != own_suffix
+            and created is not None
+            and now - created >= SWEEP_MIN_AGE
+            and expires is not None
+            and expires - now <= SWEEP_MAX_TIME_LEFT
+        ):
+            stale[key.id] = key
+    return list(stale.values())
+
+
+async def sweep_leftover_keys(admin_client: VeniceClient) -> bool:
+    """List the keys :func:`stale_ephemeral_keys` picks, and report the near misses.
+
+    They are deleted only with ``VENICE_SWEEP_EXAMPLE_KEYS=1``. Returns ``False``
+    when the keys could not be listed or one could not be deleted, so the run does
+    not add another key on top of an unknown state.
+    """
+    print("\n🧹 Checking for keys an earlier, killed run left behind...")
+    try:
+        keys = [key async for key in admin_client.api_keys.iter_all()]
+    except VeniceError as e:
+        print(f"❌ Could not list keys for the sweep: {e}")
+        return False
+
+    own_suffix = os.environ.get("VENICE_API_KEY", "")[-6:]
+    stale = stale_ephemeral_keys(keys, own_suffix, datetime.now(UTC))
+    stale_ids = {key.id for key in stale}
+    for key in keys:
+        if key.description == EPHEMERAL_KEY_DESCRIPTION and key.id not in stale_ids:
+            print(f"   ℹ️ Leaving {key.id} alone: same description, but it does not qualify")
+    if not stale:
+        print("   ✅ Nothing to remove")
+        return True
+    if os.environ.get(SWEEP_ENV_VAR) != "1":
+        for key in stale:
+            print(f"   ℹ️ Left behind by an earlier run: {key.id} (created {key.createdAt})")
+            print(f"      Delete it with: venice-py api-keys delete {key.id}")
+        print(f"   ℹ️ Or set {SWEEP_ENV_VAR}=1 to have this script delete them.")
+        return True
+
+    ok = True
+    for key in stale:
+        try:
+            result = await admin_client.api_keys.delete(api_key_id=key.id)
+        except VeniceError as e:
+            print(f"   ❌ Could not delete leftover key {key.id}: {e}")
+            ok = False
+            continue
+        if result.success:
+            print(f"   ✅ Deleted leftover key {key.id} (created {key.createdAt})")
+        else:
+            print(f"   ❌ Deleting leftover key {key.id} reported success=False")
+            ok = False
+    return ok
+
+
 def _format_age(delta: timedelta) -> str:
     """Render a timedelta as e.g. ``2d 3h 14m``."""
     total_minutes = int(delta.total_seconds() // 60)
@@ -96,8 +217,20 @@ async def list_existing_keys() -> bool:
 
     async with VeniceClient() as client:
         try:
-            # List all API keys
-            keys = await client.api_keys.list()
+            # iter_all() yields every key once. GET /api_keys has no paging: it
+            # answers every request with every key, whatever page or limit says.
+            keys = [key async for key in client.api_keys.iter_all()]
+            ids = [key.id for key in keys]
+            if len(set(ids)) != len(ids):
+                print("❌ iter_all() yielded the same key more than once")
+                return False
+
+            # max_items stops the walk early, which suits a quick look at a long list.
+            first_keys = [key async for key in client.api_keys.iter_all(max_items=3)]
+            if len(first_keys) != min(3, len(keys)):
+                print(f"❌ iter_all(max_items=3) yielded {len(first_keys)} key(s)")
+                return False
+            print(f"📎 iter_all(max_items=3) stopped after {len(first_keys)} key(s)")
 
             if keys:
                 print(f"📊 Found {len(keys)} API key(s) in your account")
@@ -195,8 +328,8 @@ async def monitor_rate_limits() -> bool:
             print(f"   💰 USD this key can still spend: ${balances.USD:.2f}")
             print(f"   🪙 DIEM reported alongside it: {balances.DIEM:.2f}")
 
-            # Show next epoch time
-            print(f"   ⏰ Next Rate Limit Reset: {rate_data.nextEpochBegins}")
+            # Only limits that reset at the start of an epoch reset at this time.
+            print(f"   ⏰ Next epoch begins: {rate_data.nextEpochBegins}")
 
             # Show rate limits by model
             print(f"   📊 Rate Limits by Model ({len(rate_data.rateLimits)} models):")
@@ -285,7 +418,11 @@ async def check_rate_limit_history() -> bool:
 
 
 async def demonstrate_key_creation_workflow() -> bool:
-    """Show how to build key-creation requests (validated locally, not sent)."""
+    """Build key-creation requests and check them locally. Nothing is sent.
+
+    The models validate before anything reaches the API, so an unknown
+    ``limitPeriod`` fails here rather than as a 400.
+    """
     print("\n🔧 API Key Creation Requests")
     print("-" * 40)
     print("📝 Building request objects only — the lifecycle section below sends a real one.")
@@ -300,11 +437,33 @@ async def demonstrate_key_creation_workflow() -> bool:
         consumptionLimit=ConsumptionLimit(usd=25.0),
         limitPeriod="MONTH",
     )
+    narrowed = CreateApiKeyRequest(
+        apiKeyType="INFERENCE",
+        description="Private Models, One Network",
+        modelPrivacy="PRIVATE_ONLY",
+        ipAllowlist=[f"{ALLOWLIST_DEMO_ADDRESS}/32"],
+    )
 
     print("\nOption 1 - Minimal request:")
     print(f"   {minimal.model_dump(exclude_none=True)}")
     print("\nOption 2 - With expiration and a monthly $25 spend cap:")
     print(f"   {limited.model_dump(exclude_none=True)}")
+    print("\nOption 3 - Private models only, usable from one network:")
+    print(f"   {narrowed.model_dump(exclude_none=True)}")
+
+    sent = limited.model_dump(exclude_none=True)
+    if sent.get("limitPeriod") != "MONTH" or sent.get("consumptionLimit", {}).get("usd") != 25.0:
+        print("❌ The request does not carry the limit it was built with")
+        return False
+    try:
+        CreateApiKeyRequest.model_validate(
+            {"apiKeyType": "INFERENCE", "description": "Bad Period", "limitPeriod": "WEEK"}
+        )
+    except ValidationError:
+        print("\n✅ limitPeriod='WEEK' is refused locally, before any request")
+    else:
+        print("\n❌ An unknown limitPeriod passed validation")
+        return False
 
     print("\n```python")
     print("new_key = await client.api_keys.create(api_key_request=request)")
@@ -449,6 +608,74 @@ async def _use_new_key(secret: str) -> bool | None:
     return True
 
 
+def _allowlist_networks(entries: list[str] | None) -> set[object]:
+    """An allowlist as networks: the server returns ``1.2.3.4`` as ``1.2.3.4/32``."""
+    return {ipaddress.ip_network(entry) for entry in entries or []}
+
+
+async def _report_allowlist_refusal(secret: str) -> bool:
+    """Report whether the temporary key is refused for this address, allowing time to propagate.
+
+    Reading the key's own rate limits is free, so the attempts cost nothing. That
+    endpoint may not enforce an allowlist, so a key it still accepts is reported and
+    proves nothing either way.
+
+    Returns ``False`` only for an error other than an allowlist refusal.
+    """
+    async with VeniceClient(api_key=secret) as restricted:
+        for attempt in range(1, 4):
+            try:
+                await restricted.api_keys.get_rate_limits()
+            except ApiKeyIpRestrictedError as e:
+                print(f"   ✅ Refused from this address: HTTP {e.status_code} {e}")
+                return True
+            except VeniceError as e:
+                print(f"   ❌ Unexpected error instead of an allowlist refusal: {e}")
+                return False
+            print(f"   ⏳ Attempt {attempt}/3: still accepted from this address")
+            await asyncio.sleep(3)
+    print("   ℹ️ get_rate_limits still accepts this key, so it may not enforce an allowlist")
+    return True
+
+
+async def update_temporary_key(admin_client: VeniceClient, key_id: str, secret: str) -> bool:
+    """Change the temporary key with ``api_keys.update()`` and read each change back.
+
+    Runs after the chat, since either setting could refuse that request. The
+    description is left as it is, because :func:`stale_ephemeral_keys` finds a
+    leftover key by it. ``ip_allowlist=[]`` lifts the restriction; leaving the
+    argument out keeps the list as it stands.
+    """
+    print("\n✏️ Updating the temporary key")
+    try:
+        await admin_client.api_keys.update(id=key_id, model_privacy="PRIVATE_ONLY")
+        stored = await admin_client.api_keys.retrieve(api_key_id=key_id)
+        print(f"   🕶️ modelPrivacy: {stored.modelPrivacy}")
+        if stored.modelPrivacy != "PRIVATE_ONLY":
+            print("   ❌ The new privacy tier did not stick")
+            return False
+
+        await admin_client.api_keys.update(id=key_id, ip_allowlist=[ALLOWLIST_DEMO_ADDRESS])
+        stored = await admin_client.api_keys.retrieve(api_key_id=key_id)
+        print(f"   🌐 ipAllowlist: {stored.ipAllowlist}")
+        if _allowlist_networks(stored.ipAllowlist) != _allowlist_networks([ALLOWLIST_DEMO_ADDRESS]):
+            print("   ❌ The allowlist did not stick")
+            return False
+        if not await _report_allowlist_refusal(secret):
+            return False
+
+        await admin_client.api_keys.update(id=key_id, ip_allowlist=[])
+        stored = await admin_client.api_keys.retrieve(api_key_id=key_id)
+        print(f"   🌐 ipAllowlist after clearing: {stored.ipAllowlist}")
+        if stored.ipAllowlist:
+            print("   ❌ The allowlist was not cleared")
+            return False
+    except VeniceError as e:
+        print(f"   ❌ Updating the temporary key failed: {type(e).__name__}: {e}")
+        return False
+    return True
+
+
 async def _delete_ephemeral_key(admin_client: VeniceClient, key_id: str) -> bool:
     """Delete ``key_id`` and confirm it no longer appears in the key list.
 
@@ -484,20 +711,24 @@ async def demonstrate_key_lifecycle() -> bool | None:
     This exercises the two mutating endpoints (``create`` and ``delete``) end to
     end against a single, clearly-named throwaway key so it never collides with
     real credentials. The key is always deleted in a ``finally`` block — even if
-    the "use" step fails — so it can never leak. Defense in depth: the key is
-    also created with a near-term expiry and a small lifetime spend cap, so even
-    a catastrophic cleanup failure leaves only a short-lived, capped key.
+    the "use" step fails. ``finally`` cannot run if the process is killed outright,
+    so the key is also created with a near-term expiry and a small lifetime USD
+    spend cap, its id is printed with how to remove it, and the next run lists it
+    (see :func:`stale_ephemeral_keys`).
 
     The section fails unless the new key both authenticates and completes a
-    small chat request, and the key is confirmed gone afterwards. It returns
-    ``None`` (skipped) when there is no chat model to use the key with; the
-    key is still created and deleted.
+    small chat request, its updates read back correctly, and the key is confirmed
+    gone afterwards. It returns ``None`` (skipped) when there is no chat model to
+    use the key with; the key is still created, updated and deleted.
     """
-    print("\n🔁 API Key Lifecycle: create → use → delete (live)")
+    print("\n🔁 API Key Lifecycle: create → use → update → delete (live)")
     print("-" * 40)
     print("⚠️ This creates a REAL, ephemeral key and deletes it before exiting.")
 
     async with VeniceClient() as admin_client:
+        if not await sweep_leftover_keys(admin_client):
+            return False
+
         # --- CREATE ---------------------------------------------------------
         # INFERENCE so the returned secret can actually be used below. The API
         # accepts a YYYY-MM-DD date and normalizes it to a timestamp; tomorrow
@@ -522,6 +753,11 @@ async def demonstrate_key_lifecycle() -> bool | None:
             # The secret (``created.apiKey``) is returned ONCE and never again.
             # Never print a full secret — only enough to identify it.
             print(f"   ✅ Created key id: {created.id}")
+            print("   ℹ️ If this process is killed before cleanup, the key stays until it")
+            print(f"      expires. Running this script again with {SWEEP_ENV_VAR}=1 removes it.")
+            print("      To remove it by hand, find it in `venice-py api-keys list` under")
+            print(f"      '{EPHEMERAL_KEY_DESCRIPTION}', then run:")
+            print(f"      venice-py api-keys delete {created.id}")
             print(f"   🏷️ Type: {created.apiKeyType}")
             print(f"   📝 Description: {created.description}")
             print(f"   ⏰ Expires: {created.expiresAt}")
@@ -540,6 +776,11 @@ async def demonstrate_key_lifecycle() -> bool | None:
                 )
                 # --- USE ----------------------------------------------------
                 used = await _use_new_key(secret)
+                # --- UPDATE -------------------------------------------------
+                if used is not False and not await update_temporary_key(
+                    admin_client, created.id, secret
+                ):
+                    used = False
         finally:
             # --- DELETE (always) ----------------------------------------------
             # Guaranteed cleanup: once creation succeeded the key MUST be
@@ -585,11 +826,12 @@ async def main() -> int:
     else:
         print(f"\n✨ All {len(results)} API key management sections completed.")
     print("\n💡 Key concepts demonstrated:")
-    print("   - Listing and inventorying API keys, including their consumption limits")
+    print("   - Listing keys with iter_all() and max_items, including consumption limits")
     print("   - Monitoring rate limits and rate-limit violations")
     print("   - Building CreateApiKeyRequest objects with expiry and spend caps")
     print("   - Inspecting the key this process is running with")
-    print("   - A create → use → delete lifecycle with guaranteed cleanup")
+    print("   - A create → use → update → delete lifecycle with cleanup in finally")
+    print("   - Finding only this example's own leftover keys, and deleting them on request")
     print("\n🔒 Security reminders:")
     print("   - Never share or commit API keys to version control")
     print("   - Rotate keys regularly and delete unused ones")

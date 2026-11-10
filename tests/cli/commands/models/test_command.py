@@ -13,7 +13,7 @@ Covers:
 """
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import click
 import pytest
@@ -350,8 +350,10 @@ class TestListModelsBasic:
             # fail if deduplication logic is broken
 
     @pytest.mark.asyncio
-    async def test_list_models_handles_missing_type_exception(self, mock_context):
-        """Test that exceptions for individual model types are handled gracefully"""
+    async def test_list_models_exits_1_when_one_type_failed_and_the_rest_are_empty(
+        self, mock_context
+    ):
+        """One failed listing is reported rather than read as an empty catalog"""
         async_client = AsyncMock()
 
         async def mock_list_with_exception(type=None):
@@ -371,10 +373,13 @@ class TestListModelsBasic:
         ):
             MockVeniceClient.return_value.__aenter__.return_value = async_client
 
-            await list_models(mock_context)
+            # A failed listing with nothing else to show is a failure, not an empty
+            # catalog, so it exits 1 and does not report that no models exist.
+            with pytest.raises(SystemExit) as exc_info:
+                await list_models(mock_context)
 
-            # Should handle exception and print "No models found"
-            mock_print_info.assert_any_call("No models found")
+            assert exc_info.value.code == 1
+            assert call("No models found") not in mock_print_info.call_args_list
 
 
 class TestComparisonMode:

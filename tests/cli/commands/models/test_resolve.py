@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from venice_ai.cli.commands.models.resolve import _resolve_async
+from venice_ai.cli.commands.models.resolve import _render_cheapest_video, _resolve_async
+from venice_ai.exceptions import InvalidRequestError
+from venice_ai.models.selection import CheapestMusicResult, CheapestVideoResult
 
 
 def _make_ctx():
@@ -441,6 +443,45 @@ class TestResolvePreferAndNewFilters:
         assert kwargs["require_e2ee"] is True
 
     @pytest.mark.asyncio
+    async def test_exclude_e2ee_forwarded_for_chat(self):
+        client, _ = await _run_resolve("chat", exclude_e2ee=True)
+        assert client.models.resolve.await_args.kwargs["exclude_e2ee"] is True
+
+    def test_exclude_e2ee_flag_reaches_the_sdk(self):
+        from venice_ai.cli.cli import cli
+
+        mock_client = AsyncMock()
+        mock_client.models.resolve = AsyncMock(return_value="picked")
+        with (
+            patch("venice_ai.VeniceClient") as MockClient,
+            patch("venice_ai.cli.config.ensure_api_key", return_value="test-key"),
+        ):
+            _setup_client(MockClient, mock_client)
+            result = CliRunner().invoke(
+                cli, ["models", "resolve", "--type", "chat", "--exclude-e2ee", "--json"]
+            )
+        assert result.exit_code == 0, result.output
+        assert mock_client.models.resolve.await_args.kwargs["exclude_e2ee"] is True
+
+    def test_e2ee_and_exclude_e2ee_together_exit_1(self):
+        from venice_ai.cli.cli import cli
+
+        mock_client = AsyncMock()
+        mock_client.models.resolve = AsyncMock(
+            side_effect=ValueError("require_e2ee and exclude_e2ee cannot be combined")
+        )
+        with (
+            patch("venice_ai.VeniceClient") as MockClient,
+            patch("venice_ai.cli.config.ensure_api_key", return_value="test-key"),
+        ):
+            _setup_client(MockClient, mock_client)
+            result = CliRunner().invoke(
+                cli, ["models", "resolve", "--type", "chat", "--e2ee", "--exclude-e2ee", "--json"]
+            )
+        assert result.exit_code == 1
+        assert "cannot be combined" in result.output
+
+    @pytest.mark.asyncio
     async def test_exclusion_filters_forwarded(self):
         client, _ = await _run_resolve(
             "chat", prefer="cheapest", exclude_reasoning=True, exclude_uncensored=True
@@ -556,3 +597,40 @@ class TestResolvePreferAndNewFilters:
         kwargs = mock_async.await_args.kwargs
         assert kwargs["duration"] is None
         assert kwargs["prefer"] == "cheapest"
+
+
+class TestCheapestJsonWithQuoteFailures:
+    """``--json`` output holds no live exception, whatever the failure was."""
+
+    @staticmethod
+    def _unbuildable_error() -> Exception:
+        class NeedsTwoArguments(Exception):
+            def __init__(self, first: str, second: str) -> None:
+                super().__init__(first)
+                self.second = second
+
+        return NeedsTwoArguments("one", "two")
+
+    @pytest.mark.parametrize("result_cls", [CheapestVideoResult, CheapestMusicResult])
+    @pytest.mark.parametrize(
+        "make_failure",
+        [
+            lambda: InvalidRequestError("sk-secret", response=MagicMock(status_code=400)),
+            lambda: TestCheapestJsonWithQuoteFailures._unbuildable_error(),
+            lambda: ValueError("sk-secret"),
+        ],
+        ids=["sdk-error", "foreign-error-that-cannot-deepcopy", "plain-error"],
+    )
+    def test_payload_is_json_and_leaves_the_failures_out(self, result_cls, make_failure) -> None:
+        result = result_cls(model="m", quote_usd=0.5, skipped={"x": "quote failed"})
+        result._quote_failures["x"] = make_failure()
+
+        with patch("venice_ai.cli.commands.models.resolve.click.echo") as echo:
+            _render_cheapest_video(result, output_json=True)
+
+        raw = echo.call_args[0][0]
+        assert "sk-secret" not in raw
+        payload = json.loads(raw)
+        assert payload["model"] == "m"
+        assert payload["skipped"] == {"x": "quote failed"}
+        assert not [key for key in payload if "quote_failures" in key]

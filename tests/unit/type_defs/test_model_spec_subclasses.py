@@ -445,6 +445,20 @@ class TestNestedConstraintCapabilityExtraAllow:
         assert c.model_extra.get("aspectRatios") == ["1:1", "4:3"]
         assert c.model_dump()["singleImageAspectRatio"] == "1:1"
 
+    def test_inpaint_constraints_type_max_input_images(self):
+        # Real wire shape from muse-image-edit (GET /models?type=inpaint).
+        c = InpaintModelConstraints.model_validate(
+            {"promptCharacterLimit": 1500, "combineImages": True, "maxInputImages": 6}
+        )
+        assert c.maxInputImages == 6
+        assert "maxInputImages" not in (c.model_extra or {})
+        assert c.model_dump()["maxInputImages"] == 6
+
+    def test_inpaint_constraints_max_input_images_is_optional(self):
+        # Absent means the API's default of 3, or 1 when combineImages is false.
+        c = InpaintModelConstraints(promptCharacterLimit=1500)
+        assert c.maxInputImages is None
+
     def test_video_constraints_preserve_extended_fields(self):
         # Real wire shape (GET /models?type=video — all 97 models carry these).
         c = VideoModelConstraints.model_validate(

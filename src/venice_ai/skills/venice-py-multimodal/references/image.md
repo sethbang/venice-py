@@ -148,16 +148,27 @@ image_bytes = await client.image.multi_edit(
     prompt="Composite these into one sunny scene with a rainbow",  # str — required; one prompt
     model="...",                             # str | None — optional
     image=open("a.png", "rb"),               # primary image
-    image_2=open("b.png", "rb"),             # up to image_2 / image_3 additional inputs
+    image_2=open("b.png", "rb"),             # image_2 / image_3 are optional additional inputs
     image_3=None,
     resolution=None,                         # "1K"/"2K"/"4K" — same semantics as edit()
     safe_mode=None,
     transparent_background=None,             # bool | None — same semantics as edit()
 )
-# multi_edit takes a SINGLE prompt and up to three images (image / image_2 / image_3),
-# NOT lists of images/prompts. It returns raw bytes.
+# multi_edit takes a SINGLE prompt, NOT a list of prompts. It returns raw bytes.
 Path("./out.png").write_bytes(image_bytes)
 ```
+
+To send more than three inputs, pass `images=` in place of `image`, `image_2` and `image_3`, base image first. Combining it with them raises `ValueError`.
+
+```python
+image_bytes = await client.image.multi_edit(
+    prompt="Composite these into one sunny scene with a rainbow",
+    model="...",
+    images=[Path("a.png"), Path("b.png"), Path("c.png"), Path("d.png")],
+)
+```
+
+The maximum is per model: the catalog's `model_spec.constraints.maxInputImages`, or 3 when absent (1 when `combineImages` is false). The SDK does not check it; the API rejects too many inputs.
 
 Not every edit model can combine images. Resolve one that can with
 `await client.models.resolve_inpaint(require_combine_images=True)`.

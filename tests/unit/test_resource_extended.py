@@ -36,6 +36,9 @@ class MockClient:
         self._base_url.__truediv__ = MagicMock(return_value="https://api.test.venice.ai/test-path")
         self._session = None
 
+    def _session_request_options(self):
+        return {}
+
     async def _get_session(self):
         if not self._session:
             self._session = AsyncMock()

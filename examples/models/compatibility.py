@@ -11,6 +11,8 @@ This example demonstrates how to migrate code written for other AI APIs
   model with ``resolve_*()`` rather than rely on an alias
 - Running the migrated function once, live, and inspecting the real
   OpenAI-shaped response it returns
+- Reading that response where Anthropic code expected ``content``,
+  ``stop_reason`` and ``usage``
 
 The live sections make one short chat completion and one embedding call.
 
@@ -34,6 +36,10 @@ from venice_ai.types.api.requests import VeniceParameters
 EXIT_SKIPPED = 77
 
 MAX_COMPLETION_TOKENS = 200
+
+#: Anthropic's ``stop_reason`` for each ``finish_reason`` a chat response can carry.
+#: Anthropic's ``stop_sequence`` has no value of its own here: it arrives as "stop".
+STOP_REASONS = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use"}
 
 #: The resolver call this guide recommends for migrated code. exclude_reasoning
 #: keeps the answer direct, like the non-reasoning models most OpenAI and
@@ -113,9 +119,8 @@ async def chat_migration(text_compat: dict[str, str], resolved_chat: str) -> boo
             "    )",
         ]
     )
-    print("\n   Prefer blocking code? SyncVeniceClient runs coroutine methods without await.")
-    print("   iter_* paginators and job objects, including what run() returns, stay async,")
-    print("   so blocking code pages with list() and handles jobs with submit() and retrieve().")
+    print("\n   Prefer blocking code? SyncVeniceClient runs these without await, including")
+    print("   iter_* paginators, stream helpers and job objects.")
 
     print("\n🔍 Live text alias map:")
     if not text_compat:
@@ -208,11 +213,13 @@ def parameter_mapping_guide() -> None:
         ("presence_penalty", "presence_penalty", "Same meaning"),
         ("stream", "stream", "Same meaning"),
         ("seed", "seed", "Random seed for reproducibility; Venice requires > 0"),
+        ("stop_sequences (Anthropic)", "stop", "A string or a list of strings"),
+        ("tools[].input_schema (Anthropic)", "tools[].function.parameters", "Same JSON Schema"),
     ]
 
     for old_param, new_param, description in param_mappings:
         indicator = "→" if old_param == new_param else "⚠️"
-        print(f"   {indicator} {old_param:20s} → {new_param:25s} | {description}")
+        print(f"   {indicator} {old_param:32s} → {new_param:27s} | {description}")
 
     print("\n💡 Notable Differences:")
     print("   • max_tokens → max_completion_tokens (max_tokens raises a TypeError)")
@@ -223,8 +230,13 @@ def parameter_mapping_guide() -> None:
     print("     {'include_venice_system_prompt': False} to send only your messages")
 
 
-async def practical_migration_example(client: VeniceClient) -> bool:
-    """Run the migrated function live and inspect the real response."""
+async def practical_migration_example(
+    client: VeniceClient, last_response: list[ChatCompletionResponse]
+) -> bool:
+    """Run the migrated function live and inspect the real response.
+
+    Appends the response to *last_response* so the next section can read it.
+    """
     print("\n🚀 Complete Migration Example")
     print("-" * 50)
 
@@ -276,6 +288,7 @@ async def practical_migration_example(client: VeniceClient) -> bool:
     choice = response.choices[0]
     content = (response.text or "").strip()
 
+    last_response.append(response)
     print("\n📦 The real response has the OpenAI shape:")
     print(f"   response.id:                          {response.id}")
     print(f"   response.model:                       {response.model}")
@@ -302,6 +315,47 @@ async def practical_migration_example(client: VeniceClient) -> bool:
         return False
     if "paris" not in content.lower():
         print("\n❌ The reply does not answer the question (expected Paris).")
+        return False
+    return True
+
+
+def anthropic_response_mapping(response: ChatCompletionResponse) -> bool:
+    """Read a chat response where Anthropic code read ``content`` and ``stop_reason``.
+
+    Takes the response the previous section already paid for, so it makes no request.
+    Fails if the response has no usage or text to map, or carries a ``finish_reason``
+    with no Anthropic equivalent in :data:`STOP_REASONS`.
+    """
+    print("\n🔁 Anthropic Response Mapping")
+    print("-" * 50)
+
+    choice = response.choices[0]
+    usage = response.usage
+    stop_reason = STOP_REASONS.get(choice.finish_reason or "")
+    rows = [
+        ("message.id", "response.id", response.id),
+        ("message.model", "response.model", response.model),
+        ("message.role", "choices[0].message.role", choice.message.role),
+        ("message.content[0].text", "response.text", (response.text or "").strip()),
+        ("message.stop_reason", "choices[0].finish_reason", choice.finish_reason),
+        ("message.usage.input_tokens", "usage.prompt_tokens", usage and usage.prompt_tokens),
+        (
+            "message.usage.output_tokens",
+            "usage.completion_tokens",
+            usage and usage.completion_tokens,
+        ),
+    ]
+    for anthropic, venice, value in rows:
+        print(f"   {anthropic:28s} → {venice:26s} = {value}")
+    print(f"   finish_reason {choice.finish_reason!r} is stop_reason {stop_reason!r}")
+    print("   Tool calls are on message.tool_calls, not in content blocks, and their")
+    print("   arguments are a JSON string: call.function.arguments_dict parses them.")
+
+    if stop_reason is None:
+        print(f"❌ No Anthropic stop_reason for finish_reason {choice.finish_reason!r}")
+        return False
+    if usage is None or not response.text:
+        print("❌ The response has no usage or no text to map")
         return False
     return True
 
@@ -370,7 +424,17 @@ async def main() -> int:
             ("embedding_migration", await embedding_migration(client)),
         ]
         parameter_mapping_guide()
-        results.append(("practical_migration_example", await practical_migration_example(client)))
+        last_response: list[ChatCompletionResponse] = []
+        results.append(
+            (
+                "practical_migration_example",
+                await practical_migration_example(client, last_response),
+            )
+        )
+        if last_response:
+            results.append(
+                ("anthropic_response_mapping", anthropic_response_mapping(last_response[0]))
+            )
         migration_checklist()
 
     failed = [name for name, ok in results if ok is False]
@@ -387,6 +451,7 @@ async def main() -> int:
     print("\n💡 Key Takeaways:")
     print("   - The request and response shapes follow the OpenAI chat format")
     print("   - Choose models with resolve_*(); aliases exist only for old code")
+    print("   - Anthropic's content, stop_reason and usage have direct equivalents")
     print("   - Typed Pydantic messages and responses")
     print("   - Async by default, with SyncVeniceClient for blocking code")
     return 0

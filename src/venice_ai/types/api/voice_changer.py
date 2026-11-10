@@ -29,8 +29,8 @@ class VoiceChangerQueueResponse(VeniceBaseModel):
     duration_seconds: float = Field(
         ...,
         description=(
-            "Length of the source recording in seconds, measured server-side, and "
-            "therefore the exact quantity billed for this request. Reconcile it "
+            "Length of the source recording in seconds, measured server-side. "
+            "Billing rounds this up to the next whole minute. Reconcile it "
             "against the estimate from ``quote`` — that one is only an estimate."
         ),
     )

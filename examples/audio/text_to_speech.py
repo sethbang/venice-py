@@ -13,30 +13,42 @@ model ``resolve_tts(prefer="cheapest")`` returns. Each file is checked for the
 container signature of the format that was requested (``_helpers.matches_format``,
 shared with the other audio examples).
 
+The style controls ``prompt``, ``temperature`` and ``top_p`` are sent only to a
+model whose catalog entry advertises them, since other models ignore them. The API
+reference names the flags, but a catalog can list none, so set
+``VENICE_TTS_STYLE_MODEL`` to name a model and send all three to it.
+
 With no TTS model in the catalog the example skips and exits 77. With no ASR model
-to transcribe it back, only the multi-language demo is skipped.
+to transcribe it back, the multi-language and style-control demos are skipped.
+
+Cost: every clip bills per input character at the resolved model's price (about
+1,000 characters in all, about $0.004 at the cheapest listed $3.50 per million).
+The style-control clip runs on the cheapest model that advertises the parameters,
+at up to $125 per million: under a cent for its 58 characters.
 """
 
 import asyncio
 import io
-import re
+import os
 import sys
 import time
 import wave
 from pathlib import Path
+from typing import Any
 
-from venice_ai import NoMatchingModelError, VeniceClient
-from venice_ai.exceptions import VeniceError
-from venice_ai.types.api import TtsModelSpec
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import (  # noqa: E402
+from _helpers import (
     CHECKABLE_FORMATS,
+    EXIT_SKIPPED,
     matches_format,
     tts_default_format,
     tts_formats,
     tts_spec,
+    word_overlap,
 )
+
+from venice_ai import NoMatchingModelError, VeniceClient
+from venice_ai.exceptions import VeniceError
+from venice_ai.types.api import TtsModelSpec
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/audio/).
@@ -65,8 +77,8 @@ NATIVE_TEXT: dict[str, tuple[str, str]] = {
     "Portuguese": ("pt", "Olá, como você está hoje? Espero que tenha um bom dia."),
 }
 
-#: Exit status for a run that skipped because a prerequisite is missing.
-EXIT_SKIPPED = 77
+#: Names a model to send the style controls to, when the catalog flags none.
+STYLE_MODEL_ENV_VAR = "VENICE_TTS_STYLE_MODEL"
 
 #: Paths written by this run, listed at the end on success.
 WRITTEN: list[Path] = []
@@ -112,17 +124,6 @@ async def load_tts_model(client: VeniceClient) -> TtsModel:
     if not english:
         raise RuntimeError(f"{model_id} lists no English voice")
     return TtsModel(model_id, spec, english, voice_languages)
-
-
-def _words(text: str) -> list[str]:
-    return re.findall(r"\w+", text.lower())
-
-
-def word_overlap(expected: str, actual: str) -> float:
-    """Fraction of the expected words that appear in the transcript."""
-    want = _words(expected)
-    got = set(_words(actual))
-    return sum(w in got for w in want) / len(want) if want else 0.0
 
 
 def wav_seconds(data: bytes) -> float:
@@ -416,6 +417,100 @@ async def multilingual_speech(client: VeniceClient, tts: TtsModel) -> bool | Non
     return True
 
 
+def _advertises(spec: TtsModelSpec, flag: str) -> bool:
+    """Whether a TTS catalog entry sets a capability flag the SDK does not type."""
+    return bool((spec.model_extra or {}).get(flag))
+
+
+async def style_controls(client: VeniceClient) -> bool | None:
+    """Send ``prompt``, ``temperature`` and ``top_p`` where the catalog advertises them.
+
+    The API ignores these on other models, so a request there would show
+    nothing. Each one goes only to a model that sets its flag
+    (``supportsPromptParam``, ``supportsTemperatureParam``, ``supportsTopPParam``).
+    The audio has no field reporting the delivery, so the check is that the words
+    survived; listen to the clip to judge the effect.
+
+    ``VENICE_TTS_STYLE_MODEL`` names a model to send all three to instead. Returns
+    ``None`` when neither gives a model or no ASR model can check the result.
+    """
+    print("\n🎚️ Style controls: prompt, temperature, top_p")
+    print("-" * 40)
+
+    text = "The harbor bell rang twice before the morning boats left."
+    flags: dict[str, dict[str, Any]] = {
+        "supportsPromptParam": {"prompt": "Calm and unhurried."},
+        "supportsTemperatureParam": {"temperature": 0.7},
+        "supportsTopPParam": {"top_p": 0.9},
+    }
+    specs = {
+        m.id: tts_spec(m.model_spec, m.id) for m in (await client.models.list(type="tts")).data
+    }
+    named = os.environ.get(STYLE_MODEL_ENV_VAR)
+    tried: list[str] = []
+    while True:
+        try:
+            model_id = named or await client.models.resolve_tts(
+                prefer="cheapest", exclude_models=tried
+            )
+        except NoMatchingModelError:
+            print(
+                "Section skipped: style controls: no TTS model advertises these parameters, "
+                f"and {STYLE_MODEL_ENV_VAR} is not set"
+            )
+            return None
+        tried.append(model_id)
+        spec = specs.get(model_id)
+        if named and spec is None:
+            print(f"❌ {STYLE_MODEL_ENV_VAR}={named} is not a TTS model in the catalog")
+            return False
+        if spec is None or not spec.voices:
+            if named:
+                print(f"❌ {named} lists no voices in the catalog")
+                return False
+            continue
+        params: dict[str, Any] = {}
+        for flag, value in flags.items():
+            if named or _advertises(spec, flag):
+                params.update(value)
+        if params:
+            break
+
+    try:
+        asr_model = await client.models.resolve_asr(prefer="cheapest")
+    except NoMatchingModelError as e:
+        print(f"Section skipped: style controls: no ASR model to check it with ({e})")
+        return None
+
+    fmt = tts_default_format(spec, model_id)
+    voice = spec.default_voice or spec.voices[0]
+    print(f"🎤 {model_id}, voice {voice!r}, sending {params}")
+    try:
+        response = await client.audio.create_speech(
+            model=model_id, input=text, voice=voice, response_format=fmt, **params
+        )
+        filename = response.save(
+            RESULTS_DIR / f"style_controls.{FORMAT_EXTENSIONS.get(fmt, fmt)}", overwrite=True
+        )
+        WRITTEN.append(filename)
+        transcript = await client.audio.transcribe(file=filename, model=asr_model, language="en")
+    except VeniceError as e:
+        print(f"❌ Error generating styled speech: {e}")
+        return False
+
+    overlap = word_overlap(text, transcript.text)
+    print(f"🔁 Transcribed back ({asr_model}): {transcript.text}")
+    print(f"📊 Word overlap with the source text: {overlap:.0%}")
+    if not matches_format(response.content, fmt):
+        print(f"❌ The response is not {fmt} audio")
+        return False
+    if overlap < 0.6:
+        print("❌ The clip does not say the requested text")
+        return False
+    print(f"✅ Saved: {filename}; listen to it to judge the delivery")
+    return True
+
+
 async def main() -> int:
     """Run all text-to-speech examples.
 
@@ -442,6 +537,7 @@ async def main() -> int:
             ("streaming_speech", await streaming_speech(client, tts)),
             ("batch_text_processing", await batch_text_processing(client, tts)),
             ("multilingual_speech", await multilingual_speech(client, tts)),
+            ("style_controls", await style_controls(client)),
         ]
 
     failed = [name for name, ok in results if ok is False]
@@ -462,6 +558,8 @@ async def main() -> int:
     print("   - Batch text processing")
     if "multilingual_speech" not in skipped:
         print("   - Native-language voice and text, verified by transcription")
+    if "style_controls" not in skipped:
+        print("   - prompt, temperature and top_p on a model that advertises them")
 
     print("\n📁 Files written by this run:")
     for path in WRITTEN:

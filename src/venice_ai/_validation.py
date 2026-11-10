@@ -61,6 +61,7 @@ from pydantic import BaseModel, ValidationError
 
 from .core.metrics import get_metrics_collector
 from .exceptions import APIResponseValidationError
+from .utils.errors import input_free_validation_error
 
 logger = logging.getLogger(__name__)
 
@@ -183,23 +184,35 @@ def validate_response_model(
                 _validation_errors_by_model.get(model_name, 0) + 1
             )
 
+        # A model whose body can hold a secret opts out of quoting its input, and
+        # the error holds neither the body nor the original error.
+        hide_input = model_class.model_config.get("hide_input_in_errors", False)
         logger.error(
             f"Pydantic validation failed for {model_name}: {e}",
             extra={
                 "model_name": model_name,
-                "response_data": response_data,
-                "validation_errors": e.errors(),
+                "response_data": "<not shown>" if hide_input else response_data,
+                "validation_errors": e.errors(include_input=not hide_input),
                 "endpoint": endpoint,
                 "method": method,
             },
         )
 
-        raise APIResponseValidationError(
+        if not hide_input:
+            raise APIResponseValidationError(
+                f"API response validation failed for {model_name}",
+                validation_error=e,
+                response_data=response_data,
+                model_name=model_name,
+            ) from e
+        failure = APIResponseValidationError(
             f"API response validation failed for {model_name}",
-            validation_error=e,
-            response_data=response_data,
+            validation_error=input_free_validation_error(e),
             model_name=model_name,
-        ) from e
+        )
+    # Raised after the except block, which keeps the original error, and the input
+    # it holds, out of __context__.
+    raise failure
 
 
 def get_validation_metrics() -> dict[str, Any]:

@@ -332,12 +332,14 @@ class Billing(APIResource["VeniceClient"]):
                 print(entry.timestamp, entry.amount)
         """
         cursor: str | None = None
+        cursors_sent: set[str] = set()
 
         async def _fetch_page(page_index: int) -> _PageResult[BillingUsageEntry]:
             nonlocal cursor
             if page_index == 0:
                 # First page: send the filters and start the walk fresh.
                 cursor = None
+                cursors_sent.clear()
                 response = await self.get_usage_history(
                     format=BillingFormatEnum.JSON,
                     currency=currency,
@@ -351,9 +353,12 @@ class Billing(APIResource["VeniceClient"]):
                     format=BillingFormatEnum.JSON,
                     cursor=cursor,
                 )
+            if cursor is not None:
+                cursors_sent.add(cursor)
             cursor = response.nextCursor
             items = list(response.data)
-            has_more = response.nextCursor is not None
+            # A cursor already sent would replay pages, so it ends the walk.
+            has_more = cursor is not None and cursor not in cursors_sent
             return _PageResult(items=items, has_more=has_more)
 
         return Paginator(_fetch_page, page_size=page_size, max_items=max_items)
@@ -404,11 +409,13 @@ class Billing(APIResource["VeniceClient"]):
                 Path(f"usage-{index:04d}.csv").write_bytes(page.content)
         """
         cursor: str | None = None
+        cursors_sent: set[str] = set()
 
         async def _fetch_page(page_index: int) -> _PageResult[BillingUsageHistoryCsvPage]:
             nonlocal cursor
             if page_index == 0:
                 cursor = None
+                cursors_sent.clear()
                 page = await self.get_usage_history(
                     format=BillingFormatEnum.CSV,
                     currency=currency,
@@ -418,8 +425,12 @@ class Billing(APIResource["VeniceClient"]):
                 )
             else:
                 page = await self.get_usage_history(format=BillingFormatEnum.CSV, cursor=cursor)
+            if cursor is not None:
+                cursors_sent.add(cursor)
             cursor = page.nextCursor
-            return _PageResult(items=[page], has_more=page.nextCursor is not None)
+            # A cursor already sent would replay pages, so it ends the walk.
+            has_more = cursor is not None and cursor not in cursors_sent
+            return _PageResult(items=[page], has_more=has_more)
 
         return Paginator(
             _fetch_page,

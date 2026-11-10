@@ -415,3 +415,4 @@ async def _delete_key_async(ctx, key_id, yes):
             console.print(
                 f"[bold red]❌ Failed to delete API key:[/bold red] [cyan]{key_id}[/cyan]"
             )
+        raise SystemExit(1)

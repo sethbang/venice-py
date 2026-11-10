@@ -20,6 +20,15 @@ that go beyond a basic text-to-video or image-to-video request:
   ``@Element1`` … and ``@Image1`` …. Each element carries either images
   (``frontal_image_url`` plus optional ``reference_image_urls``) or a
   ``video_url``, never both.
+- ``camera_trajectory`` — 2 to 12 camera poses on a multi-angle model, which
+  also takes ``image_url``.
+- ``keyframes`` — images pinned to frame positions on keyframe-driven models.
+- ``omni_reference_task_type`` with ``reference_video_urls`` — edit or extend one
+  clip on a model that takes the hint.
+- ``consents`` — the attestation a provider asks for when submitted media shows
+  a face (see "Consent" below).
+
+``image_strength`` is left out: no catalog model declares it.
 
 Choosing a model
 ----------------
@@ -45,6 +54,11 @@ its sample media and narrows the candidates with what the catalog does say:
   ``VENICE_VIDEO_ELEMENTS_MODEL`` (an element-aware reference-to-video
   model; the Venice reference-to-video guide lists them) and is skipped
   when the variable is unset.
+- ``camera_trajectory``: ``input_mode="multi_angle"``.
+- ``keyframes`` and edit or extend: no catalog field says which models take them,
+  so ``VENICE_VIDEO_KEYFRAMES_MODEL`` and ``VENICE_VIDEO_OMNI_MODEL`` name them, and
+  each section is skipped when its variable is unset.
+- ``consents``: see below.
 
 Models whose reference-image limits (minimum short side, aspect bounds) the
 800x600 sample photos break are excluded before quoting.
@@ -57,16 +71,32 @@ is an outage or a rejected request, not a gap in the catalog. A model whose
 quote fails while others succeed is left out of the comparison; it is listed,
 and a paid run declines to queue, since the pick may not be the cheapest.
 
+Consent
+-------
+Some models ask for an attestation when submitted media contains a human face:
+``POST /video/queue`` answers 409 ``needs_consent`` with the policy text, and that
+409 is not billed. The sample media shows no people. To try this section set
+``VENICE_VIDEO_CONSENT_MODEL`` and ``VENICE_VIDEO_FACE_IMAGE_URL``, the latter to a
+photo you have the right to use. The example prints the policy and stops. It never
+attests on its own: read the policy, then set ``VENICE_VIDEO_CONSENT_ATTESTED=1`` to
+send ``consents`` as your own confirmation. A photo in which no face is detected
+gets no 409: the job is accepted and billed, so this section needs the paid opt-in
+as well.
+
 Quote only by default
 ---------------------
 Without the opt-in below, each section resolves its model, prints the request
 and its quote, and stops; the example then exits 77 ("skipped"), because
 nothing was generated or verified. The quote prices duration, resolution and
-reference-video length; it takes no reference images, audio or elements, so
-treat it as the base price. To queue the jobs, wait for them and download the
+reference-video length; it takes no reference images, audio, elements, keyframes,
+camera trajectory or consents, so treat it as the base price. To queue the jobs, wait for them and download the
 results to ``examples/results/`` (incurs at least the quoted cost), set::
 
     VENICE_RUN_PAID_VIDEO=1
+
+A job whose base quote is above ``VIDEO_CEILING_USD`` ($0.50) is refused; raise it with
+``VENICE_VIDEO_MAX_USD``. The ceiling compares the base quote, so references can take
+the charge past it.
 
 A paid run also reads the key's spendable balance
 (``client.api_keys.get_rate_limits()``) before and after each job and prints
@@ -90,9 +120,17 @@ A file that is not a video keeps the job's stored copy. A clip that is the
 wrong length or size is still a delivered video, so it is saved and released,
 and the section fails.
 
+Every media URL is fetched for free just before a paid job and checked for the
+content type its field needs, so a dead link stops the section before it pays.
+
 A queue call that ends in a 5xx, a read timeout or a dropped connection may
 still have queued and billed a job. The example says so, and the remaining paid
 sections do not queue.
+
+Cost: quote only by default, free. With the opt-in, the five sections that need no
+extra variable each run one job at its printed base quote; the total is decided by
+the catalog at run time, so it is printed section by section rather than stated
+here. Sections behind a model variable add one job each, two for edit and extend.
 """
 
 import asyncio
@@ -106,9 +144,25 @@ import wave
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import aiohttp
+from _helpers import (
+    NOT_PAID,
+    QUEUE_UNCERTAIN,
+    Outcome,
+    UnplayableVideoError,
+    ceiling_refusal,
+    check_video,
+    download_video,
+    duration_seconds,
+    exit_code,
+    print_progress,
+    print_recovery,
+    read_playable_video,
+    report_uncertain_queue,
+    url_serves,
+)
 
 from venice_ai import (
     CheapestVideoResult,
@@ -120,26 +174,28 @@ from venice_ai import (
     cheapest_video_params,
     video_input_mode,
 )
-from venice_ai.exceptions import VeniceError
+from venice_ai.exceptions import ConflictError, VeniceError
+from venice_ai.types.api import CameraKeyframe, SeedanceConsents, VideoConsents
 from venice_ai.types.api.models import VideoModelConstraints, VideoModelSpec
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import (  # noqa: E402
-    NOT_PAID,
-    QUEUE_UNCERTAIN,
-    Outcome,
-    UnplayableVideoError,
-    check_video,
-    download_video,
-    exit_code,
-    print_progress,
-    print_recovery,
-    read_playable_video,
-    report_uncertain_queue,
-)
 
 RUN_PAID = os.environ.get("VENICE_RUN_PAID_VIDEO") == "1"
 ELEMENTS_ENV_VAR = "VENICE_VIDEO_ELEMENTS_MODEL"
+KEYFRAMES_ENV_VAR = "VENICE_VIDEO_KEYFRAMES_MODEL"
+OMNI_ENV_VAR = "VENICE_VIDEO_OMNI_MODEL"
+CONSENT_MODEL_ENV_VAR = "VENICE_VIDEO_CONSENT_MODEL"
+FACE_IMAGE_ENV_VAR = "VENICE_VIDEO_FACE_IMAGE_URL"
+ATTESTED_ENV_VAR = "VENICE_VIDEO_CONSENT_ATTESTED"
+
+# The content type each media field has to answer with. These fields hold a URL
+# or a list of URLs; elements and keyframes are read in _media_urls().
+MEDIA_FIELDS = {
+    "image_url": "image/",
+    "end_image_url": "image/",
+    "reference_image_urls": "image/",
+    "scene_image_urls": "image/",
+    "reference_video_urls": "video/",
+    "reference_audio_urls": "audio/",
+}
 
 # Set once a queue call may have been billed; no further job is queued after that.
 _queue_uncertain = False
@@ -257,13 +313,56 @@ def _lists_audio_input(constraints: VideoModelConstraints) -> bool:
     return bool((constraints.model_extra or {}).get("audio_input"))
 
 
-def _quote_failures(pick: CheapestVideoResult) -> dict[str, str]:
-    """The candidates the resolver dropped because their quote failed.
+def _media_urls(payload: dict[str, Any]) -> list[tuple[str, str]]:
+    """Every ``(url, expected content-type prefix)`` a job payload refers to."""
+    urls: list[tuple[str, str]] = []
+    for key, prefix in MEDIA_FIELDS.items():
+        value = payload.get(key)
+        if isinstance(value, str):
+            urls.append((value, prefix))
+        elif isinstance(value, list):
+            urls.extend((url, prefix) for url in value)
+    for element in payload.get("elements") or []:
+        if element.get("frontal_image_url"):
+            urls.append((element["frontal_image_url"], "image/"))
+        urls.extend((url, "image/") for url in element.get("reference_image_urls") or [])
+        if element.get("video_url"):
+            urls.append((element["video_url"], "video/"))
+    urls.extend((frame["image_url"], "image/") for frame in payload.get("keyframes") or [])
+    return urls
 
-    ``skipped`` also lists models that cannot serve the request at all; those
-    do not make the pick any less the cheapest.
-    """
-    return {m: reason for m, reason in pick.skipped.items() if reason.startswith("quote failed")}
+
+async def _media_reachable(payload: dict[str, Any]) -> bool:
+    """Free pre-flight: whether each distinct media URL answers with the right content."""
+    checks = dict(_media_urls(payload))
+    results = await asyncio.gather(
+        *(asyncio.to_thread(url_serves, url, prefix) for url, prefix in checks.items())
+    )
+    return all(results)
+
+
+def _needs_consent(error: ConflictError) -> bool:
+    """Whether a 409 is the ``needs_consent`` answer, not some other conflict."""
+    body = error.body if isinstance(error.body, dict) else {}
+    details = body.get("error")
+    code = details.get("code") if isinstance(details, dict) else None
+    return code == "needs_consent" or "consent_flow" in body
+
+
+def _print_consent_required(error: ConflictError) -> None:
+    """Show what a 409 ``needs_consent`` asks for. It is not billed."""
+    body = error.body if isinstance(error.body, dict) else {}
+    consent = body.get("consent")
+    consent = consent if isinstance(consent, dict) else {}
+    print("🛂 The provider asks for a consent attestation (HTTP 409, not billed).")
+    print(f"   Media with a face: {body.get('face_media_roles')}")
+    print(f"   Policy: {consent.get('policy_text', error)}")
+    print(f"   Read it, then set {ATTESTED_ENV_VAR}=1 to confirm it as your own attestation.")
+
+
+def _quote_failures(pick: CheapestVideoResult) -> dict[str, str]:
+    """The candidates the resolver dropped because their quote failed, with the reason."""
+    return {m: f"quote failed: {e}" for m, e in pick.quote_failures.items()}
 
 
 async def _cheapest(
@@ -361,6 +460,33 @@ async def _cheapest_reference_video(client: VeniceClient, catalog: Catalog) -> P
     return best
 
 
+async def _named_model(
+    client: VeniceClient,
+    catalog: Catalog,
+    env_var: str,
+    needs: str,
+    *,
+    overrides: dict[str, Any] | None = None,
+    **quote_fields: Any,
+) -> Pick:
+    """The model an environment variable names, at its cheapest request, quoted.
+
+    ``overrides`` replace values of that request, on the job as well as the quote.
+    ``quote_fields`` go on the quote only. Raises :class:`SectionSkip` when the
+    variable is unset and ``ValueError`` when it names no online video model.
+    """
+    model = os.environ.get(env_var)
+    if not model:
+        raise SectionSkip(f"{env_var} is not set (no catalog field says which models {needs})")
+    constraints = catalog.get(model)
+    if constraints is None:
+        raise ValueError(f"{env_var}={model} is not an online video model")
+    params = cheapest_video_params(constraints)
+    params.update(overrides or {})
+    quote = await client.video.quote(model=model, **params, **quote_fields)
+    return Pick(model, params, float(quote.quote), f"set by {env_var}")
+
+
 async def _configured_elements_model(
     client: VeniceClient, catalog: Catalog, names: dict[str, str]
 ) -> Pick:
@@ -456,7 +582,15 @@ async def _run_section(
     print(f"📝 Prompt: {payload['prompt']}")
     unquoted = [
         key
-        for key in ("reference_image_urls", "reference_audio_urls", "elements", "scene_image_urls")
+        for key in (
+            "reference_image_urls",
+            "reference_audio_urls",
+            "elements",
+            "scene_image_urls",
+            "keyframes",
+            "camera_trajectory",
+            "consents",
+        )
         if key in payload
     ]
     note = f" (not priced by the quote: {', '.join(unquoted)})" if unquoted else ""
@@ -467,6 +601,9 @@ async def _run_section(
     if not RUN_PAID:
         print("🧪 Quoted only, not submitted: set VENICE_RUN_PAID_VIDEO=1 to generate it.")
         return NOT_PAID
+    refusal = ceiling_refusal(pick.quote_usd)
+    if refusal is not None:
+        return refusal
     if pick.quote_failures:
         print(
             f"❌ Not queued: {len(pick.quote_failures)} models could not be priced, and any of "
@@ -474,10 +611,20 @@ async def _run_section(
         )
         return False
 
+    if not await _media_reachable(payload):
+        print("❌ Not queued: a media URL the job needs does not serve what it should.")
+        return False
+
     output_path = RESULTS_DIR / output_name
     headroom_before = await _headroom_usd(client)
     try:
         job = await client.video.run(**payload)
+    except ConflictError as e:
+        if not _needs_consent(e):
+            print(f"❌ Queue failed: {e}")
+            return False
+        _print_consent_required(e)
+        return "the provider asked for a consent attestation (HTTP 409, not billed)"
     except (VeniceError, ValueError) as e:
         if report_uncertain_queue(e):
             _queue_uncertain = True
@@ -507,7 +654,7 @@ async def _run_section(
         print_recovery(job)
         return False
     except aiohttp.ClientResponseError as e:
-        # Only the status: the error's text contains the link, which grants access.
+        # The error shows the storage host at most, never the link.
         print(f"❌ The download answered HTTP {e.status} (queue_id={job.queue_id})")
         print_recovery(job)
         return False
@@ -602,8 +749,9 @@ async def reference_audio(client: VeniceClient, catalog: Catalog) -> Outcome:
         ),
         build=lambda params: {
             **params,
-            # <Image 1> / <Audio 1> address the first reference image and
-            # audio clip, the tag syntax reference-to-video prompts use.
+            # <Image 1> / <Audio 1> is the Seedance tag syntax for the first reference
+            # image and audio clip. Other reference models use their own, such as
+            # @Image1, and read these tags as plain prompt text.
             "prompt": (
                 "Refer to the snowy mountain peaks in <Image 1> to generate a slow "
                 "aerial shot drifting past the same peaks. Use the melody in <Audio 1> "
@@ -620,7 +768,7 @@ async def reference_video(client: VeniceClient, catalog: Catalog) -> Outcome:
     """``reference_video_urls``: inherit a donor clip's motion and style.
 
     The prompt refers to the donor clip as ``<Video 1>``, the first (and
-    only) reference video.
+    only) reference video, in the Seedance tag syntax.
     """
     return await _run_section(
         client,
@@ -660,6 +808,131 @@ async def elements_and_scenes(
     )
 
 
+async def camera_trajectory(client: VeniceClient, catalog: Catalog) -> Outcome:
+    """``camera_trajectory``: pin the camera's path on a multi-angle model."""
+    return await _run_section(
+        client,
+        title="🎥 image_url + camera_trajectory (multi-angle)",
+        fields="image_url, camera_trajectory",
+        select=lambda: _cheapest(
+            client,
+            catalog,
+            mode="multi_angle",
+            what="multi-angle",
+            aspect_ratio=IMAGE_ASPECT_RATIO,
+        ),
+        build=lambda params: {
+            **params,
+            "prompt": "The camera arcs slowly around the forested shore",
+            "image_url": FOREST_SHORE_URL,
+            "camera_trajectory": [
+                CameraKeyframe(time=0, azimuth=0, elevation=0, distance=1),
+                CameraKeyframe(time=1, azimuth=45, elevation=10, distance=1),
+            ],
+        },
+        output_name="advanced_camera_trajectory.mp4",
+    )
+
+
+def _keyframes_for(params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Two images pinned to the first and last frame of the 24 fps clip."""
+    seconds = duration_seconds(params.get("duration_seconds"))
+    if seconds is None:
+        raise ValueError(f"no fixed duration to place keyframes in: {params}")
+    return [
+        {"image_url": FOREST_SHORE_URL, "frame_index": 0},
+        {"image_url": SNOWY_PEAKS_URL, "frame_index": seconds * 24},
+    ]
+
+
+async def keyframes(client: VeniceClient, catalog: Catalog) -> Outcome:
+    """``keyframes``: pin images to frame positions on a keyframe-driven model."""
+    return await _run_section(
+        client,
+        title="🗝️  keyframes",
+        fields="keyframes",
+        select=lambda: _named_model(client, catalog, KEYFRAMES_ENV_VAR, "take keyframes"),
+        build=lambda params: {
+            **params,
+            "prompt": "The view moves from the forested shore up to snowy mountain peaks",
+            "keyframes": _keyframes_for(params),
+        },
+        output_name="advanced_keyframes.mp4",
+    )
+
+
+async def omni_task(
+    client: VeniceClient, catalog: Catalog, *, task: Literal["edit", "extend"], prompt: str
+) -> Outcome:
+    """``omni_reference_task_type``: edit or extend the donor clip.
+
+    An edit takes the source's length, ``duration_seconds="auto"``, and bills it
+    rounded up. An extend asks for a fixed length of new content. The quote takes
+    the donor's length in both cases, so it prices the clip being sent.
+    """
+    overrides = {"duration_seconds": "auto"} if task == "edit" else {}
+    return await _run_section(
+        client,
+        title=f"✂️  reference_video_urls + omni_reference_task_type={task!r}",
+        fields="reference_video_urls, omni_reference_task_type",
+        select=lambda: _named_model(
+            client,
+            catalog,
+            OMNI_ENV_VAR,
+            "take omni_reference_task_type",
+            overrides=overrides,
+            reference_video_total_duration=SAMPLE_VIDEO_SECONDS,
+        ),
+        build=lambda params: {
+            **params,
+            "prompt": prompt,
+            "reference_video_urls": [SAMPLE_VIDEO_URL],
+            "omni_reference_task_type": task,
+        },
+        output_name=f"advanced_omni_{task}.mp4",
+    )
+
+
+async def consents_section(client: VeniceClient, catalog: Catalog) -> Outcome:
+    """``consents``: attest for media with a face, only when the user has said so."""
+    face_url = os.environ.get(FACE_IMAGE_ENV_VAR)
+    if not face_url:
+        print("\n🛂 consents")
+        print("-" * 40)
+        reason = f"{FACE_IMAGE_ENV_VAR} is not set, and the sample media shows no faces"
+        print(f"⏭️  {reason}.")
+        return reason
+    attested = os.environ.get(ATTESTED_ENV_VAR) == "1"
+    consent_fields = (
+        {
+            "consents": VideoConsents(
+                seedance=SeedanceConsents(
+                    confirmed_terms_and_privacy=True,
+                    confirmed_legal_right=True,
+                    confirmed_screening_acknowledged=True,
+                )
+            )
+        }
+        if attested
+        else {}
+    )
+    return await _run_section(
+        client,
+        title="🛂 reference_image_urls + consents",
+        fields="reference_image_urls" + (", consents" if attested else ""),
+        select=lambda: _named_model(
+            client, catalog, CONSENT_MODEL_ENV_VAR, "ask for a consent attestation"
+        ),
+        build=lambda params: {
+            **params,
+            "prompt": "Refer to <Subject 1> in <Image 1> to generate a short clip of a slow smile",
+            "reference_image_urls": [face_url],
+            **consent_fields,
+        },
+        output_name="advanced_consents.mp4",
+    )
+
+
 async def main() -> int:
     print("🚀 Venice AI Video — Advanced Fields Example")
     print("=" * 50)
@@ -680,6 +953,21 @@ async def main() -> int:
             "reference_audio_urls": await reference_audio(client, catalog),
             "reference_video_urls": await reference_video(client, catalog),
             "elements_and_scenes": await elements_and_scenes(client, catalog, names),
+            "camera_trajectory": await camera_trajectory(client, catalog),
+            "keyframes": await keyframes(client, catalog),
+            "omni_edit": await omni_task(
+                client,
+                catalog,
+                task="edit",
+                prompt="Strictly edit <Video 1>, changing its weather to a light snowfall.",
+            ),
+            "omni_extend": await omni_task(
+                client,
+                catalog,
+                task="extend",
+                prompt="Extend <Video 1>, generate the camera pulling back across the meadow.",
+            ),
+            "consents": await consents_section(client, catalog),
         }
 
     print("\n📊 Summary:")
@@ -693,7 +981,7 @@ async def main() -> int:
         elif outcome == QUEUE_UNCERTAIN:
             label = "⏭️  not queued, an earlier queue call may have been billed"
         else:
-            label = "⏭️  skipped, no model"
+            label = "⏭️  skipped"
         print(f"   {label}: {name}")
 
     # The sections are independent demos, so the example has shown its

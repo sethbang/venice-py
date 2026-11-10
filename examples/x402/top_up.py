@@ -18,9 +18,9 @@ Two flows:
 
 2. **Pay and settle** — ``client.x402.top_up_with(auth=X402Auth(...),
    amount_usdc=..., max_amount_usdc=...)`` runs the whole probe → sign → submit
-   handshake for USDC on Base: it reads the requirement, refuses to sign for
-   more than ``max_amount_usdc``, signs an EIP-3009 transfer authorization with
-   your wallet, and submits it. (``top_up_with_solana`` is the Solana
+   handshake for USDC on Base: it reads the requirement, refuses to sign unless
+   ``amount_usdc`` equals it and it is within ``max_amount_usdc``, signs an EIP-3009
+   transfer authorization with your wallet, and submits it. (``top_up_with_solana`` is the Solana
    equivalent; see ``solana_settlement.py``.)
 
 **This moves real funds.** Settlement is an irreversible on-chain USDC
@@ -77,6 +77,7 @@ BASE_MAINNET = "eip155:8453"
 CHAIN_NAMES = {
     BASE_MAINNET: "Base mainnet",
     "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "Solana mainnet",
+    "solana": "Solana mainnet",
 }
 
 
@@ -307,12 +308,14 @@ async def top_up_from_wallet(
         print(f"❌ The server offered no {CHAIN_NAMES[BASE_MAINNET]} option to pay with")
         return False
     required = _usdc(base.get("amount", 0))
-    if required > TOPUP_AMOUNT_USDC:
+    # top_up_with pays exactly the required amount and raises ValueError on any other.
+    if required != TOPUP_AMOUNT_USDC:
         print(
-            f"❌ Server requires ${required:,.2f}, above this example's ${TOPUP_AMOUNT_USDC:.2f} cap"
+            f"❌ Server requires ${required:,.2f}, and top_up_with pays exactly that: "
+            f"it refuses this example's ${TOPUP_AMOUNT_USDC:.2f}"
         )
         return False
-    print(f"   Server minimum on Base: ${required:,.2f} (within the ${TOPUP_AMOUNT_USDC:.2f} cap)")
+    print(f"   Server requires ${required:,.2f} on Base, exactly what this example pays")
 
     if os.environ.get("X402_DO_TOPUP") != "1":
         print(f"\n   💤 Dry run — not submitting. This would top up ${TOPUP_AMOUNT_USDC:.2f}")

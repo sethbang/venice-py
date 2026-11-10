@@ -15,6 +15,9 @@ distinct from generation:
   their duration: the server reads the length and frame rate from the
   source file, both for the quote and for the job.
 
+The quote honours the factor: measured on a 10-second 640x360 sample,
+``upscale_factor=2`` quoted $0.13 and ``upscale_factor=4`` quoted $1.00.
+
 The lifecycle is the usual one: ``quote()`` for a price, ``run()`` to queue
 and get a :class:`venice_ai.VideoJob`, ``wait()`` to poll to completion and
 ``download()`` to save the result. Leaving the ``async with`` block after the
@@ -25,6 +28,13 @@ upscaler, not the video upscaler. Use the dedicated shortcut
 ``client.models.resolve_video_upscale()`` instead; it looks for
 ``type="video"`` models with ``model_type="video"`` + ``video_input=True``.
 
+Enhancement
+-----------
+Models that publish ``constraints.topaz.models`` take an ``enhancement_model``
+and tuning fields such as ``noise`` and ``recover_detail``. ``enhancement_model``
+is quotable, so its price is printed for free. A paid run upscales once more with
+it. The tuning fields have no quote parameter, so that price is the base.
+
 Quote only by default
 ---------------------
 The quote is free and always runs. Upscaling costs real money, so the job
@@ -32,6 +42,16 @@ is only queued when you opt in; without it the example exits 77
 ("skipped")::
 
     VENICE_RUN_PAID_VIDEO=1
+
+Each job must also quote at or under ``VIDEO_CEILING_USD`` ($0.50). Above it the
+job is refused, because price grows with the source's length, frame rate and the
+factor, and a long source can reach many dollars. Raise the ceiling for one run
+when you mean to spend more::
+
+    VENICE_UPSCALE_MAX_USD=2.00
+
+Cost with the opt-in: the upscale ($0.13 on the default sample) and, where the
+model publishes enhancement models, one enhanced upscale at its printed quote.
 
 If the catalog lists no video upscaler, ``resolve_video_upscale()`` raises
 :class:`venice_ai.NoMatchingModelError` and the example exits 77 as well.
@@ -45,30 +65,35 @@ import os
 import sys
 import urllib.request
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import aiohttp
-
-from venice_ai import NoMatchingModelError, VeniceClient, VideoGenerationError
-from venice_ai.exceptions import VeniceError
-from venice_ai.types.api.models import VideoModelSpec
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import (  # noqa: E402
+from _helpers import (
+    NOT_PAID,
     SKIPPED,
+    Outcome,
     UnplayableVideoError,
+    ceiling_refusal,
+    display_url,
     download_video,
+    exit_code,
     mp4_tracks,
     print_progress,
     print_recovery,
     read_playable_video,
     report_uncertain_queue,
+    url_serves,
+    video_constraints,
 )
+
+from venice_ai import NoMatchingModelError, VeniceClient, VideoGenerationError
+from venice_ai.exceptions import VeniceError
+from venice_ai.types.api.models import VideoModelConstraints, VideoModelSpec
 
 RUN_PAID = os.environ.get("VENICE_RUN_PAID_VIDEO") == "1"
 
-# A small public-domain sample clip (Big Buck Bunny, 640x360, 10s) so this
-# example produces a real quote out of the box.
+# A small sample clip (Big Buck Bunny, CC BY 3.0, Blender Foundation; 640x360,
+# 10s) so this example produces a real quote out of the box.
 SOURCE_VIDEO_URL = os.environ.get(
     "VENICE_UPSCALE_SOURCE_URL",
     "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4",
@@ -77,6 +102,9 @@ SOURCE_VIDEO_URL = os.environ.get(
 # Resolve results dir relative to this file's location.
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+#: Set this to spend more than the ceiling on one run.
+CEILING_ENV_VAR = "VENICE_UPSCALE_MAX_USD"
 
 
 def _fetch_bytes(url: str) -> bytes:
@@ -119,11 +147,14 @@ async def _smallest_factor(client: VeniceClient, model: str) -> UpscaleFactor:
     return min(factors)
 
 
-async def quote_upscale(client: VeniceClient, model: str, factor: UpscaleFactor) -> bool:
-    """Get a cost estimate for upscaling the source video (free)."""
+async def quote_upscale(client: VeniceClient, model: str, factor: UpscaleFactor) -> float | None:
+    """Get a cost estimate for upscaling the source video (free).
+
+    Returns the quoted USD, or ``None`` if the quote failed.
+    """
     print("\n💰 Quote an Upscale Job")
     print("-" * 30)
-    print(f"🎞️  Source: {SOURCE_VIDEO_URL}")
+    print(f"🎞️  Source: {display_url(SOURCE_VIDEO_URL)}")
     print(f"🔍 upscale_factor={factor} (smallest enlarging factor the model lists)")
 
     try:
@@ -138,31 +169,97 @@ async def quote_upscale(client: VeniceClient, model: str, factor: UpscaleFactor)
         print(f"❌ Quote failed: {e}")
         print("   Ensure the source is a fetchable video the server can inspect")
         print("   (a public HTTPS URL or a data: URI).")
-        return False
+        return None
 
     print(f"💵 Estimated cost: ${float(quote.quote):.4f}")
-    return True
+    return float(quote.quote)
 
 
-async def upscale_job(client: VeniceClient, model: str, factor: UpscaleFactor) -> bool | None:
+def enhancement_models(constraints: VideoModelConstraints) -> list[str]:
+    """The ``enhancement_model`` values a model publishes under ``constraints.topaz.models``.
+
+    Each entry is an object with a ``display`` name and the ``value`` to send.
+    """
+    topaz = (constraints.model_extra or {}).get("topaz")
+    models = topaz.get("models") if isinstance(topaz, dict) else None
+    if not isinstance(models, list):
+        return []
+    return [str(m["value"]) for m in models if isinstance(m, dict) and m.get("value")]
+
+
+async def enhanced_upscale(
+    client: VeniceClient, model: str, factor: UpscaleFactor, base_usd: float
+) -> Outcome:
+    """Quote an upscale with an ``enhancement_model`` and, on a paid run, run it."""
+    print("\n✨ Enhancement: enhancement_model and tuning fields")
+    print("-" * 30)
+    try:
+        listed = enhancement_models(await video_constraints(client, model))
+    except (ValueError, VeniceError) as e:
+        print(f"❌ Could not read {model}'s enhancement models: {e}")
+        return False
+    if not listed:
+        return f"{model} publishes no constraints.topaz.models"
+    enhancement = listed[0]
+    print(f"🧪 {len(listed)} listed: {', '.join(listed)}; using {enhancement}")
+    try:
+        quote = await client.video.quote(
+            model=model,
+            video_url=SOURCE_VIDEO_URL,
+            upscale_factor=factor,
+            enhancement_model=enhancement,
+        )
+    except VeniceError as e:
+        print(f"❌ Quote failed: {e}")
+        return False
+    usd = float(quote.quote)
+    print(f"💵 ${usd:.4f} with it, ${base_usd:.4f} without; tuning fields are not priced by quotes")
+    return await upscale_job(
+        client,
+        model,
+        factor,
+        usd,
+        output_name=f"upscaled_x{factor}_enhanced.mp4",
+        enhancement_model=enhancement,
+        noise=0.2,
+        recover_detail=0.5,
+    )
+
+
+async def upscale_job(
+    client: VeniceClient,
+    model: str,
+    factor: UpscaleFactor,
+    quoted_usd: float,
+    *,
+    output_name: str | None = None,
+    **fields: Any,
+) -> Outcome:
     """Queue the upscale, wait for it and download the result (paid).
 
-    Returns ``None`` when skipped because ``VENICE_RUN_PAID_VIDEO`` is unset.
+    Returns the skip reason when ``VENICE_RUN_PAID_VIDEO`` is unset or the quote
+    is over the spending ceiling. ``fields`` are extra ``video.run`` arguments.
     """
     print("\n🚀 Run an Upscale Job")
     print("-" * 30)
     if not RUN_PAID:
         print("⏭️  Not queued: set VENICE_RUN_PAID_VIDEO=1 to run it (incurs the quoted cost).")
-        return None
+        return NOT_PAID
+    refusal = ceiling_refusal(quoted_usd, CEILING_ENV_VAR)
+    if refusal is not None:
+        return refusal
+    if not await asyncio.to_thread(url_serves, SOURCE_VIDEO_URL, "video/"):
+        return False
 
-    output_path = RESULTS_DIR / f"upscaled_x{factor}.mp4"
+    output_path = RESULTS_DIR / (output_name or f"upscaled_x{factor}.mp4")
     try:
         job = await client.video.run(
             model=model,
             video_url=SOURCE_VIDEO_URL,
             upscale_factor=factor,
+            **fields,
         )
-    except VeniceError as e:
+    except (VeniceError, ValueError) as e:
         if not report_uncertain_queue(e):
             print(f"❌ Upscale request rejected: {e}")
         return False
@@ -189,7 +286,7 @@ async def upscale_job(client: VeniceClient, model: str, factor: UpscaleFactor) -
         print_recovery(job)
         return False
     except aiohttp.ClientResponseError as e:
-        # Only the status: the error's text contains the link, which grants access.
+        # The error shows the storage host at most, never the link.
         print(f"❌ The download answered HTTP {e.status} (queue_id={job.queue_id})")
         print_recovery(job)
         return False
@@ -248,28 +345,31 @@ async def main() -> int:
             return 1
         print(f"📍 Model: {model}")
 
-        results: dict[str, bool | None] = {"quote": await quote_upscale(client, model, factor)}
-        if results["quote"]:
-            results["upscale"] = await upscale_job(client, model, factor)
+        quoted = await quote_upscale(client, model, factor)
+        results: dict[str, Outcome] = {"quote": quoted is not None}
+        if quoted is not None:
+            results["upscale"] = await upscale_job(client, model, factor, quoted)
+            # Nothing else is queued after a failure, which may have been billed.
+            if results["upscale"] is not False:
+                results["enhanced_upscale"] = await enhanced_upscale(client, model, factor, quoted)
 
     print("\n📊 Summary:")
-    labels = {True: "✅ passed", False: "❌ failed", None: "⏭️  skipped (not paid)"}
     for name, outcome in results.items():
-        print(f"   {labels[outcome]}: {name}")
+        label = (
+            "✅ passed" if outcome is True else "❌ failed" if outcome is False else "⏭️  skipped"
+        )
+        print(f"   {label}: {name}")
 
-    failed = [name for name, outcome in results.items() if outcome is False]
-    if failed:
-        print(f"\n❌ Failed steps: {failed}")
-        return 1
-    if results.get("upscale") is None:
-        # The upscale itself is this example's core feature; a quote alone
-        # does not show it.
-        print("\nSKIPPED: VENICE_RUN_PAID_VIDEO is not set, so nothing was upscaled")
-        return SKIPPED
+    # The upscale itself is this example's core feature; a quote alone does not
+    # show it.
+    code = exit_code(list(results.items()), core="upscale")
+    if code:
+        return code
 
     print("\n💡 Tips:")
     print("   - upscale_factor=1 (where listed) is quality-only enhancement at the same size.")
-    print("   - upscale_factor=4 multiplies each dimension by 4 (16x the pixels); expensive.")
+    print("   - upscale_factor=4 multiplies each dimension by 4 (16x the pixels).")
+    print("     It quoted about 8x the price of upscale_factor=2 on the sample clip.")
     print("   - No duration_seconds for upscaling: the length comes from the source file.")
     return 0
 

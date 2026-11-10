@@ -28,7 +28,13 @@ class HttpClientConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Connection settings
-    timeout: float = Field(default=30.0, gt=0, description="Default request timeout in seconds")
+    timeout: float = Field(
+        default=30.0,
+        gt=0,
+        description="Request timeout in seconds, streams included. The 30s default applies "
+        "to clients built by VeniceClientFactory. VeniceClient(config=...) uses this field "
+        "only when it was set, and otherwise keeps its own 120s default.",
+    )
 
     max_connections: int = Field(
         default=100,

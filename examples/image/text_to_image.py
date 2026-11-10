@@ -7,25 +7,26 @@ This example demonstrates how to generate images from text prompts using the Ven
 Learn how to create compelling visual content with AI image generation models.
 
 The model is the cheapest one sized by pixel dimensions,
-``resolve_image(prefer="cheapest", require_custom_size=True)``: models that list
-aspect ratios size by ``aspect_ratio`` and ignore ``width`` / ``height``.
+``resolve_image(prefer="cheapest", require_custom_size=True)``: a model that lists
+aspect ratios sizes by ``aspect_ratio``, and can ignore ``width`` / ``height`` or
+reject them with a 400.
 
 Every image is generated with ``hide_watermark=True`` and saved under
 ``examples/results/`` with a ``t2i_`` prefix; the pixel size of each returned
 image is read back from its header and checked against the request, because
 the catalog cannot tell whether a model returns exactly the size asked for.
-Each run makes seven paid generations.
+Each run makes seven paid generations, about $0.07 at the cheapest listed $0.01 per
+image.
 """
 
 import asyncio
 import sys
 from pathlib import Path
 
+from _helpers import SKIPPED, image_dimensions
+
 from venice_ai import NoMatchingModelError, VeniceClient, VeniceError
 from venice_ai.types.api import ImageGenerationResponse
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import SKIPPED, image_dimensions  # noqa: E402
 
 # Resolve results dir relative to this file's location.
 # All example scripts live one level below examples/ (e.g., examples/image/).

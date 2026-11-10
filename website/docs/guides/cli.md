@@ -434,7 +434,7 @@ venice-py image edit photo.jpg -p "Add a rainbow" --no-safe-mode
 
 ### `venice-py image multi-edit`
 
-Edit an image using up to three layered inputs. The first image is the base; additional images are layered on top, guided by a single prompt.
+Edit an image using several layered inputs, guided by a single prompt. Repeat `--image` once per input: the first is the base and the rest are layered on top, in order. `--image-2` and `--image-3` add layers after every `--image`. The limit is per model: the catalog's `constraints.maxInputImages`, or 3 when absent (1 when `combineImages` is false). The API rejects too many.
 
 ```bash
 venice-py image multi-edit --prompt <INSTRUCTION> --image <BASE_FILE> [OPTIONS]
@@ -443,9 +443,9 @@ venice-py image multi-edit --prompt <INSTRUCTION> --image <BASE_FILE> [OPTIONS]
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
 | `--prompt` | `-p` | **(required)** | Edit instruction describing the changes |
-| `--image` | `-i` | **(required)** | Base image (first layer) |
-| `--image-2` | | — | Second layer image |
-| `--image-3` | | — | Third layer image |
+| `--image` | `-i` | **(required)** | Input image, repeatable. The first is the base |
+| `--image-2` | | — | Layer image, sent after every `--image` |
+| `--image-3` | | — | Layer image, sent after every `--image` and `--image-2` |
 | `--model` | `-m` | — | Edit model to use |
 | `--output` | `-o` | auto-generated | Output file path |
 | `--save-dir` | | `.` | Directory to save the result |
@@ -460,6 +460,8 @@ venice-py image multi-edit --prompt "Combine these into one scene" --image base.
 venice-py image multi-edit -p "Blend the overlay onto the base" -i base.png --image-2 overlay.png
 venice-py image multi-edit -p "Composite three layers" -i base.png --image-2 mid.png --image-3 top.png \
   --output-format png --quality high
+venice-py image multi-edit -p "Group these portraits" -i a.png -i b.png -i c.png -i d.png \
+  --model <inpaint-model>
 ```
 
 ### `venice-py image remove-bg`
@@ -720,7 +722,7 @@ venice-py video generate <PROMPT> [OPTIONS]
 | `--end-image-url` | | — | End-frame image URL for models that support transitions |
 | `--output` | `-o` | `video_<timestamp>.mp4` | Output file path |
 | `--save-dir` | | `.` | Directory to save the video |
-| `--no-poll` | | `false` | Queue the job and return the job ID without waiting |
+| `--no-poll` | | `false` | Queue the job and return the job ID without waiting. A link-only model's download link is saved locally, see [`video status`](#venice-py-video-status) |
 | `--open` | | `false` | Open the video after saving |
 
 > \* No static default — resolved at runtime: `--model` wins, else a matching `defaults.video_t2v_model` in your config if set, else the live API-recommended model.
@@ -771,7 +773,7 @@ venice-py video from-image <INPUT_FILE> [OPTIONS]
 | `--image-strength` | | — | How strongly the input image guides the video, from 0 to 1, on models that declare image strength (provider default 1) |
 | `--output` | `-o` | `video_<timestamp>.mp4` | Output file path |
 | `--save-dir` | | `.` | Directory to save the video |
-| `--no-poll` | | `false` | Queue without waiting |
+| `--no-poll` | | `false` | Queue without waiting. A link-only model's download link is saved locally, see [`video status`](#venice-py-video-status) |
 | `--open` | | `false` | Open the video after saving |
 
 > \* No static default — resolved at runtime: `--model` wins, else a matching `defaults.video_i2v_model` in your config if set, else the live API-recommended model.
@@ -791,22 +793,27 @@ venice-py video from-image portrait.jpg --duration 10s --open
 
 ### `venice-py video status`
 
-Check the status of a video generation job (useful with `--no-poll`).
+Check the status of a video generation job, and save it once it has finished (useful with `--no-poll`).
 
 ```bash
-venice-py video status <JOB_ID> [OPTIONS]
+venice-py video status <JOB_ID> --model <MODEL> [OPTIONS]
 ```
 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
-| `--model` | `-m` | — | Model used when the job was queued |
+| `--model` | `-m` | required | Model used when the job was queued |
+| `--output` | `-o` | — | Save the video to this path if the job has finished |
 
-> No default is applied here; pass the same model the job was queued with.
+> Venice looks a job up by model and job ID, so pass the same model the job was queued with.
 
 ```bash
-venice-py video status abc123
-venice-py video status abc123 --model wan-2.6-image-to-video
+venice-py video status abc123 --model <video-model>
+venice-py video status abc123 --model <video-model> --output video.mp4
 ```
+
+A download link grants access on its own, so the CLI never prints it. Some models hand out their link only in the queue response. For those, `--no-poll` on `video generate` and `video from-image` saves the model, queue ID and link, and says that it did. `video status <JOB_ID> --output <path>` then downloads the finished video, releases it on the server and deletes the saved link. Without `--output` it only reports the status.
+
+Saved links live in `~/.venice-py/video_jobs/`, one file per job, keyed by a hash of the queue ID. Treat this directory like a password store: anyone who can read a file there can download the video without credentials. The directory is created `0700` and each file `0600`. Those permission bits have no effect on Windows, where the files are only as private as your home directory, and `--no-poll` says so. `video status` warns and narrows the file if its permissions have been widened, and refuses a symbolic link on every platform, or a file owned by another user. A saved link is deleted after the release, or when the job fails or the link answers `410`. If the release fails the link is kept, so running the command again retries it. If the link serves something other than a video, or answers `404`, which can also mean the file has not arrived yet, the command exits `1`, releases nothing and keeps the link, so it can retry. It names the file to delete if a `404` turns out to be permanent. `video generate` and `video from-image` without `--no-poll` also save a link only the queue response gave when it serves something other than a video, so this command can retry. A job you never collect keeps its file until you delete it, and its video stays on the server. If the link cannot be saved, `--no-poll` exits `1`; the job is already queued, and that video cannot be downloaded later.
 
 ---
 
@@ -1125,6 +1132,9 @@ without hardcoding a specific model ID. Add `--prefer cheapest` to get the
 lowest-priced match instead of the catalog's default pick; it skips beta
 models unless `--include-beta` is passed and end-to-end encrypted models
 unless `--e2ee` is passed.
+`--exclude-e2ee` skips end-to-end encrypted models under any ranking, for
+endpoints that reject them such as `/responses`; it cannot be combined with
+`--e2ee`.
 
 ```bash
 venice-py models resolve --type chat --function-calling
@@ -1134,6 +1144,7 @@ venice-py models resolve --type image --prefer cheapest --quality low
 venice-py models resolve --type inpaint --transparent-background
 venice-py models resolve --type chat --vision --min-context-tokens 32000
 venice-py models resolve --type chat --prompt-caching
+venice-py models resolve --type chat --exclude-e2ee
 venice-py models resolve --type music --music-only --force-instrumental
 ```
 
@@ -1553,6 +1564,19 @@ cat sentences.txt | while IFS= read -r line; do
   venice --plain embeddings "$line" --json >> all_embeddings.jsonl
 done
 ```
+
+### Exit Codes
+
+A command exits `0` when it did what was asked and `1` when it did not, so a script can test it directly:
+
+- `video generate` and `video from-image` exit `1` when generation fails or times out, or a finished job has nothing to download.
+- `video generate --no-poll` and `video from-image --no-poll` exit `1` when a model's download link could not be saved.
+- `video status` exits `0` for any status it could read. With `--output` it exits `1` if the job failed, has nothing to save or its link served no video, and `0` while the job is still running.
+- `image batch` exits `1` if any prompt failed, after saving the rest and printing the summary.
+- `models` exits `1` if a listing request failed and no model can be shown, or a type named in `--type` failed. If any other type failed, it shows the models it has and warns on stderr, and filters that match nothing under a `--type` that worked exit `0`.
+- An empty listing, such as no voices or no saved conversations, exits `0`.
+
+Invalid usage exits `2`.
 
 ### Usage in CI/CD
 

@@ -120,6 +120,13 @@ class AdaptiveSchedulerAdapter:
         """Stop the scheduler."""
         await self._scheduler.stop()
 
+    async def cleanup_backend(self) -> None:
+        """Release the connections of the scheduler's state backend, if it has one."""
+        state_manager = getattr(self._scheduler, "state_manager", None)
+        cleanup = getattr(getattr(state_manager, "backend", None), "cleanup", None)
+        if cleanup is not None:
+            await cleanup()
+
     @property
     def classifier(self) -> Any | None:
         """Optional request classifier for VeniceClient compatibility."""

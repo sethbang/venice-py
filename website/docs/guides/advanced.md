@@ -42,6 +42,33 @@ client = VeniceClient(config=config, api_key="your-key")
 > `create_production_config()` and the other presets in `venice_ai.presets` set a
 > sensible `RateLimiterConfig` for you.
 
+**Which timeout applies:** a client's timeout bounds a whole request, a stream
+included. `VeniceClient` uses `timeout=` if given, then a timeout the config set
+(by keyword, by assignment or by `VENICE_HTTP_CLIENT__TIMEOUT`), then its own
+120-second default. `VeniceClientFactory` uses the config's value even when unset,
+which is 30 seconds.
+
+Every preset sets a timeout, so `VeniceClient(config=preset)` uses it:
+
+| Preset | Timeout |
+| --- | --- |
+| `create_production_config` | 30 seconds |
+| `create_production_config_high_throughput` | 45 seconds |
+| `create_production_config_conservative` | 60 seconds |
+| `create_development_config` | 60 seconds |
+| `create_testing_config` | 10 seconds |
+
+A long reasoning stream can outlast these and the factory's 30 seconds. Pass
+`timeout=` for a longer limit:
+
+```python
+client = VeniceClient(config=create_production_config(redis_url=url), timeout=300)
+```
+
+A config you dump and reload has every field set, the timeout included, so a config
+that never set one comes back with 30 seconds rather than the client's 120. Dump with
+`config.model_dump(exclude_unset=True)` to keep it unset.
+
 **Where the API key comes from:** every entry point (`VeniceClient`,
 `SyncVeniceClient`, `VeniceClientFactory`) resolves it in one order: an explicit
 `api_key=`, then `config.api_key`, then the `VENICE_API_KEY` environment
@@ -211,20 +238,25 @@ you need them.
 ### Enhanced Metrics
 
 Production-focused Prometheus metrics covering streaming fallbacks, custom
-stream usage, and tier-discovery coalescing.  The class exposes its
-counters/histograms/gauges as attributes so you can call the standard
-`prometheus_client` API on them (`.labels(...).inc()`, `.observe(...)`,
-etc.):
+stream usage, and tier-discovery coalescing.  They need the `metrics` extra
+(`pip install 'venice-py[metrics]'`); without `prometheus_client` they do
+nothing.  The class exposes its counters/histograms/gauges as attributes so you
+can call the standard `prometheus_client` API on them (`.labels(...).inc()`,
+`.observe(...)`, etc.).
+
+`get_enhanced_metrics()` returns the instance the SDK itself records to.  The
+SDK starts no server and does not use `prometheus_client`'s default registry, so
+pass the collector's registry when you start one:
 
 ```python
-from venice_ai.observability import EnhancedMetrics, EnhancedMetricsConfig
+from prometheus_client import start_http_server
 
-metrics_config = EnhancedMetricsConfig(
-    enabled=True,
-    include_detailed_metrics=True,
-    prometheus_port=8000,
-)
-metrics = EnhancedMetrics(config=metrics_config)
+from venice_ai.core.metrics import get_metrics_collector
+from venice_ai.observability import get_enhanced_metrics
+
+metrics = get_enhanced_metrics()
+
+start_http_server(8000, addr="127.0.0.1", registry=get_metrics_collector().registry)
 
 # Counters / histograms are exposed as attributes:
 metrics.streaming_fallback_total.labels(
@@ -233,6 +265,19 @@ metrics.streaming_fallback_total.labels(
 metrics.custom_stream_duration_seconds.labels(stream_type="audio").observe(0.245)
 metrics.tier_discovery_coalesced_total.inc()
 ```
+
+Three things in `EnhancedMetricsConfig` and `EnhancedMetrics` do less than they
+appear to:
+
+- `prometheus_port` and `prometheus_host` are unused.  Nothing reads them; give
+  the port and `addr=` to `start_http_server`, as above.
+- `include_detailed_metrics` is unused as well.
+- `EnhancedMetrics(config=...)` on its own registers its metrics nowhere, so no
+  server can expose them.  Use `get_enhanced_metrics()`, or pass
+  `base_collector=get_metrics_collector()`.  The registry holds one set of these
+  metric names: a second instance on it falls back to no-op metrics, with a
+  logged warning.  `get_enhanced_metrics(config=...)` uses `config` only on the
+  first call in the process, and the SDK may already have made that call.
 
 ### Response Header Access
 
@@ -320,8 +365,8 @@ scheduler_config = SchedulerConfig(
 
 ## x402 Wallet Authentication
 
-Venice's `/x402/*` billing endpoints use **Sign-In-With-Ethereum**
-(EIP-4361 SIWE) on Base chain (8453) instead of Bearer tokens. The SDK
+Venice's x402 balance and transaction reads are authenticated by a wallet,
+using **Sign-In-With-Ethereum** (EIP-4361 SIWE) on Base chain (8453). The SDK
 ships an optional helper, `venice_ai.auth.x402.X402Auth`, that builds
 the base64-encoded `X-Sign-In-With-X` header from a private key.
 
@@ -344,7 +389,7 @@ from venice_ai.auth.x402 import X402Auth
 auth = X402Auth(private_key=os.environ["WALLET_PRIVATE_KEY"])
 # auth.wallet_address is derived from the key — no extra config needed.
 
-async with VeniceClient() as client:
+async with VeniceClient(api_key="", auth=auth) as client:
     bal = await client.x402.balance(auth=auth)
     print(f"${bal.data.balanceUsd} on {auth.wallet_address}")
 
@@ -352,6 +397,22 @@ async with VeniceClient() as client:
     for t in txns.data.transactions[:5]:
         print(t.createdAt, t.type, t.amount)
 ```
+
+### Which credentials a client sends
+
+A client needs an API key or a wallet `auth`; `VeniceClient()` with neither, and
+no `VENICE_API_KEY` set, raises `ValueError`. What goes on the wire depends on
+which it has:
+
+| Client | Most requests, including `top_up()` | `balance(auth=auth)`, `transactions(auth=auth)` |
+|---|---|---|
+| `VeniceClient(api_key="", auth=auth)` | `X-Sign-In-With-X` only | `X-Sign-In-With-X` only |
+| `VeniceClient(auth=auth)` with `VENICE_API_KEY` set | Bearer only | Bearer and `X-Sign-In-With-X` |
+| `VeniceClient()` with `VENICE_API_KEY` set | Bearer only | Bearer and `X-Sign-In-With-X` |
+| `VeniceClient(auth=auth)` with `VENICE_API_KEY` unset | `X-Sign-In-With-X` only | `X-Sign-In-With-X` only |
+
+To authenticate with the wallet alone, pass `api_key=""`. It stops the client
+reading `VENICE_API_KEY`, which otherwise wins over the client's `auth`.
 
 ### Private-key hygiene
 
@@ -382,13 +443,25 @@ the scrubber in `_client.py` redacts `X-Sign-In-With-X` (alongside
 
 ### Top-ups
 
-`top_up()` uses standard Bearer auth (`VENICE_API_KEY`); the optional
-`payment_header=` kwarg carries a pre-signed x402 payment payload. An
+`top_up()` attaches the client's credentials as in the table above; the
+optional `payment_header=` kwarg carries a pre-signed x402 payment payload. An
 empty POST returns the documented `402 Payment Required` with structured
 payment requirements — the SDK surfaces that as an `APIError` whose
 response body contains the accept spec (chains, assets, amounts). Sign
 the payment payload out-of-band (e.g. with `@venice-ai/x402-client`),
 then pass the base64 string back to `top_up(payment_header=...)`.
+
+`top_up_with(auth=..., amount_usdc=...)` and its Solana counterpart
+`top_up_with_solana(...)` run the whole probe, sign and submit flow. They sign only
+the amount in the server's requirement, so `amount_usdc` does not choose how much
+you pay: it is a check that raises `ValueError` before signing when it differs
+from that amount, in either direction. Both refuse a requirement whose asset is
+not USDC. Neither verifies the recipient, because the SDK has no list of Venice's
+addresses to compare `payTo` with.
+
+`top_up_with_solana` reads the chain through a Solana RPC. A failure there raises
+`RuntimeError` with the RPC method and any HTTP status, and leaves out the RPC URL,
+which may hold an API key.
 
 ### Testing
 

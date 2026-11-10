@@ -5,12 +5,14 @@ This file addresses the gaps identified in the coverage report.
 
 import io
 import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import aiohttp
 import pytest
 
 from tests.fixtures.mock_fixtures import with_request_plumbing
+from venice_ai.core.models.base import CaseInsensitiveHeaders
 from venice_ai.exceptions import APIError
 from venice_ai.resources.audio import REGION_LANGUAGE_MAPPING, Audio
 from venice_ai.types import AudioResponse, ResponseFormat, Voice, VoiceList
@@ -507,6 +509,33 @@ class TestAudioEdgeCases:
         assert result == b"audio_data"
         call_args = client._request.call_args
         assert call_args.kwargs["json_data"]["speed"] == 4.0
+
+
+def _audio_with_server_headers() -> AudioResponse:
+    return AudioResponse(
+        b"audio",
+        SimpleNamespace(headers={"X-RateLimit-Remaining-Requests": "7", "CF-RAY": "abc"}),
+    )
+
+
+def test_audio_response_headers_ignore_case() -> None:
+    headers = _audio_with_server_headers().headers
+
+    assert isinstance(headers, CaseInsensitiveHeaders)
+    assert headers["cf-ray"] == "abc"
+    assert headers["Cf-Ray"] == "abc"
+    assert headers.get("x-ratelimit-remaining-requests") == "7"
+    assert "X-RATELIMIT-REMAINING-REQUESTS" in headers
+
+
+def test_audio_response_without_a_response_has_no_headers() -> None:
+    assert AudioResponse(b"audio").headers is None
+
+
+def test_audio_response_dump_keeps_the_headers() -> None:
+    dumped = _audio_with_server_headers().model_dump()
+
+    assert dumped["headers"] == {"x-ratelimit-remaining-requests": "7", "cf-ray": "abc"}
 
 
 if __name__ == "__main__":

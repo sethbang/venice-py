@@ -11,6 +11,7 @@ with enterprise-grade features including:
 """
 
 import os
+from urllib.parse import urlsplit
 
 from ..core.config import (
     BackendConfig,
@@ -25,6 +26,7 @@ from ..core.config import (
     VeniceAIConfig,
 )
 from ..rate_limiting.config import RateLimiterConfig, RateLimiterMode
+from ..validation.config_validator import _redis_url_for_display
 
 
 def _key_prefix(redis_key_prefix: str | None) -> str:
@@ -38,6 +40,19 @@ def _key_prefix(redis_key_prefix: str | None) -> str:
 # precedence order: the SDK's own nested setting
 # (``VeniceAIConfig.backend.redis.redis_url``), then the short form.
 _REDIS_URL_ENV_VARS = ("VENICE_BACKEND__REDIS__REDIS_URL", "VENICE_REDIS_URL")
+
+
+def _points_at_localhost(redis_url: str) -> bool:
+    """Whether the URL's host, and not its credentials, path or query, is localhost.
+
+    A URL with no scheme is read as ``host[:port]``, and one that does not parse
+    has no host to compare.
+    """
+    try:
+        host = urlsplit(redis_url if "://" in redis_url else f"//{redis_url}").hostname
+    except ValueError:
+        return False
+    return host is not None and (host in ("localhost", "127.0.0.1") or host.endswith(".localhost"))
 
 
 def _resolve_redis_url(redis_url: str | None, allow_localhost: bool) -> str:
@@ -54,9 +69,9 @@ def _resolve_redis_url(redis_url: str | None, allow_localhost: bool) -> str:
                 "Production Redis URL required. Pass redis_url or set "
                 "VENICE_BACKEND__REDIS__REDIS_URL (or VENICE_REDIS_URL)."
             )
-    if not allow_localhost and ("localhost" in redis_url or "127.0.0.1" in redis_url):
+    if not allow_localhost and _points_at_localhost(redis_url):
         raise ValueError(
-            f"Invalid Redis URL for production: {redis_url}\n"
+            f"Invalid Redis URL for production: {_redis_url_for_display(redis_url)}\n"
             "localhost/127.0.0.1 URLs are not allowed in production mode.\n"
             "This will fail in distributed/multi-instance environments.\n"
             "Use a network-accessible Redis instance instead."

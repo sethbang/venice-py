@@ -5,18 +5,31 @@ Venice AI SDK - Batch Embedding Processing
 
 This example demonstrates efficient batch processing of text embeddings.
 Learn how to handle large volumes of text efficiently using batching strategies.
+
+Cost: about 700 embedded tokens on the cheapest embedding model, under $0.0001 at
+catalog prices. Two batches are invalid on purpose: one never leaves the client,
+and the other is rejected by the API. Whether that rejection is billed is
+unmeasured; if a backend accepted it, about 16,000 tokens would cost under $0.001.
+
+Exit status: ``0`` when every section passed, ``1`` when any failed, ``77`` (with
+a ``SKIPPED:`` line) when the catalog has no embedding model.
 """
 
 import asyncio
 import sys
 import time
+from collections.abc import Awaitable, Callable
 
 from venice_ai import NoMatchingModelError, VeniceClient
-from venice_ai.exceptions import InvalidRequestError
-from venice_ai.types.api import EmbeddingsResponse
+from venice_ai.exceptions import InvalidRequestError, VeniceError
+from venice_ai.types.api import EmbeddingModelSpec, EmbeddingsResponse
 
 #: Exit code for "skipped": a prerequisite is missing, not a failure.
 EXIT_SKIPPED = 77
+
+#: The input limit the API spec states for every model. The catalog lists its own
+#: ``maxInputTokens`` per model, some of them lower.
+SPEC_MAX_INPUT_TOKENS = 8192
 
 
 def valid_vectors(responses: list[EmbeddingsResponse], expected_count: int) -> bool:
@@ -62,7 +75,7 @@ async def simple_batch_embedding(client: VeniceClient, model: str) -> bool:
     response = await client.embeddings.create(model=model, input=texts)
     elapsed = time.perf_counter() - start_time
 
-    print(f"\n✅ Generated {len(response.data)} embeddings")
+    print(f"\nReceived {len(response.data)} embeddings")
     print(f"⏱️  Time taken: {elapsed:.3f} seconds")
     print(f"📊 Total tokens: {response.usage.total_tokens}")
 
@@ -104,7 +117,7 @@ async def chunked_batch_processing(client: VeniceClient, model: str) -> bool:
         responses.append(response)
         all_embeddings.extend(item.embedding for item in response.data)
         total_tokens += response.usage.total_tokens
-        print(f"   ✓ Chunk {chunk_num} complete ({response.usage.total_tokens} tokens)")
+        print(f"   Chunk {chunk_num} answered ({response.usage.total_tokens} tokens)")
     elapsed = time.perf_counter() - start_time
 
     print("\n📊 Statistics:")
@@ -129,7 +142,7 @@ async def concurrent_batch_processing(client: VeniceClient, model: str) -> bool:
     print(f"🔀 Processing {len(batches)} batches of {len(batches[0])} texts concurrently...")
 
     start_time = time.perf_counter()
-    # gather() raises the first failure, so a failed batch fails this section
+    # gather() raises the first failure, and main() reports it as this section's failure.
     responses = await asyncio.gather(
         *(client.embeddings.create(model=model, input=batch) for batch in batches)
     )
@@ -151,12 +164,13 @@ async def batch_with_error_handling(
     """Keep going when individual batches are rejected.
 
     Two batches are invalid on purpose: an empty list, which the SDK rejects
-    before sending, and a text longer than the model's input limit, which the
-    API rejects. Both raise :class:`InvalidRequestError`, whose message carries
-    the server's reason. The oversized text is sized from the model's catalog
-    ``maxInputTokens``, so it is over the limit for whichever model is in use.
-    The section passes only if exactly the invalid batches fail and every valid
-    batch succeeds.
+    before sending, and a text over the input limit, which the API rejects. Both
+    raise :class:`InvalidRequestError`, whose message carries the server's reason.
+    The API spec states a flat limit of 8192 tokens while the catalog lists one per
+    model, and which of them the server enforces on a model below 8192 is
+    unmeasured, so the oversized text is about twice the larger of the two. The
+    section passes only if exactly the invalid batches fail and every valid batch
+    succeeds.
     """
     print("\n🛡️ Batch Processing with Error Handling")
     print("-" * 40)
@@ -167,12 +181,12 @@ async def batch_with_error_handling(
         ([], False),  # empty input
     ]
     if max_input_tokens:
-        # Each repetition is at least two tokens, so this is about twice the limit.
-        oversized_text = "lorem ipsum " * max_input_tokens
-        print(f"📏 Model input limit: {max_input_tokens} tokens per text")
-        batches.append(([oversized_text], False))
+        print(f"📏 Model input limit in the catalog: {max_input_tokens} tokens per text")
     else:
-        print("ℹ️  The catalog lists no input limit for this model; skipping the oversized batch")
+        print("ℹ️  The catalog lists no input limit for this model; using the spec's limit")
+    # Each repetition is at least two tokens, so this is about twice the limit.
+    oversized_text = "lorem ipsum " * max(max_input_tokens or 0, SPEC_MAX_INPUT_TOKENS)
+    batches.append(([oversized_text], False))
     batches.append((["Final batch text 1", "Final batch text 2"], True))
 
     print(f"📦 Processing {len(batches)} batches ({sum(not v for _, v in batches)} invalid)...")
@@ -202,8 +216,9 @@ async def batch_with_error_handling(
             print("      invalid and should have been rejected")
             unexpected.append(i)
             continue
-        print(f"   ✅ Success ({len(response.data)} embeddings)")
-        if not valid_vectors([response], len(batch)):
+        if valid_vectors([response], len(batch)):
+            print(f"   ✅ Success ({len(response.data)} embeddings)")
+        else:
             unexpected.append(i)
 
     print("\n📊 Results:")
@@ -252,7 +267,7 @@ async def optimized_large_dataset(client: VeniceClient, model: str) -> bool:
             all_responses.append(response)
             all_embeddings.extend(item.embedding for item in response.data)
             total_tokens += response.usage.total_tokens
-        print(f"   ✓ Group {group_num} complete")
+        print(f"   Group {group_num} answered")
 
     elapsed = time.perf_counter() - start_time
 
@@ -319,20 +334,28 @@ async def main() -> int:
             print(f"SKIPPED: no embedding model in the catalog ({e})")
             return EXIT_SKIPPED
         spec = (await client.models.get(model)).model_spec
-        max_input_tokens = getattr(spec, "maxInputTokens", None)
+        max_input_tokens = spec.maxInputTokens if isinstance(spec, EmbeddingModelSpec) else None
         print(f"📍 Using embedding model: {model}\n")
 
-        results = [
-            ("simple_batch_embedding", await simple_batch_embedding(client, model)),
-            ("chunked_batch_processing", await chunked_batch_processing(client, model)),
-            ("concurrent_batch_processing", await concurrent_batch_processing(client, model)),
+        sections: list[tuple[str, Callable[[], Awaitable[bool]]]] = [
+            ("simple_batch_embedding", lambda: simple_batch_embedding(client, model)),
+            ("chunked_batch_processing", lambda: chunked_batch_processing(client, model)),
+            ("concurrent_batch_processing", lambda: concurrent_batch_processing(client, model)),
             (
                 "batch_with_error_handling",
-                await batch_with_error_handling(client, model, max_input_tokens),
+                lambda: batch_with_error_handling(client, model, max_input_tokens),
             ),
-            ("optimized_large_dataset", await optimized_large_dataset(client, model)),
-            ("batch_deduplication", await batch_deduplication(client, model)),
+            ("optimized_large_dataset", lambda: optimized_large_dataset(client, model)),
+            ("batch_deduplication", lambda: batch_deduplication(client, model)),
         ]
+        # One section's failed request fails that section; the others still run.
+        results: list[tuple[str, bool]] = []
+        for name, section in sections:
+            try:
+                results.append((name, await section()))
+            except VeniceError as e:
+                print(f"\n❌ {name}: {type(e).__name__}: {e}")
+                results.append((name, False))
 
     failed = [name for name, ok in results if not ok]
     if failed:

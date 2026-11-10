@@ -19,6 +19,8 @@ import pytest
 from venice_ai.models.selection import (
     CHAT_INPUT_WEIGHT,
     CHAT_OUTPUT_WEIGHT,
+    CheapestMusicResult,
+    CheapestVideoResult,
     cheapest_model_strategy,
     cheapest_selector,
     model_price,
@@ -565,6 +567,77 @@ class TestStrictCheapestChat:
         assert await _resource(REASONING_CHEAPEST_CATALOG).resolve_chat() == "plain-mid"
 
 
+E2EE_DEFAULT_CATALOG = [
+    _chat("e2ee-default", 0.50, 1.00, traits=["default", "function_calling_default"], e2ee=True),
+    _chat("e2ee-tiny", 0.01, 0.02, e2ee=True),
+    _chat("plain-mid", 0.20, 0.60),
+    _chat("plain-low", 0.10, 0.40),
+]
+
+
+class TestExcludeE2EE:
+    async def test_default_ranking_can_land_on_an_e2ee_model(self) -> None:
+        assert await _resource(E2EE_DEFAULT_CATALOG).resolve_chat() == "e2ee-default"
+
+    async def test_exclude_e2ee_applies_under_default_ranking(self) -> None:
+        model = await _resource(E2EE_DEFAULT_CATALOG).resolve_chat(exclude_e2ee=True)
+        assert model == "plain-mid"
+
+    async def test_exclude_e2ee_via_resolve(self) -> None:
+        model = await _resource(E2EE_DEFAULT_CATALOG).resolve(type="chat", exclude_e2ee=True)
+        assert model == "plain-mid"
+
+    async def test_exclude_e2ee_applies_with_beta_models_allowed(self) -> None:
+        model = await _resource(E2EE_DEFAULT_CATALOG).resolve_chat(
+            exclude_e2ee=True, exclude_beta=False
+        )
+        assert model == "plain-mid"
+
+    async def test_exclude_e2ee_with_preferred_models_and_beta_allowed(self) -> None:
+        model = await _resource(E2EE_DEFAULT_CATALOG).resolve_chat(
+            exclude_e2ee=True, exclude_beta=False, preferred_models=["e2ee-tiny", "plain-low"]
+        )
+        assert model == "plain-low"
+
+    async def test_exclude_e2ee_with_function_calling_filter(self) -> None:
+        model = await _resource(E2EE_DEFAULT_CATALOG).resolve_chat(
+            exclude_e2ee=True, require_function_calling=True
+        )
+        assert model == "plain-mid"
+
+    async def test_exclude_e2ee_with_cheapest(self) -> None:
+        model = await _resource(E2EE_DEFAULT_CATALOG).resolve_chat(
+            exclude_e2ee=True, prefer="cheapest"
+        )
+        assert model == "plain-low"
+
+    async def test_id_prefix_counts_when_the_catalog_flag_is_missing(self) -> None:
+        catalog = [
+            _chat("e2ee-unflagged", 0.50, 1.00, traits=["default"]),
+            _chat("plain-mid", 0.20, 0.60),
+        ]
+        assert await _resource(catalog).resolve_chat(exclude_e2ee=True) == "plain-mid"
+
+    async def test_preferred_model_cannot_bypass_it(self) -> None:
+        model = await _resource(E2EE_DEFAULT_CATALOG).resolve_chat(
+            exclude_e2ee=True, preferred_models=["e2ee-tiny", "plain-low"]
+        )
+        assert model == "plain-low"
+
+    @pytest.mark.parametrize("prefer", [None, "cheapest"])
+    async def test_conflict_with_require_e2ee_raises(self, prefer: Any) -> None:
+        resource = _resource(E2EE_DEFAULT_CATALOG)
+        with pytest.raises(ValueError, match="exclude_e2ee"):
+            await resource.resolve_chat(exclude_e2ee=True, require_e2ee=True, prefer=prefer)
+
+    async def test_no_match_names_the_filter(self) -> None:
+        from venice_ai.exceptions import NoMatchingModelError
+
+        catalog = [_chat("e2ee-only", 0.50, 1.00, e2ee=True)]
+        with pytest.raises(NoMatchingModelError, match="exclude_e2ee=True"):
+            await _resource(catalog).resolve_chat(exclude_e2ee=True)
+
+
 class TestImageFilters:
     CATALOG = [
         _image(
@@ -869,6 +942,24 @@ class TestCheapestVideoParams:
         params = cheapest_video_params(typed, audio=None)
         assert params == {"duration_seconds": "5s", "resolution": "768P", "aspect_ratio": "16:9"}
 
+    def test_given_ratio_is_omitted_when_the_model_lists_none(self) -> None:
+        from venice_ai.models.selection import cheapest_video_params
+
+        constraints = {"durations": ["5s"], "resolutions": ["720p"], "aspect_ratios": []}
+        params = cheapest_video_params(constraints, aspect_ratio="9:16")
+        assert params == {"duration_seconds": "5s", "resolution": "720p"}
+
+        typed = {"durations": ["5s"], "aspect_ratios": None}
+        assert "aspect_ratio" not in cheapest_video_params(typed, aspect_ratio="9:16")
+
+    def test_given_ratio_is_sent_when_listed_and_rejected_when_not(self) -> None:
+        from venice_ai.models.selection import cheapest_video_params
+
+        constraints = {"durations": ["5s"], "aspect_ratios": ["16:9", "9:16"]}
+        assert cheapest_video_params(constraints, aspect_ratio="9:16")["aspect_ratio"] == "9:16"
+        with pytest.raises(ValueError, match="aspect ratio"):
+            cheapest_video_params(constraints, aspect_ratio="1:1")
+
     def test_audio_only_sent_when_configurable(self) -> None:
         from venice_ai.models.selection import cheapest_video_params
 
@@ -1107,3 +1198,109 @@ class TestImageToVideoInputModes:
         assert await resource.resolve_video(video_type="image-to-video") == (
             "grok-imagine-1-5-lite-image-to-video"
         )
+
+
+class TestQuoteFailures:
+    async def test_video_failed_quote_is_readable_as_the_exception(self) -> None:
+        from venice_ai.exceptions import RateLimitError
+
+        denied = RateLimitError("slow down", response=None, body=None)
+        resource, _ = _video_resource(VIDEO_CATALOG)
+        real_quote = resource._client.video.quote
+
+        async def quote(*, model: str, **params: Any) -> Any:
+            if model == "ltx-text-to-video":
+                raise denied
+            return await real_quote(model=model, **params)
+
+        resource._client.video.quote = quote
+        result = await resource.resolve_cheapest_video(video_type="text-to-video")
+        assert result.quote_failures == {"ltx-text-to-video": denied}
+        assert result.skipped["ltx-text-to-video"].startswith("quote failed")
+
+    async def test_video_candidate_never_quoted_is_not_a_quote_failure(self) -> None:
+        resource, _ = _video_resource(VIDEO_CATALOG)
+        result = await resource.resolve_cheapest_video()
+        assert "auto-only-text-to-video" in result.skipped
+        assert result.quote_failures == {}
+
+    async def test_music_failed_quote_is_readable_as_the_exception(self) -> None:
+        from venice_ai.exceptions import InternalServerError
+
+        denied = InternalServerError("503", response=None, body=None)
+        resource, _ = _music_resource()
+        real_quote = resource._client.music.quote
+
+        async def quote(*, model: str, **params: Any) -> Any:
+            if model == "ace-step-15":
+                raise denied
+            return await real_quote(model=model, **params)
+
+        resource._client.music.quote = quote
+        result = await resource.resolve_cheapest_music(duration_seconds=10)
+        assert result.quote_failures == {"ace-step-15": denied}
+        assert "minimax-music-v2" in result.skipped
+        assert "minimax-music-v2" not in result.quote_failures
+
+    async def test_a_directly_built_result_has_no_failures(self) -> None:
+        from venice_ai.models.selection import CheapestMusicResult, CheapestVideoResult
+
+        assert CheapestVideoResult(model="m", quote_usd=1.0).quote_failures == {}
+        assert CheapestMusicResult(model="m", quote_usd=1.0).quote_failures == {}
+
+    async def test_result_with_failures_still_serializes_for_the_cli(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import json
+
+        from venice_ai.cli.commands.models.resolve import _render_cheapest_video
+
+        quotes = {k: v for k, v in QUOTES.items() if k != "ltx-text-to-video"}
+        resource, _ = _video_resource(VIDEO_CATALOG, quotes)
+        result = await resource.resolve_cheapest_video(video_type="text-to-video")
+        assert result.quote_failures
+        _render_cheapest_video(result, output_json=True)
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["skipped"]["ltx-text-to-video"].startswith("quote failed")
+        assert not [key for key in payload if "quote_failures" in key]
+
+    @pytest.mark.parametrize("cls", [CheapestVideoResult, CheapestMusicResult])
+    async def test_quote_failures_survive_dataclasses_replace(self, cls: type) -> None:
+        import dataclasses
+
+        from venice_ai.exceptions import RateLimitError
+
+        denied = RateLimitError("slow down", response=None, body=None)
+        result = cls(model="m", quote_usd=1.0)
+        result._quote_failures["x"] = denied
+
+        copied = dataclasses.replace(result, quote_usd=2.0)
+
+        assert copied.quote_usd == 2.0
+        assert copied.quote_failures == {"x": denied}
+
+    @pytest.mark.parametrize("cls", [CheapestVideoResult, CheapestMusicResult])
+    async def test_quote_failures_stay_out_of_equality_and_repr(self, cls: type) -> None:
+        from venice_ai.exceptions import RateLimitError
+
+        result = cls(model="m", quote_usd=1.0)
+        result._quote_failures["x"] = RateLimitError("sk-secret", response=None, body=None)
+
+        assert result == cls(model="m", quote_usd=1.0)
+        assert "sk-secret" not in repr(result)
+
+    @pytest.mark.parametrize("cls", [CheapestVideoResult, CheapestMusicResult])
+    async def test_asdict_and_deepcopy_survive_an_sdk_error_in_quote_failures(
+        self, cls: type
+    ) -> None:
+        import copy
+        from dataclasses import asdict
+
+        from venice_ai.exceptions import InvalidRequestError
+
+        denied = InvalidRequestError("bad", response=MagicMock(status_code=400), body=None)
+        result = cls(model="m", quote_usd=1.0)
+        result._quote_failures["x"] = denied
+
+        assert asdict(result)["model"] == "m"
+        assert copy.deepcopy(result).quote_failures == {"x": denied}

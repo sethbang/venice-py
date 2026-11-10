@@ -10,6 +10,7 @@ patched class) cannot tell a wired setting from a dead one.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -17,11 +18,13 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import patch
 
+import aiohttp
 import pytest
 from aiohttp import web
 
-from venice_ai import VeniceClient
+from venice_ai import VeniceClient, _constants
 from venice_ai.core.config import HttpClientConfig, VeniceAIConfig
+from venice_ai.exceptions import APITimeoutError
 from venice_ai.factory import VeniceClientFactory, create_developer_client
 from venice_ai.middleware import retry as retry_module
 from venice_ai.middleware.retry import RetryOptions
@@ -418,3 +421,126 @@ def test_default_keepalive_value_does_not_warn() -> None:
         warnings.simplefilter("error")
         HttpClientConfig()
         HttpClientConfig(max_keepalive_connections=20)
+
+
+# ---------------------------------------------------------------------------
+# config.http_client.timeout on a client built directly
+# ---------------------------------------------------------------------------
+
+
+def _timeout_config(seconds: float) -> VeniceAIConfig:
+    return VeniceAIConfig(api_key="sk-test", http_client=HttpClientConfig(timeout=seconds))
+
+
+def test_direct_client_with_config_uses_the_configured_timeout() -> None:
+    client = VeniceClient(config=_timeout_config(17.0))
+    assert client.timeout == 17.0
+
+
+def test_explicit_timeout_wins_over_the_configured_timeout() -> None:
+    client = VeniceClient(config=_timeout_config(17.0), timeout=5.0)
+    assert client.timeout == 5.0
+
+
+def test_explicit_timeout_equal_to_the_default_value_still_wins() -> None:
+    client = VeniceClient(config=_timeout_config(17.0), timeout=_constants.DEFAULT_TIMEOUT.total)
+    assert client.timeout == _constants.DEFAULT_TIMEOUT.total
+
+
+def test_default_timeout_wins_over_the_configured_timeout() -> None:
+    client = VeniceClient(
+        config=_timeout_config(17.0), default_timeout=aiohttp.ClientTimeout(total=3.0)
+    )
+    assert client.timeout == 3.0
+
+
+def test_client_without_config_keeps_the_default_timeout() -> None:
+    client = VeniceClient(api_key="sk-test")
+    assert client.timeout == _constants.DEFAULT_TIMEOUT.total
+
+
+async def test_configured_timeout_bounds_a_real_request() -> None:
+    release = asyncio.Event()
+
+    async def stalls(_request: web.Request) -> web.Response:
+        await release.wait()
+        return web.json_response({})
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", stalls)
+    runner = web.AppRunner(app, shutdown_timeout=0.1)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+    config = VeniceAIConfig(
+        api_key="sk-test",
+        api_base_url=f"http://127.0.0.1:{port}",
+        http_client=HttpClientConfig(timeout=0.1, max_retries=0),
+    )
+    try:
+        async with VeniceClient(config=config) as client:
+            with pytest.raises(APITimeoutError):
+                await asyncio.wait_for(client.get("models"), timeout=5)
+    finally:
+        release.set()
+        await runner.cleanup()
+
+
+def test_config_without_a_timeout_keeps_the_client_default() -> None:
+    client = VeniceClient(config=VeniceAIConfig(api_key="sk-test"))
+    assert client.timeout == _constants.DEFAULT_TIMEOUT.total
+
+
+def test_http_client_section_without_a_timeout_keeps_the_client_default() -> None:
+    config = VeniceAIConfig(api_key="sk-test", http_client=HttpClientConfig(max_connections=5))
+    assert VeniceClient(config=config).timeout == _constants.DEFAULT_TIMEOUT.total
+
+
+def test_timeout_set_to_the_field_default_counts_as_set() -> None:
+    config = _timeout_config(HttpClientConfig.model_fields["timeout"].default)
+    assert VeniceClient(config=config).timeout == 30.0
+
+
+def test_timeout_assigned_after_construction_counts_as_set() -> None:
+    config = VeniceAIConfig(api_key="sk-test")
+    config.http_client.timeout = 17.0
+    assert VeniceClient(config=config).timeout == 17.0
+
+
+def test_timeout_from_the_environment_counts_as_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("pydantic_settings")
+    monkeypatch.setenv("VENICE_HTTP_CLIENT__TIMEOUT", "7")
+    assert VeniceClient(config=VeniceAIConfig(api_key="sk-test")).timeout == 7.0
+
+
+def test_timeout_from_a_json_environment_section_counts_as_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("pydantic_settings")
+    monkeypatch.setenv("VENICE_HTTP_CLIENT", '{"timeout": 9}')
+    assert VeniceClient(config=VeniceAIConfig(api_key="sk-test")).timeout == 9.0
+
+
+def test_explicit_timeout_wins_over_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("pydantic_settings")
+    monkeypatch.setenv("VENICE_HTTP_CLIENT__TIMEOUT", "7")
+    client = VeniceClient(config=VeniceAIConfig(api_key="sk-test"), timeout=5.0)
+    assert client.timeout == 5.0
+
+
+def test_explicit_timeout_wins_over_an_unset_config() -> None:
+    client = VeniceClient(config=VeniceAIConfig(api_key="sk-test"), timeout=5.0)
+    assert client.timeout == 5.0
+
+
+def test_request_from_a_config_without_a_timeout_is_sent_with_the_client_default() -> None:
+    client = VeniceClient(config=VeniceAIConfig(api_key="sk-test"))
+    kwargs = client._build_request_kwargs("GET", "models", None, None, {}, None, None)
+    assert kwargs["timeout"].total == _constants.DEFAULT_TIMEOUT.total
+
+
+def test_factory_passes_the_config_field_value_when_unset() -> None:
+    config = VeniceAIConfig(api_key="sk-test")
+    client = VeniceClientFactory.create_client(config=config)
+    assert client.timeout == config.http_client.timeout == 30.0

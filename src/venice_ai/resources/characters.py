@@ -222,7 +222,8 @@ class Characters(APIResource["VeniceClient"]):
 
         Wraps :meth:`list` for unbounded enumeration. Termination: this
         endpoint has no pagination envelope, so the iterator stops on the
-        first short page (``len(items) < page_size``).
+        first short page (``len(items) < page_size``), or on a page that adds
+        no character the walk has not yet yielded. Each slug is yielded once.
 
         Filter kwargs mirror :meth:`list`. Each per-page call passes the
         same filters with growing ``offset``.
@@ -256,7 +257,9 @@ class Characters(APIResource["VeniceClient"]):
             items = list(response.data)
             return _PageResult(items=items, has_more=len(items) == page_size)
 
-        return Paginator(_fetch_page, page_size=page_size, max_items=max_items)
+        return Paginator(
+            _fetch_page, page_size=page_size, max_items=max_items, key=lambda ch: ch.slug
+        )
 
     async def get(
         self,
@@ -402,8 +405,9 @@ class Characters(APIResource["VeniceClient"]):
         """Lazily iterate every review for *slug*.
 
         Wraps :meth:`reviews` for unbounded enumeration. Termination uses
-        the response's ``pagination.totalPages`` field, so iteration stops
-        precisely when the server says there's nothing left.
+        the response's ``pagination.totalPages`` field against the page number
+        requested, so iteration stops when the server says there's nothing
+        left, or on a page that adds no review the walk has not yet yielded.
 
         :param slug: Character slug whose reviews to iterate.
         :param page_size: Server page size (default 100, max 100).
@@ -418,7 +422,9 @@ class Characters(APIResource["VeniceClient"]):
         async def _fetch_page(page_index: int) -> _PageResult[CharacterReview]:
             response = await self.reviews(slug, page=page_index + 1, page_size=page_size)
             items = list(response.data)
-            has_more = response.pagination.page < response.pagination.totalPages
+            has_more = page_index + 1 < response.pagination.totalPages
             return _PageResult(items=items, has_more=has_more)
 
-        return Paginator(_fetch_page, page_size=page_size, max_items=max_items)
+        return Paginator(
+            _fetch_page, page_size=page_size, max_items=max_items, key=lambda review: review.id
+        )

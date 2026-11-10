@@ -130,6 +130,7 @@ class ModelComparator:
                     if hasattr(m.model_spec, "pricing")
                     and hasattr(m.model_spec.pricing, "input")
                     and m.model_spec.pricing.input
+                    and m.model_spec.pricing.input.diem is not None
                     else "N/A"
                 ),
             )
@@ -140,6 +141,7 @@ class ModelComparator:
                     if hasattr(m.model_spec, "pricing")
                     and hasattr(m.model_spec.pricing, "output")
                     and m.model_spec.pricing.output
+                    and m.model_spec.pricing.output.diem is not None
                     else "N/A"
                 ),
             )

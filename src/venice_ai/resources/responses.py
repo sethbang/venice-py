@@ -189,7 +189,8 @@ class Responses(APIResource["VeniceClient"]):
                 or ``{"format": {"type": "json_object"}}``. The output stays a
                 JSON string in the message text. A model without structured
                 output support returns 400.
-            venice_parameters: Venice-specific request parameters.
+            venice_parameters: Venice-specific request parameters. Only the
+                fields set here are sent.
             stream: When ``True``, returns an async iterator of
                 :class:`ResponsesStreamEvent` chunks parsed from
                 Server-Sent Events. Default ``False`` returns a single
@@ -249,11 +250,14 @@ class Responses(APIResource["VeniceClient"]):
             anon_user_id=anon_user_id,
         )
         body = request.model_dump(exclude_none=True, by_alias=True)
-        # /responses documents only a subset of venice_parameters; the SDK reuses
-        # the shared chat VeniceParameters model, so drop the chat-only keys the
-        # Responses endpoint does not document (swagger ResponsesRequest).
-        _vp = body.get("venice_parameters")
-        if isinstance(_vp, dict):
+        # Only the venice_parameters the caller set go on the wire, so a default
+        # on the model cannot contradict web_search=True. /responses documents
+        # only a subset of them; the SDK reuses the shared chat VeniceParameters
+        # model, so drop the chat-only keys the Responses endpoint does not
+        # document (swagger ResponsesRequest).
+        body.pop("venice_parameters", None)
+        if request.venice_parameters is not None:
+            _vp = request.venice_parameters.to_wire()
             for _k in (
                 "strip_thinking_response",
                 "disable_thinking",
@@ -261,6 +265,8 @@ class Responses(APIResource["VeniceClient"]):
                 "enable_x_search",
             ):
                 _vp.pop(_k, None)
+            if _vp:
+                body["venice_parameters"] = _vp
 
         if stream:
             body["stream"] = True

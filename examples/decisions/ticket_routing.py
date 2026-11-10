@@ -32,20 +32,46 @@ Three tickets, each with what the example checks:
    confidence above the floor and must not be judged urgent, so ticket 1's
    urgency is measured against a real contrast.
 
+Three more sections show the rest of the request:
+
+* A chat log sent as structured ``state`` rather than a string, checked first
+  against the token ceilings the catalog lists (``maxStateTokens``,
+  ``maxTotalTokens``), with :class:`NoulCriteria` labelling what yes and no mean.
+* The whole ``probabilities`` distribution behind each answer, printed for every
+  ticket and checked to sum to 1.
+* ``images``: one red and one blue image generated here, asked the same question.
+  Not every decision model accepts images, and a model that refuses them skips that
+  section with a ``Section skipped:`` line.
+
 **Beta.** Venice documents ``POST /decisions`` as unstable: request and
 response schemas may change without notice.
+
+Cost: 6 requests at about $0.042 per million input tokens with no charge for output,
+the catalog's price for the only decision model listed on 2026-09-28. A few thousand
+tokens in all comes to well under $0.001. How an image is counted in tokens is not
+published, so the two image requests are the least certain part.
 """
 
 import asyncio
 import math
+import struct
 import sys
+import zlib
 from dataclasses import dataclass
 
 from venice_ai import NoMatchingModelError, VeniceClient
-from venice_ai.exceptions import PermissionDeniedError, VeniceError
+from venice_ai.exceptions import (
+    InvalidRequestError,
+    PermissionDeniedError,
+    UnprocessableEntityError,
+    VeniceError,
+)
 from venice_ai.types.api import (
     ChoiceAnswer,
     ChoiceQuestion,
+    DecisionImage,
+    DecisionModelSpec,
+    NoulCriteria,
     NoulQuestion,
     ScoreAnswer,
     ScoreQuestion,
@@ -118,6 +144,27 @@ CONFIDENCE_FLOOR = 0.9
 #: Urgency at or above this routes as P1, below it as P3.
 URGENT_THRESHOLD = 0.7
 
+#: How far a probability distribution may stray from summing to 1 (rounding).
+PROBABILITY_SUM_TOLERANCE = 0.01
+
+#: A chat log as structured state: the model reads the fields, not a flattened string.
+CHAT_LOG = [
+    {"role": "customer", "text": "My invoice shows the wrong company name."},
+    {"role": "agent", "text": "Thanks, I have corrected it and sent you a new invoice."},
+    {"role": "customer", "text": "Got it, that looks right now. Thank you!"},
+]
+
+RESOLVED_QUESTION = {
+    "resolved": NoulQuestion(
+        instructions="Was the customer's problem resolved by the end of this conversation?",
+        # NoulCriteria says what each end of the scale means for this question.
+        criteria=NoulCriteria(
+            true="The customer confirms the problem is gone",
+            false="The problem is still open or the customer is still waiting",
+        ),
+    ),
+}
+
 
 def describe_score(answer: ScoreAnswer) -> str:
     """Describe a score that may land between two rubric levels."""
@@ -146,9 +193,14 @@ async def route_ticket(client: VeniceClient, model: str, ticket: Ticket) -> Judg
     # `noul` is a probability, not a bool — `if urgency:` is true for 0.02.
     print(f"   Urgent:      {urgency:.0%}")
     print(f"   Team:        {team.choice}  (confidence {team.confidence:.0%})")
+    # choice is only the most likely option; a close second can matter more than it.
+    spread = ", ".join(f"{name} {p:.0%}" for name, p in team.probabilities.items())
+    print(f"                {spread}")
     # A four-level rubric can return 2.4: a probability-weighted position, so
     # describe it by its neighbouring levels rather than indexing with int(score).
     print(f"   Frustration: {mood.score:.2f}  ({describe_score(mood)})")
+    spread = ", ".join(f"level {level} {p:.0%}" for level, p in mood.probabilities.items())
+    print(f"                {spread}")
 
     print("   → ", end="")
     if team.confidence >= CONFIDENCE_FLOOR:
@@ -184,6 +236,19 @@ def check_judgment(ticket: Ticket, judgment: Judgment) -> list[str]:
         problems.append(f"confidence {judgment.team.confidence} is not a probability")
     if not low <= judgment.mood.score <= high:
         problems.append(f"frustration {judgment.mood.score} is outside the {low}..{high} rubric")
+    for name, spread in (
+        ("team", judgment.team.probabilities),
+        ("frustration", judgment.mood.probabilities),
+    ):
+        if abs(sum(spread.values()) - 1.0) > PROBABILITY_SUM_TOLERANCE:
+            problems.append(f"{name} probabilities sum to {sum(spread.values())}, not 1")
+    top_team = max(judgment.team.probabilities, key=lambda name: judgment.team.probabilities[name])
+    if judgment.team.probabilities[top_team] > judgment.team.probabilities.get(
+        judgment.team.choice, 0.0
+    ):
+        problems.append(
+            f"choice {judgment.team.choice!r} is not the most likely team, {top_team!r}"
+        )
 
     if ticket.team is not None:
         if judgment.team.choice != ticket.team:
@@ -199,12 +264,91 @@ def check_judgment(ticket: Ticket, judgment: Judgment) -> list[str]:
     return problems
 
 
+async def structured_state(client: VeniceClient, model: str) -> bool | None:
+    """Judge a chat log sent as structured data, within the model's token ceilings.
+
+    The catalog lists two ceilings: ``maxStateTokens`` for the state plus the longest
+    question, and ``maxTotalTokens`` for the state plus every question. A real
+    application would compare its own token estimate with them before sending.
+
+    Returns ``None`` when the model judged the log otherwise than expected: that is
+    the model's call, not a fault in the request.
+    """
+    print("\n🗂️ Structured state")
+
+    spec = (await client.models.get(model)).model_spec
+    if isinstance(spec, DecisionModelSpec):
+        print(
+            f"   Ceilings: maxStateTokens={spec.maxStateTokens}, maxTotalTokens={spec.maxTotalTokens}"
+        )
+    response = await client.decisions.create(
+        model=model, state=CHAT_LOG, questions=RESOLVED_QUESTION
+    )
+    resolved = response.noul("resolved")
+    print(f"   Resolved: {resolved:.0%} ({response.usage.input_tokens} tokens in)")
+    if resolved < URGENT_THRESHOLD:
+        print(f"   ℹ️ The customer confirmed the fix, but resolved was only {resolved:.0%}")
+        return None
+    return True
+
+
+def solid_png(red: int, green: int, blue: int, size: int = 64) -> bytes:
+    """Build a small single-color PNG with the standard library."""
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    # Each row starts with a filter byte of 0, followed by RGB triples.
+    row = b"\x00" + bytes((red, green, blue)) * size
+    header = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(row * size))
+        + chunk(b"IEND", b"")
+    )
+
+
+async def image_input(client: VeniceClient, model: str) -> bool | None:
+    """Ask the same question about a red and a blue image.
+
+    The contrast shows the model looked at the image: one fixed answer could not
+    satisfy both. Returns ``None`` (section skipped) when the model refuses images.
+    """
+    print("\n🖼️ Image input")
+
+    question = {"is_red": NoulQuestion(instructions="Is this image mainly the color red?")}
+    answers: dict[str, float] = {}
+    for name, png in (("red", solid_png(220, 30, 30)), ("blue", solid_png(30, 30, 220))):
+        try:
+            response = await client.decisions.create(
+                model=model,
+                state="An image attached to a support ticket.",
+                questions=question,
+                images=[DecisionImage.from_bytes(png, content_type="image/png")],
+            )
+        except (InvalidRequestError, UnprocessableEntityError) as e:
+            print(f"Section skipped: {model} did not accept the image ({e})")
+            return None
+        answers[name] = response.noul("is_red")
+        print(f"   {name} image: {answers[name]:.0%} red")
+    if answers["red"] <= answers["blue"]:
+        print("   ℹ️ The red image did not score above the blue one, which is the model's call")
+        return None
+    return True
+
+
 async def main() -> int:
     """Run the ticket-routing example.
 
     Returns ``0`` when every ticket was answered and each check passed, ``1``
     when a check failed, and ``77`` (with a ``SKIPPED:`` line) when this
-    account has no decision model.
+    account has no decision model, or the API refuses this key the routing calls.
     """
     print("🚀 Venice AI Decision Models")
     print("=" * 50)
@@ -216,8 +360,8 @@ async def main() -> int:
         try:
             model = await client.models.resolve_decision(prefer="cheapest")
         except NoMatchingModelError as e:
-            # Decision models are beta and plan-gated, so many accounts see none.
-            print(f"SKIPPED: no decision model is available on this account ({e})")
+            # Decision models are beta, so the catalog may list none.
+            print(f"SKIPPED: the catalog lists no decision model ({e})")
             return EXIT_SKIPPED
 
         print(f"Model: {model}")
@@ -228,7 +372,7 @@ async def main() -> int:
             try:
                 judgment = await route_ticket(client, model, ticket)
             except PermissionDeniedError as e:
-                print(f"SKIPPED: this account may not call decision models ({e})")
+                print(f"SKIPPED: the API refused this key the decision model ({e})")
                 return EXIT_SKIPPED
             except VeniceError as e:
                 print(f"   ❌ API error: {type(e).__name__}: {e}")
@@ -238,6 +382,24 @@ async def main() -> int:
             judgments.append(judgment)
             for problem in check_judgment(ticket, judgment):
                 print(f"   ❌ {problem}")
+                failures += 1
+
+        outcomes: dict[str, bool | None] = {}
+        for name, section in (
+            ("structured_state", structured_state),
+            ("image_input", image_input),
+        ):
+            try:
+                outcome = await section(client, model)
+            except PermissionDeniedError as e:
+                print(f"Section skipped: the API refused this key {name} ({e})")
+                continue
+            except VeniceError as e:
+                print(f"   ❌ {name}: {type(e).__name__}: {e}")
+                failures += 1
+                continue
+            outcomes[name] = outcome
+            if outcome is False:
                 failures += 1
 
     # Frustration is relative: the furious ticket must sound angrier than the calm one.
@@ -266,6 +428,11 @@ async def main() -> int:
     print("   - .noul() / .choice() / .score() accessors to narrow the union")
     print("   - Gating on .confidence rather than trusting the top answer")
     print("   - Urgency and frustration checked against a calm control ticket")
+    if outcomes.get("structured_state"):
+        print("   - Structured state, NoulCriteria and the catalog's token ceilings")
+    print("   - The full probabilities behind each answer")
+    if outcomes.get("image_input"):
+        print("   - Image input")
     return 0
 
 

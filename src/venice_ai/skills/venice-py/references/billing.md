@@ -12,11 +12,13 @@ balance = await client.billing.get_balance()
 #   balance.balances             : BillingBalances | None    ← NESTED, can be None
 #   balance.diem_epoch_allocation: float | None
 # BillingBalances:
-#   balance.balances.usd  : float | None
-#   balance.balances.diem : float | None
+#   balance.balances.usd            : float | None
+#   balance.balances.diem           : float | None
+#   balance.balances.bundledCredits : float | None
+#   balance.balances.earnedCredits  : float | None
 ```
 
-**The `.balances.` nesting is the trap.** `balance.usd` does not exist — agents who flatten the access path get an `AttributeError` (or worse, a silent `None` from a defensive `getattr`). The wire fields are camelCase (`canConsume`, `consumptionCurrency`, `diemEpochAllocation`), but `populate_by_name=True` lets you read snake_case attributes.
+**The `.balances.` nesting is the trap.** `balance.usd` does not exist — agents who flatten the access path get an `AttributeError` (or worse, a silent `None` from a defensive `getattr`). The wire fields are camelCase (`canConsume`, `consumptionCurrency`, `diemEpochAllocation`), but `populate_by_name=True` lets you read snake_case attributes. `BillingBalances` has no such aliases: `bundledCredits` and `earnedCredits` are the attribute names, and `balance.balances.bundled_credits` raises `AttributeError`.
 
 ```python
 balance = await client.billing.get_balance()

@@ -655,7 +655,9 @@ class TestInteractiveWizardErrorHandling:
         error_client.__aexit__ = AsyncMock(return_value=None)
 
         with patch("venice_ai.cli.commands.image.wizard.VeniceClient", return_value=error_client):
-            await _interactive_image_generation(mock_click_context)
+            with pytest.raises(SystemExit) as exit_info:
+                await _interactive_image_generation(mock_click_context)
+            assert exit_info.value.code == 1
 
             # Verify error message was displayed
             mock_console_functions["error"].assert_called()
@@ -706,7 +708,9 @@ class TestInteractiveWizardErrorHandling:
         empty_client.__aexit__ = AsyncMock(return_value=None)
 
         with patch("venice_ai.cli.commands.image.wizard.VeniceClient", return_value=empty_client):
-            await _interactive_image_generation(mock_click_context)
+            with pytest.raises(SystemExit) as exit_info:
+                await _interactive_image_generation(mock_click_context)
+            assert exit_info.value.code == 1
 
             # Verify error message was displayed
             mock_console_functions["error"].assert_called_with(

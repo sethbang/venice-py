@@ -326,10 +326,10 @@ async def test_retrieve_invalid_json_raises_after_logging(music_resource, caplog
 
 
 @pytest.mark.asyncio
-async def test_retrieve_invalid_json_logs_a_preview_of_the_body_already_read(
+async def test_retrieve_invalid_json_logs_the_length_of_the_body_already_read(
     music_resource, caplog
 ) -> None:
-    """A body that is not JSON is previewed from the bytes read once, not read again."""
+    """A body that is not JSON is measured from the bytes read once, and not shown."""
     resource, client = music_resource
     raw = _make_raw_response(
         "irrelevant", content_type="application/json", raise_on_json=ValueError("nope")
@@ -341,7 +341,8 @@ async def test_retrieve_invalid_json_logs_a_preview_of_the_body_already_read(
     with caplog.at_level("ERROR"), pytest.raises(ValueError, match="nope"):
         await resource.retrieve(model="elevenlabs-music", queue_id="q1")
 
-    assert any("<html>not json</html>" in r.message for r in caplog.records)
+    assert any("body length: 21" in r.message for r in caplog.records)
+    assert not any("<html>" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

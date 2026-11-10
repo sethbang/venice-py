@@ -56,7 +56,7 @@ headers = {"X-Sign-In-With-X": auth.build_header()}    # per request, not per se
 
 Reuse the `X402Auth` *instance* freely — it holds the key and derives the address, and building one is the part worth keeping. It is the *envelope* that must never be shared between requests. Signing is a single local elliptic-curve operation, negligible beside the network round trip it authenticates, so there is nothing here worth optimising away.
 
-`VeniceClient(auth=...)` signs one envelope per request for you, retries included. The retry middleware replays the same request object on a retryable 5xx (`500`, `502`, `503`, `504` by default), so the SDK re-signs the `X-Sign-In-With-X` header in place before each retried attempt. A wallet-authenticated call that hits a transient 5xx retries normally.
+`VeniceClient(api_key="", auth=...)` signs one envelope per request for you, retries included. The retry middleware replays the same request object on a retryable 5xx (`500`, `502`, `503`, `504` by default), so the SDK re-signs the `X-Sign-In-With-X` header in place before each retried attempt. A wallet-authenticated call that hits a transient 5xx retries normally.
 
 That applies to a per-call wallet, and to rate-limit retries as well as 5xx ones. `client.x402.balance(auth=other_wallet)` signs a fresh envelope for every attempt with `other_wallet`, never the wallet the client was constructed with. If you build the `X-Sign-In-With-X` header yourself and pass it in `headers=`, the SDK leaves it untouched — it is yours to refresh, so drive those retries yourself.
 
@@ -102,18 +102,20 @@ async def chat_via_siwe(question: str) -> str:
 
 Validated 2026-05-05 against `api.venice.ai`: the call succeeded with `X-Sign-In-With-X` alone, debited the prepaid ledger by ~$0.0015 for a small completion, and returned a normal `chat.completions` response.
 
-## Use `VeniceClient(auth=X402Auth(...))` for SIWE-only mode
+## Use `VeniceClient(api_key="", auth=X402Auth(...))` for SIWE-only mode
 
-On SDK ≥ 2.0.0, the cleanest Mode-2 path is to pass `auth=` directly to `VeniceClient`:
+On SDK ≥ 2.0.0, the cleanest Mode-2 path is to pass `auth=` directly to `VeniceClient`, with `api_key=""`:
 
 ```python
-async with VeniceClient(auth=X402Auth(private_key=...)) as client:
+async with VeniceClient(api_key="", auth=X402Auth(private_key=...)) as client:
     response = await client.chat.completions.create(...)
 ```
 
-The SDK skips the `Authorization: Bearer` header (since no `api_key` is provided) and signs a fresh `X-Sign-In-With-X` envelope for every request, retries included, so no nonce is ever replayed.
+An empty `api_key` means no key, so the SDK skips the `Authorization: Bearer` header and signs a fresh `X-Sign-In-With-X` envelope for every request, retries included, so no nonce is ever replayed.
 
-When both `api_key=` and `auth=` are passed, the API key wins for default request auth; the auth instance is retained so callers can still pass it explicitly to per-call `auth=` kwargs (e.g., `client.x402.balance(auth=auth)`).
+Leaving `api_key` out is not the same: the client then looks for a key in `config.api_key` and `VENICE_API_KEY`. `VeniceClient(auth=X402Auth(...))` is wallet-only only when neither is set.
+
+When a key resolves, whether passed as `api_key=` or found that way, the API key wins for default request auth and no envelope is sent. The auth instance is retained so callers can still pass it explicitly to per-call `auth=` kwargs (e.g., `client.x402.balance(auth=auth)`).
 
 ## Pre-2.0 fallback: drop to aiohttp / httpx
 
@@ -165,7 +167,7 @@ Common error responses from `outerface.venice.ai`:
 
 - **Passing `wallet_address=` to `X402Auth`** — there's no such kwarg. The address is derived.
 - **Reusing one `build_header()` envelope across requests** — the nonce is single-use, so the second request returns a `401` (see the table above for how each endpoint words it). Keep the `X402Auth` instance; sign a new envelope each time. (Holding an envelope past `ttl_seconds` also 401s, on expiry — but reuse fails long before that.)
-- **Sending `Authorization: Bearer <api_key>` AND `X-Sign-In-With-X`** — confuses the server's auth pipeline. Pick one. (For `client.x402.balance`, the SDK sends the API key for the HTTP request and SIWE in `X-Sign-In-With-X` to identify the wallet — that's correct because the read endpoint requires API-key access to the route, plus SIWE to scope to a wallet. Don't try to reason about it from first principles; trust the SDK there.)
+- **Expecting a per-call `auth=` to replace the API key** — a client with an API key sends it alongside the envelope; `api_key=""` sends the envelope alone. On a call without `auth=`, a client with a key sends only the key.
 - **Signing the EIP-191 message manually** when you have `X402Auth` already — that class does the right thing.
 - **Treating `auth.build_header()` output as plaintext JSON** — it's base64-encoded. Decode with `base64.b64decode(...)` then `json.loads(...)` if you want to inspect.
 

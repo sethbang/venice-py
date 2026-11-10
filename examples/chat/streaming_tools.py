@@ -35,8 +35,9 @@ Prerequisites:
 import asyncio
 import json
 import sys
-from pathlib import Path
 from typing import Any
+
+from _helpers import states_reading
 
 from venice_ai import (
     AssistantMessage,
@@ -50,9 +51,6 @@ from venice_ai import (
 )
 from venice_ai.types.api.chat import ChatCompletionResponse
 from venice_ai.types.api.requests import VeniceParameters
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _helpers import states_reading  # noqa: E402
 
 # Roomy for a one-sentence answer or a single tool call, from a model that
 # spends nothing on reasoning.
