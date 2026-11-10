@@ -151,6 +151,31 @@ class _SyncStreamProxy:
         return _sync_attribute(getattr(self._stream, name), self._run)
 
 
+def _run_loop(loop: asyncio.AbstractEventLoop, closing: threading.Event) -> None:
+    """Run *loop* until ``stop()``, through SystemExit and KeyboardInterrupt.
+
+    asyncio lets these two escape ``run_forever()`` when a task raises them, for
+    example ``sys.exit()`` in an ``on_progress`` callback. Running the loop again
+    delivers the task's outcome to its caller, which raises the same exception as
+    under ``asyncio.run``, and keeps every other call and ``close()`` working.
+
+    Once *closing* is set the loop is not run again, so a task raising one of
+    them in the same pass as ``close()``'s ``stop()`` cannot keep it running.
+
+    The thread holds only the loop, never the client, so an unclosed client stays
+    collectable and its ``__del__`` can warn.
+    """
+    while True:
+        try:
+            loop.run_forever()
+        except (SystemExit, KeyboardInterrupt) as e:
+            if closing.is_set():
+                return
+            logger.debug("SyncVeniceClient loop resumed after a call raised %r", e)
+            continue
+        return
+
+
 def _start_on_loop(
     loop: asyncio.AbstractEventLoop,
     coro: Coroutine[Any, Any, Any],
@@ -169,7 +194,7 @@ def _start_on_loop(
     """
 
     def start() -> None:
-        if future.cancelled():
+        if future.done():
             coro.close()
             return
         runnable = coro if wrap is None else wrap(coro)
@@ -500,7 +525,10 @@ class SyncVeniceClient:
         # that fails to build leaves no event loop or thread behind.
         self._async_client = VeniceClient(**init_kwargs)
         self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
+        self._closing = threading.Event()
+        self._thread = threading.Thread(
+            target=_run_loop, args=(self._loop, self._closing), daemon=True
+        )
         self._thread.start()
         self._is_closed = False
         # Calls blocked in _submit, for close() to release. The lock orders
@@ -677,6 +705,7 @@ class SyncVeniceClient:
             try:
                 self._submit(_cancel_remaining_tasks())
             finally:
+                self._closing.set()
                 self._loop.call_soon_threadsafe(self._loop.stop)
                 self._thread.join(timeout=5)
                 if self._thread.is_alive():

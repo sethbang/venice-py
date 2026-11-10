@@ -1,5 +1,6 @@
 """Unit tests for SyncVeniceClient and its proxy classes."""
 
+import concurrent.futures
 import inspect
 import threading
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -104,6 +105,24 @@ def test_unclosed_client_warns_on_del(mock_async_client):
         client.__del__()
     # Best-effort cleanup so the test doesn't actually leak.
     client.close()
+
+
+def test_an_unclosed_client_is_collected_and_warns(mock_async_client):
+    """The loop thread holds no reference to the client, so dropping it runs ``__del__``."""
+    import gc
+    import weakref
+
+    with patch("venice_ai._sync_client.VeniceClient", return_value=mock_async_client):
+        client = SyncVeniceClient()
+    loop, thread = client._loop, client._thread
+    ref = weakref.ref(client)
+    with pytest.warns(ResourceWarning, match="Unclosed SyncVeniceClient"):
+        del client
+        gc.collect()
+    assert ref() is None
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(5)
+    loop.close()
 
 
 def test_closed_client_no_warning_on_del(mock_async_client):
@@ -381,3 +400,165 @@ def test_a_custom_stream_cls_that_is_a_stream_gets_the_blocking_proxy():
         assert isinstance(stream, _SyncStreamProxy)
         assert isinstance(stream._stream, _MyStream)
         stream.close()
+
+
+# ---------------------------------------------------------------------------
+# A call that stops the loop thread
+# ---------------------------------------------------------------------------
+
+
+def _in_thread(fn, timeout: float = 5) -> dict:
+    """Run *fn* on a daemon thread; report what it returned or raised, or that it hung."""
+    outcome: dict = {}
+
+    def target() -> None:
+        try:
+            outcome["returned"] = fn()
+        except BaseException as e:  # noqa: BLE001 - the test inspects it
+            outcome["raised"] = e
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    outcome["hung"] = thread.is_alive()
+    return outcome
+
+
+@pytest.mark.parametrize(
+    "stop", [SystemExit(3), KeyboardInterrupt()], ids=["SystemExit", "KeyboardInterrupt"]
+)
+def test_a_call_that_raises_systemexit_on_the_loop_gets_it_back(mock_async_client, stop):
+    """SystemExit or KeyboardInterrupt raised on the loop thread, as by ``sys.exit()``
+    in an ``on_progress`` callback, reaches the caller as it would under
+    ``asyncio.run``. The loop keeps running: other calls, later calls and
+    ``close()`` work, even after a second such call."""
+    import asyncio
+
+    with patch("venice_ai._sync_client.VeniceClient", return_value=mock_async_client):
+        client = SyncVeniceClient(api_key="test-key")
+
+    async def stop_the_loop() -> None:
+        await asyncio.sleep(0)
+        raise stop
+
+    async def answer_later() -> str:
+        await asyncio.sleep(0.2)
+        return "answered"
+
+    bystander: dict = {}
+    bystander_thread = threading.Thread(
+        target=lambda: bystander.update(_in_thread(lambda: client._run(answer_later()))),
+        daemon=True,
+    )
+    bystander_thread.start()
+
+    for _ in range(2):
+        caller = _in_thread(lambda: client._run(stop_the_loop()))
+        assert not caller["hung"], "the caller waited forever after its call stopped the loop"
+        assert caller.get("raised") is stop
+
+    bystander_thread.join(5)
+    assert bystander.get("returned") == "answered"
+
+    later = _in_thread(lambda: client._run(asyncio.sleep(0, result="still works")))
+    assert later.get("returned") == "still works"
+
+    closing = _in_thread(client.close, timeout=10)
+    assert not closing["hung"], "close() waited forever"
+    assert "raised" not in closing
+    mock_async_client.close.assert_awaited_once()
+    assert client._loop.is_closed()
+
+
+def test_close_finishes_when_a_cancelled_call_raises_systemexit(mock_async_client):
+    """A call that answers close()'s cancellation with sys.exit() does not hang close()."""
+    import asyncio
+
+    with patch("venice_ai._sync_client.VeniceClient", return_value=mock_async_client):
+        client = SyncVeniceClient(api_key="test-key")
+    started = threading.Event()
+
+    async def exit_when_cancelled() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise SystemExit(4) from None
+
+    caller = threading.Thread(
+        target=lambda: _in_thread(lambda: client._run(exit_when_cancelled()), timeout=10),
+        daemon=True,
+    )
+    caller.start()
+    assert started.wait(5)
+
+    closing = _in_thread(client.close, timeout=10)
+    assert not closing["hung"], "close() waited forever"
+    assert "raised" not in closing
+    mock_async_client.close.assert_awaited_once()
+    assert client._loop.is_closed()
+
+
+def test_close_finishes_when_a_task_raises_systemexit_in_the_same_pass_as_stop(
+    mock_async_client,
+):
+    """SystemExit raised in the loop pass that runs close()'s ``stop()`` ends the
+    loop thread instead of starting the loop again."""
+    import time
+
+    with patch("venice_ai._sync_client.VeniceClient", return_value=mock_async_client):
+        client = SyncVeniceClient(api_key="test-key")
+    loop = client._loop
+    real_stop = loop.stop
+
+    def stop_then_exit() -> None:
+        real_stop()
+        raise SystemExit(5)
+
+    # close() schedules self._loop.stop; this makes that one callback both stop
+    # the loop and raise, so the two land in the same pass.
+    loop.stop = stop_then_exit  # type: ignore[method-assign]
+
+    started = time.monotonic()
+    closing = _in_thread(client.close, timeout=10)
+    elapsed = time.monotonic() - started
+
+    assert not closing["hung"], "close() waited forever"
+    assert "raised" not in closing, closing.get("raised")
+    assert elapsed < 3, f"close() took {elapsed:.1f}s"
+    assert not client._thread.is_alive()
+    assert loop.is_closed()
+
+
+@pytest.mark.parametrize("settle", ["result", "exception", "cancel"])
+def test_a_call_whose_future_is_done_before_it_starts_never_runs(settle):
+    """A call settled before the loop reaches it is closed, not run, and not wrapped."""
+    import asyncio
+
+    from venice_ai._sync_client import _start_on_loop
+
+    ran = threading.Event()
+    wrap = Mock(side_effect=lambda coro: coro)
+
+    async def body() -> str:
+        ran.set()
+        return "ran"
+
+    coro = body()
+    future: concurrent.futures.Future = concurrent.futures.Future()
+    loop = asyncio.new_event_loop()
+    try:
+        _start_on_loop(loop, coro, future, wrap)
+        if settle == "result":
+            future.set_result("settled elsewhere")
+        elif settle == "exception":
+            future.set_exception(RuntimeError("settled elsewhere"))
+        else:
+            future.cancel()
+        loop.run_until_complete(asyncio.sleep(0.01))
+    finally:
+        loop.close()
+
+    assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
+    assert not ran.is_set()
+    wrap.assert_not_called()
