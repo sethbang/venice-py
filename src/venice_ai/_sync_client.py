@@ -26,7 +26,7 @@ import inspect
 import logging
 import sys
 import threading
-from collections.abc import AsyncIterable, Collection, Iterator
+from collections.abc import AsyncIterable, Collection, Coroutine, Iterator
 from types import TracebackType
 from typing import Any
 
@@ -141,6 +141,51 @@ class _SyncStreamProxy:
 
     def __getattr__(self, name: str) -> Any:
         return _sync_attribute(getattr(self._stream, name), self._run)
+
+
+def _start_on_loop(
+    loop: asyncio.AbstractEventLoop,
+    coro: Coroutine[Any, Any, Any],
+    future: concurrent.futures.Future[Any],
+) -> None:
+    """Run *coro* as a task on *loop* and report its outcome through *future*.
+
+    Like :func:`asyncio.run_coroutine_threadsafe`, except that the caller creates
+    *future* first, so it holds a handle on the call before the call can start.
+    Cancelling *future* cancels the task, or stops it from starting at all.
+    """
+
+    def start() -> None:
+        if future.cancelled():
+            coro.close()
+            return
+        try:
+            task = loop.create_task(coro)
+        except BaseException as e:
+            coro.close()
+            with contextlib.suppress(concurrent.futures.InvalidStateError):
+                future.set_exception(e)
+            return
+
+        def report(done: asyncio.Task[Any]) -> None:
+            with contextlib.suppress(concurrent.futures.InvalidStateError):
+                if done.cancelled():
+                    future.cancel()
+                elif (error := done.exception()) is not None:
+                    future.set_exception(error)
+                else:
+                    future.set_result(done.result())
+
+        def cancel_task(cancelled: concurrent.futures.Future[Any]) -> None:
+            if cancelled.cancelled():
+                # The loop may already be closed; its tasks are gone then.
+                with contextlib.suppress(RuntimeError):
+                    loop.call_soon_threadsafe(task.cancel)
+
+        task.add_done_callback(report)
+        future.add_done_callback(cancel_task)
+
+    loop.call_soon_threadsafe(start)
 
 
 def _iterate(source: AsyncIterable[Any], run: Any) -> Iterator[Any]:
@@ -482,9 +527,10 @@ class SyncVeniceClient:
                 "SyncVeniceClient cannot be called from its own loop thread, where "
                 "callbacks such as on_progress run: it would wait on itself forever."
             )
-        future: concurrent.futures.Future[Any] | None = None
-        # Scheduling sits inside the try: an interrupt can land on any bytecode
-        # once the call is on the loop, and must still cancel it.
+        # The future exists before the call reaches the loop, and the hand-off sits
+        # inside the try: an interrupt can land on any bytecode once the call is
+        # queued (waking the loop releases the GIL), and must still cancel it.
+        future: concurrent.futures.Future[Any] = concurrent.futures.Future()
         try:
             with self._submit_lock:
                 if self._loop.is_closed() or sys.is_finalizing():
@@ -492,21 +538,19 @@ class SyncVeniceClient:
                     raise RuntimeError("SyncVeniceClient is closed.")
                 if retry_override is not None:
                     coro = self._wrap_with_retries(coro, retry_override)
-                future = asyncio.run_coroutine_threadsafe(self._as_call_task(coro), self._loop)
                 self._in_flight.add(future)
+                _start_on_loop(self._loop, self._as_call_task(coro), future)
             return future.result()
         except concurrent.futures.CancelledError as e:
             if not self._is_closed:
                 raise
             raise RuntimeError("SyncVeniceClient was closed during this call.") from e
         except BaseException:
-            if future is not None:
-                future.cancel()
+            future.cancel()
             raise
         finally:
-            if future is not None:
-                with self._submit_lock:
-                    self._in_flight.discard(future)
+            with self._submit_lock:
+                self._in_flight.discard(future)
 
     async def _as_call_task(self, coro: Any) -> Any:
         task = asyncio.current_task()
