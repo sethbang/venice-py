@@ -26,7 +26,7 @@ import inspect
 import logging
 import sys
 import threading
-from collections.abc import AsyncIterable, Collection, Coroutine, Iterator
+from collections.abc import AsyncIterable, Callable, Collection, Coroutine, Iterator
 from types import TracebackType
 from typing import Any
 
@@ -147,21 +147,28 @@ def _start_on_loop(
     loop: asyncio.AbstractEventLoop,
     coro: Coroutine[Any, Any, Any],
     future: concurrent.futures.Future[Any],
+    wrap: Callable[[Coroutine[Any, Any, Any]], Coroutine[Any, Any, Any]] | None = None,
 ) -> None:
     """Run *coro* as a task on *loop* and report its outcome through *future*.
 
     Like :func:`asyncio.run_coroutine_threadsafe`, except that the caller creates
     *future* first, so it holds a handle on the call before the call can start.
     Cancelling *future* cancels the task, or stops it from starting at all.
+
+    *wrap*, if given, builds the coroutine the task runs around *coro*. It is
+    applied only when the call starts: a call cancelled first closes *coro*, and
+    no wrapper exists to be left unawaited.
     """
 
     def start() -> None:
         if future.cancelled():
             coro.close()
             return
+        runnable = coro if wrap is None else wrap(coro)
         try:
-            task = loop.create_task(coro)
+            task = loop.create_task(runnable)
         except BaseException as e:
+            runnable.close()
             coro.close()
             with contextlib.suppress(concurrent.futures.InvalidStateError):
                 future.set_exception(e)
@@ -536,10 +543,13 @@ class SyncVeniceClient:
                 if self._loop.is_closed() or sys.is_finalizing():
                     coro.close()
                     raise RuntimeError("SyncVeniceClient is closed.")
-                if retry_override is not None:
-                    coro = self._wrap_with_retries(coro, retry_override)
                 self._in_flight.add(future)
-                _start_on_loop(self._loop, self._as_call_task(coro), future)
+                _start_on_loop(
+                    self._loop,
+                    coro,
+                    future,
+                    functools.partial(self._wrap_call, retry_override=retry_override),
+                )
             return future.result()
         except concurrent.futures.CancelledError as e:
             if not self._is_closed:
@@ -551,6 +561,14 @@ class SyncVeniceClient:
         finally:
             with self._submit_lock:
                 self._in_flight.discard(future)
+
+    def _wrap_call(
+        self, coro: Coroutine[Any, Any, Any], *, retry_override: RetryOptions | None
+    ) -> Coroutine[Any, Any, Any]:
+        """Build the coroutine a call's task runs: the retry override, if any, then tracking."""
+        if retry_override is not None:
+            coro = self._wrap_with_retries(coro, retry_override)
+        return self._as_call_task(coro)
 
     async def _as_call_task(self, coro: Any) -> Any:
         task = asyncio.current_task()
