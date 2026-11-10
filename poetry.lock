@@ -1589,14 +1589,14 @@ ssh = ["bcrypt (>=3.1.5)"]
 
 [[package]]
 name = "cyclonedx-bom"
-version = "7.6.0"
+version = "8.0.1"
 description = "CycloneDX Software Bill of Materials (SBOM) generator for Python projects and environments"
 optional = false
 python-versions = "<4,>=3.9"
 groups = ["dev"]
 files = [
-    {file = "cyclonedx_bom-7.6.0-py3-none-any.whl", hash = "sha256:4db70eb524e859317c645bbe927347e18bdd3cfa31906b1e482b4b936f8c36ef"},
-    {file = "cyclonedx_bom-7.6.0.tar.gz", hash = "sha256:ab8a8c4cf0d8704f75029f75826993047783b8fd416e7dc3431af54c03e8adab"},
+    {file = "cyclonedx_bom-8.0.1-py3-none-any.whl", hash = "sha256:b91ac00e0d031aaee0bc69fd3851384b2c36e569859df13b2a564b5d2d67aab3"},
+    {file = "cyclonedx_bom-8.0.1.tar.gz", hash = "sha256:a32c8bb2c4b436e0d6b7ee3b9f0899efdfc91e8f5d9652975467d31e4c20b900"},
 ]
 
 [package.dependencies]
@@ -6663,4 +6663,4 @@ x402-solana = ["solders"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<4.0"
-content-hash = "8383d0a1ca34cea747d81f684dbce9bd35ac4302e197f5dd388d71ccac0bd48c"
+content-hash = "9e1d9d31c709c3558eaa4bf6159be9fdd00f88181f480c6c80e7c3cab1b538ed"

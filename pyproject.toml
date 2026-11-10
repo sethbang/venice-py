@@ -198,7 +198,7 @@ hypothesis = "^6.155.1"
 setuptools = "^84.0.0"
 pyflakes = "^4.0.1"
 pyright = "^1.1.0"
-cyclonedx-bom = "^7.0.0"
+cyclonedx-bom = ">=7,<9"
 
 [tool.poetry.group.test.dependencies]
 freezegun = "^1.5.5"
