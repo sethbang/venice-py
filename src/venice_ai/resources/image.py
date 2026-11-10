@@ -843,7 +843,8 @@ class Image(APIResource["VeniceClient"]):
                       - A base64-encoded string
                       - An HTTP/HTTPS URL
         :param aspect_ratio: Optional. Aspect ratio for the output (e.g. ``"1:1"``,
-            ``"16:9"``). Omit to use the model's default; supported values vary by model.
+            ``"16:9"``), or ``"auto"`` for the supported ratio closest to the input
+            image. Omit to use the model's default; supported values vary by model.
         :type aspect_ratio: Optional[str]
         :param safe_mode: Optional. When ``True`` (the server-side default) the
             API blurs images classified as adult content. Pass ``False`` to
@@ -1180,8 +1181,8 @@ class Image(APIResource["VeniceClient"]):
             ``"1K"`` server-side when omitted.
         :type resolution: Optional[str]
         :param aspect_ratio: Optional. Aspect ratio for the output (e.g.
-            ``"1:1"``, ``"16:9"``). Omit to infer from the first input image;
-            supported values vary by model.
+            ``"1:1"``, ``"16:9"``), or ``"auto"``. Omit it or pass ``"auto"`` to infer
+            it from the first input image; supported values vary by model.
         :type aspect_ratio: Optional[str]
         :param output_format: Optional. Output format for the edited image.
             When omitted, the format is inferred from resolution (PNG for 1K

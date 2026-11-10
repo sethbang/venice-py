@@ -295,8 +295,9 @@ class ImageEditRequest(BaseModel):
     aspect_ratio: str | None = Field(
         default=None,
         description=(
-            "Aspect ratio for the output (e.g. '1:1', '16:9'). Omit to use the "
-            "model's default; supported values vary per model."
+            "Aspect ratio for the output (e.g. '1:1', '16:9'), or 'auto' to use the "
+            "closest supported ratio to the input image. Omit to use the model's "
+            "default; supported values vary per model."
         ),
     )
     safe_mode: bool | None = Field(
@@ -422,8 +423,9 @@ class ImageMultiEditRequest(BaseModel):
     aspect_ratio: str | None = Field(
         default=None,
         description=(
-            "Aspect ratio for the output (e.g. '1:1', '16:9'). Omit to infer "
-            "from the first input image; supported values vary per model."
+            "Aspect ratio for the output (e.g. '1:1', '16:9'), or 'auto'. Omit "
+            "or pass 'auto' to infer it from the first input image; supported "
+            "values vary per model."
         ),
     )
     output_format: Literal["jpeg", "png", "webp"] | None = Field(
