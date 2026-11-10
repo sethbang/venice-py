@@ -31,6 +31,11 @@ from venice_ai.types.api.characters import Character
 
 UNREACHABLE = "http://127.0.0.1:9/api/v1"
 
+# How long an interrupted fetch gets to see its cancellation. It stays well under
+# the per-request timeout in tests/unit/conftest.py, which cancels an orphaned
+# fetch on its own and would otherwise pass for the SDK doing it.
+CANCEL_WAIT_S = 2
+
 
 @pytest.fixture
 def client() -> Iterator[SyncVeniceClient]:
@@ -423,7 +428,48 @@ def test_interrupting_a_blocked_fetch_cancels_it(client: SyncVeniceClient) -> No
         for _item in client.characters.iter_all():
             pass
 
-    assert cancelled.wait(5)
+    assert cancelled.wait(CANCEL_WAIT_S)
+
+
+def test_an_interrupt_just_after_scheduling_still_cancels_the_call(
+    client: SyncVeniceClient,
+) -> None:
+    """Ctrl-C between scheduling a call and waiting on it cancels the call too.
+
+    A signal can land on any bytecode, including the ones right after the call
+    is handed to the loop. Raising the interrupt from ``_in_flight.add`` puts it
+    there every time, which a real signal does only now and then.
+    """
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    async def fetch(_index: int) -> _PageResult[int]:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return _PageResult(items=[], has_more=False)
+
+    class InterruptOnFirstAdd(set[Any]):
+        armed = True
+
+        def add(self, item: Any) -> None:
+            super().add(item)
+            if InterruptOnFirstAdd.armed:
+                InterruptOnFirstAdd.armed = False
+                assert started.wait(5)
+                raise KeyboardInterrupt
+
+    client._async_client.characters.iter_all = lambda **_: Paginator(fetch)  # type: ignore[method-assign]
+    client._in_flight = InterruptOnFirstAdd()
+
+    with pytest.raises(KeyboardInterrupt):
+        for _item in client.characters.iter_all():
+            pass
+
+    assert cancelled.wait(CANCEL_WAIT_S)
 
 
 def test_interpreter_exit_with_a_walk_still_held_does_not_hang() -> None:

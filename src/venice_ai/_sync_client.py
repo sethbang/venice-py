@@ -482,26 +482,31 @@ class SyncVeniceClient:
                 "SyncVeniceClient cannot be called from its own loop thread, where "
                 "callbacks such as on_progress run: it would wait on itself forever."
             )
-        with self._submit_lock:
-            if self._loop.is_closed() or sys.is_finalizing():
-                coro.close()
-                raise RuntimeError("SyncVeniceClient is closed.")
-            if retry_override is not None:
-                coro = self._wrap_with_retries(coro, retry_override)
-            future = asyncio.run_coroutine_threadsafe(self._as_call_task(coro), self._loop)
-            self._in_flight.add(future)
+        future: concurrent.futures.Future[Any] | None = None
+        # Scheduling sits inside the try: an interrupt can land on any bytecode
+        # once the call is on the loop, and must still cancel it.
         try:
+            with self._submit_lock:
+                if self._loop.is_closed() or sys.is_finalizing():
+                    coro.close()
+                    raise RuntimeError("SyncVeniceClient is closed.")
+                if retry_override is not None:
+                    coro = self._wrap_with_retries(coro, retry_override)
+                future = asyncio.run_coroutine_threadsafe(self._as_call_task(coro), self._loop)
+                self._in_flight.add(future)
             return future.result()
         except concurrent.futures.CancelledError as e:
             if not self._is_closed:
                 raise
             raise RuntimeError("SyncVeniceClient was closed during this call.") from e
         except BaseException:
-            future.cancel()
+            if future is not None:
+                future.cancel()
             raise
         finally:
-            with self._submit_lock:
-                self._in_flight.discard(future)
+            if future is not None:
+                with self._submit_lock:
+                    self._in_flight.discard(future)
 
     async def _as_call_task(self, coro: Any) -> Any:
         task = asyncio.current_task()
