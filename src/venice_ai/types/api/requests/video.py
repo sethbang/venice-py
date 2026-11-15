@@ -25,6 +25,12 @@ def _validate_media_url(v: str) -> str:
     return v
 
 
+def _reject_draft_and_upgrade(draft: bool | None, draft_task_id: str | None) -> None:
+    """A request either makes a draft or upgrades one; the two fields never travel together."""
+    if draft is not None and draft_task_id is not None:
+        raise ValueError("draft and draft_task_id cannot be combined")
+
+
 class VideoElement(BaseModel):
     """Structured element for advanced element-aware video models
     (e.g. Kling O3 R2V). Each element defines a character or object that can
@@ -104,6 +110,64 @@ class VideoKeyframe(BaseModel):
             "keyframes and no greater than ``duration × 24``."
         ),
     )
+
+
+class VideoImageReference(BaseModel):
+    """A reference image with its own role, prompt name or voice.
+
+    Use it in ``image_references`` instead of a plain URL in
+    ``reference_image_urls`` when a reference needs one of these extras.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    image_url: str = Field(..., description="The reference image, as a URL or data URL.")
+    type: Literal["subject", "background"] | None = Field(
+        default=None,
+        description=(
+            "Whether the image shows a subject or a background. Used by PixVerse C1 "
+            "reference-to-video; the server defaults to ``subject``."
+        ),
+    )
+    ref_name: str | None = Field(
+        default=None,
+        description=(
+            "The name the prompt uses for the image. Used by PixVerse C1 "
+            "reference-to-video; the server defaults to Image1, Image2 and so on."
+        ),
+    )
+    audio_url: str | None = Field(
+        default=None,
+        description=(
+            "The voice of the person or character in the image (WAV or MP3, URL or "
+            "data URL), on models whose ``constraints.per_reference_audio`` is true."
+        ),
+    )
+
+    @field_validator("image_url", "audio_url")
+    @classmethod
+    def _validate_url(cls, v: str | None) -> str | None:
+        return v if v is None else _validate_media_url(v)
+
+
+class VideoVideoReference(BaseModel):
+    """A reference clip with an optional label and voice, for ``video_references``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    video_url: str = Field(..., description="The reference clip, as a URL or data URL.")
+    ref_name: str | None = Field(default=None, description="An optional label for the clip.")
+    audio_url: str | None = Field(
+        default=None,
+        description=(
+            "The voice of the person or character in the clip (WAV or MP3, URL or data URL)."
+        ),
+    )
+
+    @field_validator("video_url", "audio_url")
+    @classmethod
+    def _validate_url(cls, v: str | None) -> str | None:
+        return v if v is None else _validate_media_url(v)
 
 
 class CameraKeyframe(BaseModel):
@@ -311,17 +375,17 @@ class VideoRequestBase(BaseModel):
     )
     reference_image_urls: list[str] | None = Field(
         default=None,
-        max_length=9,
+        max_length=30,
         description=(
-            "Up to 9 reference images for character/style consistency. Each must be "
+            "Up to 30 reference images for character/style consistency. Each must be "
             "a URL or data URL."
         ),
     )
     reference_audio_urls: list[str] | None = Field(
         default=None,
-        max_length=3,
+        max_length=10,
         description=(
-            "Up to 3 reference audio URLs (role 'reference_audio') for R2V models "
+            "Up to 10 reference audio URLs (role 'reference_audio') for R2V models "
             "(e.g. Seedance 2.0 R2V) used as donors for vocal timbre/narration/SFX. "
             "Per-clip 2-15s, .wav/.mp3; aggregate <=15s. Must be paired with at least "
             "one reference image or reference video. Each must be a URL or data URL."
@@ -329,12 +393,45 @@ class VideoRequestBase(BaseModel):
     )
     reference_video_urls: list[str] | None = Field(
         default=None,
-        max_length=3,
+        max_length=10,
         description=(
-            "Up to 3 reference video URLs (role 'reference_video') for R2V models "
+            "Up to 10 reference video URLs (role 'reference_video') for R2V models "
             "(e.g. Seedance 2.0 R2V) used to inherit subject motion, camera movement, "
             "and overall style. Per-clip 2-15s, .mp4/.mov, <=50MB; aggregate <=15s. "
             "Each must be a URL or data URL."
+        ),
+    )
+    image_references: list[VideoImageReference] | None = Field(
+        default=None,
+        max_length=30,
+        description=(
+            "Up to 30 reference images as objects, so each can carry a role, a "
+            "prompt name or its own voice. For models with reference image support."
+        ),
+    )
+    video_references: list[VideoVideoReference] | None = Field(
+        default=None,
+        max_length=5,
+        description=(
+            "Up to 5 reference clips, each with an optional voice, for models whose "
+            "``constraints.per_reference_audio`` is true (e.g. Wan 2.7 R2V)."
+        ),
+    )
+    draft: bool | None = Field(
+        default=None,
+        description=(
+            "Seedance 2.5 only (models with ``supportsDraftMode``): generate a fast "
+            "480p draft. The response carries ``draft_task_id`` for a 1080p upgrade "
+            "within 7 days."
+        ),
+    )
+    draft_task_id: str | None = Field(
+        default=None,
+        description=(
+            "Seedance 2.5 only: the ``queue_id`` of your own draft to upgrade. The "
+            "API still validates the upgrade like a new generation, so send the "
+            "draft's prompt, duration and aspect ratio too. Cannot be combined "
+            "with ``draft``."
         ),
     )
     elements: list[VideoElement] | None = Field(
@@ -496,6 +593,11 @@ class VideoRequestBase(BaseModel):
                 _validate_media_url(url)
         return v
 
+    @model_validator(mode="after")
+    def _check_draft_fields(self) -> "VideoRequestBase":
+        _reject_draft_and_upgrade(self.draft, self.draft_task_id)
+        return self
+
 
 class VideoTextToVideoRequest(VideoRequestBase):
     """
@@ -572,7 +674,9 @@ class VideoQuoteRequest(BaseModel):
 
     Per the Venice API spec, ``/video/quote`` accepts a strict subset of the
     ``/video/queue`` body: only the fields that affect pricing. Prompt text,
-    reference images, and element/scene URLs are not part of the quote.
+    reference images, and element/scene URLs are not part of the quote. The
+    image-to-video ``image_url`` is: with ``aspect_ratio="auto"`` the quote
+    reads the image the same way queue billing does.
     """
 
     model_config = {"extra": "forbid"}
@@ -637,13 +741,34 @@ class VideoQuoteRequest(BaseModel):
             "baseline is returned."
         ),
     )
+    image_url: str | None = Field(
+        default=None,
+        description=(
+            "For image-to-video models, the source image (http(s) URL or data URL). "
+            "With ``aspect_ratio='auto'`` the quote reads it the same way queue "
+            "billing does."
+        ),
+    )
+    draft: bool | None = Field(default=None, description="Seedance 2.5 only: quote a 480p draft.")
+    draft_task_id: str | None = Field(
+        default=None,
+        description=(
+            "Seedance 2.5 only: quote the 1080p upgrade of your own draft. Requires "
+            "an API key. Cannot be combined with ``draft``."
+        ),
+    )
 
-    @field_validator("video_url")
+    @field_validator("video_url", "image_url")
     @classmethod
     def _validate_video_url(cls, v: str | None) -> str | None:
         if v is None:
             return v
         return _validate_media_url(v)
+
+    @model_validator(mode="after")
+    def _check_draft_fields(self) -> "VideoQuoteRequest":
+        _reject_draft_and_upgrade(self.draft, self.draft_task_id)
+        return self
 
 
 class VideoRetrieveRequest(BaseModel):
@@ -698,6 +823,8 @@ class VideoTranscriptionRequest(BaseModel):
 
 __all__ = [
     "VideoElement",
+    "VideoImageReference",
+    "VideoVideoReference",
     "VideoRequestBase",
     "VideoTextToVideoRequest",
     "VideoImageToVideoRequest",

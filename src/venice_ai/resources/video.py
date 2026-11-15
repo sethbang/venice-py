@@ -38,12 +38,14 @@ from ..types.api.requests.video import (
     VideoCompleteRequest,
     VideoConsents,
     VideoElement,
+    VideoImageReference,
     VideoImageToVideoRequest,
     VideoKeyframe,
     VideoQuoteRequest,
     VideoRetrieveRequest,
     VideoTextToVideoRequest,
     VideoTranscriptionRequest,
+    VideoVideoReference,
 )
 from ..types.api.video import (
     VideoCompletedStatus,
@@ -711,6 +713,8 @@ class Video(APIResource["VeniceClient"]):
         reference_image_urls: list[str] | None = None,
         reference_audio_urls: list[str] | None = None,
         reference_video_urls: list[str] | None = None,
+        image_references: list[VideoImageReference | dict] | None = None,
+        video_references: list[VideoVideoReference | dict] | None = None,
         elements: list[VideoElement | dict] | None = None,
         scene_image_urls: list[str] | None = None,
         omni_reference_task_type: Literal["auto", "reference", "edit", "extend"] | None = None,
@@ -733,6 +737,8 @@ class Video(APIResource["VeniceClient"]):
         slowdown_factor: Literal[1, 2, 4, 8] | None = None,
         bitrate_mode: Literal["standard", "high"] | None = None,
         consents: VideoConsents | dict | None = None,
+        draft: bool | None = None,
+        draft_task_id: str | None = None,
     ) -> VideoQueueResponse:
         """
         Queue a new video generation request.
@@ -801,13 +807,13 @@ class Video(APIResource["VeniceClient"]):
         :param video_url: Source video for video-to-video / upscale models
             (MP4/MOV/WebM).
         :type video_url: Optional[str]
-        :param reference_image_urls: Up to 9 reference images for character or
+        :param reference_image_urls: Up to 30 reference images for character or
             style consistency.
         :type reference_image_urls: Optional[list[str]]
-        :param reference_audio_urls: Up to 3 reference audio donors for R2V
+        :param reference_audio_urls: Up to 10 reference audio donors for R2V
             models (e.g. Seedance 2.0 R2V).
         :type reference_audio_urls: Optional[list[str]]
-        :param reference_video_urls: Up to 3 reference video donors for R2V
+        :param reference_video_urls: Up to 10 reference video donors for R2V
             models (e.g. Seedance 2.0 R2V) used to inherit subject motion,
             camera movement, and overall style.
         :type reference_video_urls: Optional[list[str]]
@@ -831,6 +837,28 @@ class Video(APIResource["VeniceClient"]):
             Omitting it is equivalent to ``"standard"``. Does not affect price,
             and :meth:`quote` does not accept it.
         :type bitrate_mode: Optional[str]
+        :param image_references: Up to 30 reference images as
+            :class:`~venice_ai.types.VideoImageReference` objects (or dicts),
+            for when a reference needs a role (``"subject"`` or
+            ``"background"``), a prompt name or its own voice. Plain URLs go in
+            ``reference_image_urls``.
+        :type image_references: Optional[list[VideoImageReference | dict]]
+        :param video_references: Up to 5 reference clips as
+            :class:`~venice_ai.types.VideoVideoReference` objects (or dicts),
+            each with an optional voice, on models whose
+            ``constraints.per_reference_audio`` is true (e.g. Wan 2.7 R2V).
+        :type video_references: Optional[list[VideoVideoReference | dict]]
+        :param draft: Seedance 2.5 models with ``supportsDraftMode`` only:
+            generate a fast 480p draft. The response carries
+            ``draft_task_id``; pass it to :meth:`upgrade_draft` within 7 days
+            for the 1080p version.
+        :type draft: Optional[bool]
+        :param draft_task_id: Seedance 2.5 only: the ``queue_id`` of your own
+            draft to upgrade. Prefer :meth:`upgrade_draft`. The API still
+            requires the draft's ``prompt``, ``duration_seconds`` and (for
+            text-to-video) ``aspect_ratio`` on an upgrade. Cannot be combined
+            with ``draft``.
+        :type draft_task_id: Optional[str]
 
         :return: Queue response containing ``model`` and ``queue_id``.
         :rtype: VideoQueueResponse
@@ -889,6 +917,8 @@ class Video(APIResource["VeniceClient"]):
             "reference_image_urls": reference_image_urls,
             "reference_audio_urls": reference_audio_urls,
             "reference_video_urls": reference_video_urls,
+            "image_references": image_references,
+            "video_references": video_references,
             "elements": elements,
             "scene_image_urls": scene_image_urls,
             "omni_reference_task_type": omni_reference_task_type,
@@ -911,6 +941,8 @@ class Video(APIResource["VeniceClient"]):
             "slowdown_factor": slowdown_factor,
             "bitrate_mode": bitrate_mode,
             "consents": consents,
+            "draft": draft,
+            "draft_task_id": draft_task_id,
         }.items():
             if val is not None:
                 request_params[key] = val
@@ -945,6 +977,9 @@ class Video(APIResource["VeniceClient"]):
         enhancement_model: str | None = None,
         target_fps: int | None = None,
         slowdown_factor: Literal[1, 2, 4, 8] | None = None,
+        image_url: str | None = None,
+        draft: bool | None = None,
+        draft_task_id: str | None = None,
     ) -> VideoQuoteResponse:
         """
         Get a price estimate for a video generation request.
@@ -952,7 +987,9 @@ class Video(APIResource["VeniceClient"]):
         Returns the estimated cost in USD. The ``/video/quote`` endpoint
         prices based on model + duration + resolution + upscale; prompt
         text and reference images do not affect the quote and are not
-        sent (see the Venice API spec).
+        sent (see the Venice API spec). The image-to-video ``image_url``
+        does when ``aspect_ratio`` is ``"auto"``: pass it so the quote
+        matches what the job bills.
 
         :param model: Video model ID (e.g., ``"wan-2-7-text-to-video"``).
         :param duration_seconds: Duration as an integer number of seconds
@@ -973,6 +1010,14 @@ class Video(APIResource["VeniceClient"]):
             to include in the quote. When provided, the quote reflects the
             'input with video' rate tier; when omitted, the no-reference
             baseline is returned.
+        :param image_url: For image-to-video models, the source image (http(s)
+            URL or ``data:`` URI). With ``aspect_ratio="auto"`` the quote reads
+            it the same way queue billing does.
+        :param draft: Seedance 2.5 only: quote a 480p draft.
+        :param draft_task_id: Seedance 2.5 only: quote the 1080p upgrade of
+            your own draft (needs an API key). The API still requires
+            ``duration_seconds``; pass the draft's. Cannot be combined with
+            ``draft``.
 
         :return: Quote response containing estimated cost.
         :rtype: VideoQuoteResponse
@@ -1006,6 +1051,9 @@ class Video(APIResource["VeniceClient"]):
             enhancement_model=enhancement_model,
             target_fps=target_fps,
             slowdown_factor=slowdown_factor,
+            image_url=image_url,
+            draft=draft,
+            draft_task_id=draft_task_id,
         )
         body = request.model_dump(exclude_none=True)
 
@@ -1013,6 +1061,74 @@ class Video(APIResource["VeniceClient"]):
             "video/quote",
             json_data=body,
             cast_to=VideoQuoteResponse,
+        )
+
+    async def upgrade_draft(
+        self,
+        *,
+        model: str,
+        draft_task_id: str,
+        prompt: str,
+        duration_seconds: int | str,
+        aspect_ratio: str | None = None,
+        image_url: str | None = None,
+        resolution: str | None = None,
+        consents: VideoConsents | dict | None = None,
+    ) -> VideoQueueResponse:
+        """Queue the HD version of a Seedance 2.5 draft.
+
+        A draft comes from :meth:`submit` (or :meth:`run`) with ``draft=True``;
+        its queue response carries ``draft_task_id`` and ``draft_expires_at``,
+        and drafts can be upgraded for 7 days. The upgrade is a new, billed
+        job: price it first with ``quote(model=..., draft_task_id=...,
+        duration_seconds=...)``.
+
+        The API documents that the upgrade follows the draft, but its request
+        validation still requires the fields a new generation needs, so pass
+        the values the draft was made with: ``prompt`` and
+        ``duration_seconds``, plus ``aspect_ratio`` for a text-to-video model.
+        For an image-to-video model, also pass the draft's ``image_url``.
+
+        :param model: The model the draft was made with.
+        :param draft_task_id: The draft's ``draft_task_id`` (its ``queue_id``).
+        :param prompt: The draft's prompt.
+        :param duration_seconds: The draft's duration.
+        :param aspect_ratio: The draft's aspect ratio. Required by
+            text-to-video models.
+        :param image_url: The draft's source image, for image-to-video models.
+        :param resolution: Target resolution (e.g. ``"1080p"``). Omit for the
+            server default.
+        :param consents: Provider consent attestations, as for :meth:`submit`.
+
+        :return: Queue response for the upgrade job; poll it like any other.
+        :rtype: VideoQueueResponse
+
+        :raises venice_ai.exceptions.InvalidRequestError: If the API rejects
+            the upgrade: a required field missing, or a draft that is expired,
+            unknown or made with another key.
+        :raises ValueError: If ``duration_seconds`` is not among the model's
+            supported values.
+
+        Example::
+
+            params = dict(prompt="A paper boat in the rain", duration_seconds=5,
+                          aspect_ratio="16:9")
+            draft = await client.video.submit(model=model, draft=True, **params)
+            # ... wait for the draft, review it, then:
+            if draft.draft_task_id:
+                hd = await client.video.upgrade_draft(
+                    model=draft.model, draft_task_id=draft.draft_task_id, **params
+                )
+        """
+        return await self.submit(
+            model=model,
+            draft_task_id=draft_task_id,
+            prompt=prompt,
+            duration_seconds=duration_seconds,
+            aspect_ratio=aspect_ratio,
+            image_url=image_url,
+            resolution=resolution,
+            consents=consents,
         )
 
     async def retrieve(
@@ -1248,6 +1364,8 @@ class Video(APIResource["VeniceClient"]):
         reference_image_urls: list[str] | None = None,
         reference_audio_urls: list[str] | None = None,
         reference_video_urls: list[str] | None = None,
+        image_references: list[VideoImageReference | dict] | None = None,
+        video_references: list[VideoVideoReference | dict] | None = None,
         elements: list[VideoElement | dict] | None = None,
         scene_image_urls: list[str] | None = None,
         omni_reference_task_type: Literal["auto", "reference", "edit", "extend"] | None = None,
@@ -1270,6 +1388,8 @@ class Video(APIResource["VeniceClient"]):
         slowdown_factor: Literal[1, 2, 4, 8] | None = None,
         bitrate_mode: Literal["standard", "high"] | None = None,
         consents: VideoConsents | dict | None = None,
+        draft: bool | None = None,
+        draft_task_id: str | None = None,
     ) -> VideoJob:
         """Queue a video generation and return a :class:`VideoJob` for lifecycle management.
 
@@ -1301,6 +1421,8 @@ class Video(APIResource["VeniceClient"]):
             reference_image_urls=reference_image_urls,
             reference_audio_urls=reference_audio_urls,
             reference_video_urls=reference_video_urls,
+            image_references=image_references,
+            video_references=video_references,
             elements=elements,
             scene_image_urls=scene_image_urls,
             omni_reference_task_type=omni_reference_task_type,
@@ -1323,6 +1445,8 @@ class Video(APIResource["VeniceClient"]):
             slowdown_factor=slowdown_factor,
             bitrate_mode=bitrate_mode,
             consents=consents,
+            draft=draft,
+            draft_task_id=draft_task_id,
         )
         return VideoJob(client=self._client, queue_response=queue_response)
 

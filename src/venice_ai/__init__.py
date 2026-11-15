@@ -220,6 +220,7 @@ from .types.api.requests.common import (
 from .types.api.requests.decisions import (
     ChoiceQuestion,
     CreateDecisionRequest,
+    DecisionAsset,
     DecisionImage,
     NoulCriteria,
     NoulQuestion,
@@ -329,6 +330,7 @@ __all__ = [
     "UnknownAnswer",
     "ChoiceQuestion",
     "CreateDecisionRequest",
+    "DecisionAsset",
     "DecisionImage",
     "NoulCriteria",
     "NoulQuestion",

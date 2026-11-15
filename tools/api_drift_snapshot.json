@@ -466,6 +466,7 @@
             "data[].model_spec.constraints.maxInputImages",
             "data[].model_spec.constraints.maxStyleReferences",
             "data[].model_spec.constraints.model_type",
+            "data[].model_spec.constraints.per_reference_audio",
             "data[].model_spec.constraints.presence_penalty",
             "data[].model_spec.constraints.presence_penalty.default",
             "data[].model_spec.constraints.promptCharacterLimit",
@@ -522,6 +523,7 @@
             "data[].model_spec.maxStateTokens",
             "data[].model_spec.maxTotalTokens",
             "data[].model_spec.max_duration",
+            "data[].model_spec.max_reference_audios",
             "data[].model_spec.max_source_audio_duration_seconds",
             "data[].model_spec.max_speed",
             "data[].model_spec.min_duration",
@@ -614,6 +616,7 @@
             "data[].model_spec.supports_language_code",
             "data[].model_spec.supports_loop",
             "data[].model_spec.supports_lyrics",
+            "data[].model_spec.supports_reference_audios",
             "data[].model_spec.supports_seed",
             "data[].model_spec.supports_speed",
             "data[].model_spec.traits",
@@ -881,6 +884,7 @@
         "body.lyrics_prompt",
         "body.model",
         "body.prompt",
+        "body.reference_audio_urls",
         "body.speed",
         "body.voice"
       ],
@@ -1414,6 +1418,10 @@
     },
     "POST /decisions": {
       "params": [
+        "body.assets",
+        "body.assets{}.data_base64",
+        "body.assets{}.format",
+        "body.assets{}.type",
         "body.images",
         "body.images[].base64",
         "body.images[].content_type",
@@ -1884,6 +1892,10 @@
     },
     "POST /systemone": {
       "params": [
+        "body.assets",
+        "body.assets{}.data_base64",
+        "body.assets{}.format",
+        "body.assets{}.type",
         "body.images",
         "body.images[].base64",
         "body.images[].content_type",
@@ -1958,6 +1970,8 @@
         "body.consents.seedance.confirmed_screening_acknowledged",
         "body.consents.seedance.confirmed_terms_and_privacy",
         "body.creativity",
+        "body.draft",
+        "body.draft_task_id",
         "body.duration",
         "body.elements",
         "body.elements[].frontal_image_url",
@@ -1968,6 +1982,11 @@
         "body.grain",
         "body.h264_output",
         "body.halo",
+        "body.image_references",
+        "body.image_references[].audio_url",
+        "body.image_references[].image_url",
+        "body.image_references[].ref_name",
+        "body.image_references[].type",
         "body.image_strength",
         "body.image_url",
         "body.keyframes",
@@ -1992,6 +2011,10 @@
         "body.softness",
         "body.target_fps",
         "body.upscale_factor",
+        "body.video_references",
+        "body.video_references[].audio_url",
+        "body.video_references[].ref_name",
+        "body.video_references[].video_url",
         "body.video_url"
       ],
       "request_content_types": [
@@ -2003,7 +2026,11 @@
             "application/json"
           ],
           "fields": [
+            "can_upgrade_to_hd",
             "download_url",
+            "draft_expires_at",
+            "draft_task_id",
+            "is_draft",
             "model",
             "queue_id"
           ]
@@ -2014,8 +2041,11 @@
       "params": [
         "body.aspect_ratio",
         "body.audio",
+        "body.draft",
+        "body.draft_task_id",
         "body.duration",
         "body.enhancement_model",
+        "body.image_url",
         "body.model",
         "body.reference_video_total_duration",
         "body.resolution",
@@ -2055,7 +2085,11 @@
           ],
           "fields": [
             "average_execution_time",
+            "can_upgrade_to_hd",
+            "draft_expires_at",
+            "draft_task_id",
             "execution_duration",
+            "is_draft",
             "status"
           ]
         }
@@ -2448,11 +2482,11 @@
       "\"gpt-image-2-edit\"",
       "\"grok-imagine-edit\"",
       "\"grok-imagine-image-2-0-edit\"",
-      "\"grok-imagine-quality-edit\"",
       "\"ideogram-v4-5-edit\"",
       "\"krea-3-edit\"",
       "\"luma-uni-1-edit\"",
       "\"luma-uni-1-max-edit\"",
+      "\"minimax-h3-image-edit\"",
       "\"muse-image-edit\"",
       "\"nano-banana-2-1-edit\"",
       "\"nano-banana-2-edit\"",
@@ -2466,6 +2500,7 @@
       "\"qwen-image-3-edit\"",
       "\"qwen-image-3-pro-edit\"",
       "\"seedream-v4-edit\"",
+      "\"seedream-v5-5-edit\"",
       "\"seedream-v5-lite-edit\"",
       "\"seedream-v5-pro-edit\"",
       "\"wan-2-7-pro-edit\""
@@ -2482,9 +2517,9 @@
       "\"gpt-image-2-edit\"",
       "\"grok-imagine-edit\"",
       "\"grok-imagine-image-2-0-edit\"",
-      "\"grok-imagine-quality-edit\"",
       "\"ideogram-v4-5-edit\"",
       "\"krea-3-edit\"",
+      "\"minimax-h3-image-edit\"",
       "\"muse-image-edit\"",
       "\"nano-banana-2-1-edit\"",
       "\"nano-banana-2-edit\"",
@@ -2498,6 +2533,7 @@
       "\"qwen-image-3-edit\"",
       "\"qwen-image-3-pro-edit\"",
       "\"seedream-v4-edit\"",
+      "\"seedream-v5-5-edit\"",
       "\"seedream-v5-lite-edit\"",
       "\"seedream-v5-pro-edit\"",
       "\"wan-2-7-pro-edit\""
@@ -2701,6 +2737,14 @@
     "schemas/CreateClonedVoiceRequestSchema.model": [
       "\"tts-chatterbox-hd\"",
       "\"tts-minimax-speech-02-hd\""
+    ],
+    "schemas/CreateDecisionRequestSchema.assets{}.format": [
+      "\"jpeg\"",
+      "\"jpg\"",
+      "\"png\""
+    ],
+    "schemas/CreateDecisionRequestSchema.assets{}.type": [
+      "\"image\""
     ],
     "schemas/CreateDecisionRequestSchema.images[].content_type": [
       "\"image/jpeg\"",
@@ -2935,6 +2979,10 @@
       "\"9s\"",
       "\"Auto\"",
       "\"auto\""
+    ],
+    "schemas/QueueVideoRequest.image_references[].type": [
+      "\"background\"",
+      "\"subject\""
     ],
     "schemas/QueueVideoRequest.omni_reference_task_type": [
       "\"auto\"",
@@ -3322,7 +3370,6 @@
     ],
     "schemas/X402InferencePaymentRequired.siwxChallenge.supportedChains[].type": [
       "\"ed25519\"",
-      "\"eip1271\"",
       "\"eip191\""
     ]
   }

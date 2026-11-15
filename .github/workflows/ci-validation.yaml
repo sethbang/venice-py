@@ -67,8 +67,10 @@ jobs:
       # dcap-qvl, eth-account, siwe, solders) and mypy degrades the same
       # imports to Any. The merge gate would be green while never exercising
       # the most security-sensitive code in the SDK.
+      # sync, not install: restore-keys can restore a virtualenv built from an
+      # older lock, and install never removes what the lock has since dropped.
       - name: Install dependencies
-        run: poetry install --with dev --all-extras
+        run: poetry sync --with dev --all-extras
 
       # Static analysis is pinned to the 3.11 floor by mypy.ini and
       # pyrightconfig.json, so it gives the same answer on every interpreter;
@@ -156,7 +158,7 @@ jobs:
         uses: snok/install-poetry@v1  # not pinned — see workflow header
 
       - name: Install dependencies
-        run: poetry install --with dev
+        run: poetry sync --with dev
 
       - name: Build sdist + wheel
         run: poetry build
@@ -256,7 +258,7 @@ jobs:
         uses: snok/install-poetry@v1  # not pinned — see workflow header
 
       - name: Install dependencies
-        run: poetry install --with dev
+        run: poetry sync --with dev
 
       - name: Run vulture (min_confidence=80)
         run: poetry run vulture src/ --min-confidence 80
@@ -281,7 +283,7 @@ jobs:
         uses: snok/install-poetry@v1  # not pinned — see workflow header
 
       - name: Install dependencies (with x402 extras for siwe/eth_account stubs)
-        run: poetry install --with dev --extras x402
+        run: poetry sync --with dev --extras x402
 
       - name: Run strict mypy
         run: make type-check-strict
@@ -309,7 +311,7 @@ jobs:
       # extras (e.g. core.backends.redis, core.config.main's pydantic_settings
       # branch). Install --extras all so every conditional import resolves.
       - name: Install dependencies (--extras all so all conditional imports resolve)
-        run: poetry install --with dev --extras all
+        run: poetry sync --with dev --extras all
 
       - name: Run pyright on src/
         run: poetry run pyright src/
@@ -339,7 +341,7 @@ jobs:
         uses: snok/install-poetry@v1  # not pinned — see workflow header
 
       - name: Install dependencies
-        run: poetry install --with dev
+        run: poetry sync --with dev
 
       # --all-extras is read from pyproject/poetry.lock, not the installed venv,
       # so it must be passed here even though the install step above is plain.

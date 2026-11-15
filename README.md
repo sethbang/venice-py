@@ -253,13 +253,18 @@ async with job:
 
 Advanced body fields on `submit()` (all optional):
 `upscale_factor`, `end_image_url`, `audio_url`, `video_url`,
-`reference_image_urls` (up to 9), `elements` (up to 4 Kling-O3 structured
-characters), `scene_image_urls` (up to 4). For the dedicated
+`reference_image_urls` (up to 30), `reference_video_urls` and
+`reference_audio_urls` (up to 10 each), `image_references` /
+`video_references` (references as objects, each with a role, prompt name or
+voice), `elements` (up to 4 Kling-O3 structured characters),
+`scene_image_urls` (up to 4), and `draft=True` for a Seedance 2.5 draft that
+`upgrade_draft()` turns into the HD version. For the dedicated
 `topaz-video-upscale` model, pass `video_url` + `upscale_factor` (1/2/4)
 instead of `resolution`. `quote()` accepts only the pricing-relevant
 subset (`model`, `duration_seconds`, `aspect_ratio`, `resolution`, `upscale_factor`,
-`audio`, `video_url`) per the API spec — prompt text and reference images
-don't affect price.
+`audio`, `video_url`, plus the enhancement, frame-rate and draft fields) per
+the API spec. Prompt text and reference images don't affect price; the
+image-to-video `image_url` does when `aspect_ratio="auto"`, so pass it there.
 
 [-> `examples/video/text_to_video.py`](https://github.com/sethbang/venice-py/blob/main/examples/video/text_to_video.py) | [-> `examples/video/advanced_fields.py`](https://github.com/sethbang/venice-py/blob/main/examples/video/advanced_fields.py) | [-> `examples/video/upscale.py`](https://github.com/sethbang/venice-py/blob/main/examples/video/upscale.py)
 
@@ -345,7 +350,8 @@ Every question is evaluated in parallel and in isolation against the same
 state, so one question cannot see another's answer. `noul` is a probability in
 `[0, 1]`, not a bool. Pass `images=` (up to four PNG or JPEG images, e.g.
 `DecisionImage.from_file("photo.jpg")`) to ask about pictures; not every
-decision model accepts them. Venice documents `POST /decisions` as unstable:
+decision model accepts them. Jev also takes `assets=`, images keyed by the name
+your state or questions use for them (`DecisionAsset.from_file(...)`). Venice documents `POST /decisions` as unstable:
 request and response schemas may change without notice.
 
 [-> `examples/decisions/ticket_routing.py`](https://github.com/sethbang/venice-py/blob/main/examples/decisions/ticket_routing.py)
@@ -586,7 +592,7 @@ Rate limiting, distributed state, monitoring, observability, and performance tun
 | `chat.completions` | Chat & text generation | `create()` | [simple_chat.py](https://github.com/sethbang/venice-py/blob/main/examples/chat/simple_chat.py) |
 | `responses` | OpenAI Responses-format API (beta) | `create()` | [responses_api.py](https://github.com/sethbang/venice-py/blob/main/examples/responses/responses_api.py) |
 | `image` | Image generation | `create()`, `background_remove()` | [text_to_image.py](https://github.com/sethbang/venice-py/blob/main/examples/image/text_to_image.py) |
-| `video` | Async video generation | `run()` → `VideoJob`, low-level `submit()` / `quote()` / `retrieve()` / `cancel()` | [text_to_video.py](https://github.com/sethbang/venice-py/blob/main/examples/video/text_to_video.py) |
+| `video` | Async video generation | `run()` → `VideoJob`, low-level `submit()` / `quote()` / `upgrade_draft()` / `retrieve()` / `cancel()` | [text_to_video.py](https://github.com/sethbang/venice-py/blob/main/examples/video/text_to_video.py) |
 | `audio` | TTS / ASR | `create_speech()`, `transcribe()` | [text_to_speech.py](https://github.com/sethbang/venice-py/blob/main/examples/audio/text_to_speech.py) |
 | `music` | Async music generation | `run()` → `MusicJob`, low-level `submit()` / `quote()` / `retrieve()` / `release()` | [music_generation.py](https://github.com/sethbang/venice-py/blob/main/examples/music/music_generation.py) |
 | `decisions` | Typed judgments from decision models (Beta) | `create()` | [ticket_routing.py](https://github.com/sethbang/venice-py/blob/main/examples/decisions/ticket_routing.py) |

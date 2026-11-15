@@ -330,17 +330,17 @@ def _determine_output_path(output: str | None, save_dir: str, ext: str = "mp4") 
 @click.option(
     "--reference-image-urls",
     multiple=True,
-    help="Reference image URL for character/style consistency (repeatable, up to 9)",
+    help="Reference image URL for character/style consistency (repeatable, up to 30)",
 )
 @click.option(
     "--reference-video-urls",
     multiple=True,
-    help="Reference video URL for R2V models (repeatable, up to 3)",
+    help="Reference video URL for R2V models (repeatable, up to 10)",
 )
 @click.option(
     "--reference-audio-urls",
     multiple=True,
-    help="Reference audio donor URL for R2V models (repeatable, up to 3)",
+    help="Reference audio donor URL for R2V models (repeatable, up to 10)",
 )
 @click.option(
     "--end-image-url",
@@ -552,17 +552,17 @@ async def _generate_async(
 @click.option(
     "--reference-image-urls",
     multiple=True,
-    help="Reference image URL for character/style consistency (repeatable, up to 9)",
+    help="Reference image URL for character/style consistency (repeatable, up to 30)",
 )
 @click.option(
     "--reference-video-urls",
     multiple=True,
-    help="Reference video URL for R2V models (repeatable, up to 3)",
+    help="Reference video URL for R2V models (repeatable, up to 10)",
 )
 @click.option(
     "--reference-audio-urls",
     multiple=True,
-    help="Reference audio donor URL for R2V models (repeatable, up to 3)",
+    help="Reference audio donor URL for R2V models (repeatable, up to 10)",
 )
 @click.option(
     "--end-image-url",

@@ -117,6 +117,70 @@ DecisionImageInput = str | DecisionImage
 """One image in a decision request: a PNG or JPEG ``data:`` URI, or a :class:`DecisionImage`."""
 
 
+DecisionAssetFormat = Literal["png", "jpg", "jpeg"]
+"""Image formats a decision asset accepts (``jpeg`` is another name for ``jpg``)."""
+
+_ASSET_SUFFIX_FORMATS: dict[str, DecisionAssetFormat] = {
+    ".png": "png",
+    ".jpg": "jpg",
+    ".jpeg": "jpg",
+}
+
+
+class DecisionAsset(BaseModel):
+    """A named image the prompt refers to by key, for ``assets`` on a decision request.
+
+    Unlike the positional ``images`` list, ``assets`` is a map: each key is the
+    reference string you use in ``state``, ``instructions`` or ``criteria``.
+    Only Jev accepts assets; other decision models reject the request. Build
+    one from a file with :meth:`from_file` or from bytes with :meth:`from_bytes`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    data_base64: str = Field(
+        ...,
+        min_length=1,
+        description="Base64 image bytes, without a ``data:`` prefix.",
+    )
+    format: DecisionAssetFormat = Field(..., description="Image format, lowercase.")
+    type: Literal["image"] | None = Field(
+        default=None, description="Asset kind. Optional; when set it must be ``image``."
+    )
+
+    @field_validator("data_base64")
+    @classmethod
+    def _reject_data_uri(cls, v: str) -> str:
+        """The field takes raw base64; a ``data:`` URI belongs in ``images``."""
+        if v.startswith("data:"):
+            raise ValueError(
+                "data_base64 takes raw base64 bytes without a data: prefix; "
+                "use DecisionAsset.from_file() or strip the prefix."
+            )
+        return v
+
+    @classmethod
+    def from_bytes(cls, data: bytes, *, format: DecisionAssetFormat) -> "DecisionAsset":
+        """Encode ``data`` as a PNG or JPEG asset."""
+        return cls(data_base64=base64.b64encode(data).decode("ascii"), format=format)
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> "DecisionAsset":
+        """Read a ``.png``, ``.jpg`` or ``.jpeg`` file into a :class:`DecisionAsset`.
+
+        :raises ValueError: If the file extension is not a PNG or JPEG one.
+        :raises OSError: If the file cannot be read.
+        """
+        file_path = Path(path)
+        fmt = _ASSET_SUFFIX_FORMATS.get(file_path.suffix.lower())
+        if fmt is None:
+            raise ValueError(
+                f"{file_path.name!r} is not a PNG or JPEG file; decision assets "
+                "must be .png, .jpg or .jpeg."
+            )
+        return cls.from_bytes(file_path.read_bytes(), format=fmt)
+
+
 # ============================================================================
 # Question models
 # ============================================================================
@@ -252,6 +316,28 @@ class CreateDecisionRequest(BaseModel):
             "fetched. Not every decision model accepts images."
         ),
     )
+    assets: dict[str, DecisionAsset] | None = Field(
+        default=None,
+        description=(
+            "Jev only: images keyed by the reference string used in ``state``, "
+            "``instructions`` or ``criteria``. Other decision models reject it."
+        ),
+    )
+
+    @field_validator("assets")
+    @classmethod
+    def _require_asset_keys(
+        cls, v: dict[str, DecisionAsset] | None
+    ) -> dict[str, DecisionAsset] | None:
+        """A key is how the prompt names the asset, so it cannot be blank.
+
+        An empty map is dropped: models other than Jev reject the field's presence.
+        """
+        if not v:
+            return None
+        if any(not key.strip() for key in v):
+            raise ValueError("asset keys must be non-empty reference strings.")
+        return v
 
     @field_validator("images")
     @classmethod
@@ -293,6 +379,8 @@ class CreateDecisionRequest(BaseModel):
 __all__ = [
     "ChoiceQuestion",
     "CreateDecisionRequest",
+    "DecisionAsset",
+    "DecisionAssetFormat",
     "DecisionImage",
     "DecisionImageContentType",
     "DecisionImageInput",

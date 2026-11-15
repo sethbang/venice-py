@@ -87,7 +87,7 @@ jobs:
             ${{ github.repository }}-${{ runner.os }}-poetry-
       
       - name: Install dependencies
-        run: poetry install --with dev
+        run: poetry sync --with dev
       
       # Download budget state from previous run
       - name: Download Budget State
@@ -195,7 +195,7 @@ jobs:
             ${{ github.repository }}-${{ runner.os }}-poetry-
       
       - name: Install dependencies
-        run: poetry install --with dev
+        run: poetry sync --with dev
       
       - name: Start Redis Cluster
         run: |

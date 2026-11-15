@@ -480,7 +480,8 @@ class TestNestedConstraintCapabilityExtraAllow:
         )
         assert c.model_extra is not None
         assert c.model_extra.get("audio_input") is True
-        assert c.model_extra.get("per_reference_audio") is False
+        assert c.per_reference_audio is False  # typed field, not an extra
+        assert "per_reference_audio" not in c.model_extra
         assert c.model_extra.get("prompt_character_limit") == 2000
         assert c.model_dump()["reference_image_min_aspect_ratio"] == 0.4
 

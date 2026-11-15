@@ -591,7 +591,7 @@ def test_video_request_accepts_reference_audio_urls():
     assert req.reference_audio_urls == ["https://example.com/voice.mp3"]
 
 
-def test_video_request_reference_audio_urls_max_three():
+def test_video_request_reference_audio_urls_max_ten():
     from pydantic import ValidationError
 
     from venice_ai.types.api.requests.video import VideoImageToVideoRequest
@@ -602,7 +602,7 @@ def test_video_request_reference_audio_urls_max_three():
             prompt="dance",
             duration="5s",
             image_url="https://example.com/ref.png",
-            reference_audio_urls=[f"https://example.com/{i}.mp3" for i in range(4)],
+            reference_audio_urls=[f"https://example.com/{i}.mp3" for i in range(11)],
         )
 
 

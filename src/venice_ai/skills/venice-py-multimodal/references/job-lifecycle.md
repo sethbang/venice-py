@@ -199,7 +199,7 @@ Both video and music expose `client.<resource>.quote(...)` to get a USD price es
 ```python
 quote = await client.video.quote(
     model=await client.models.resolve_video(video_type="text-to-video"),
-    duration_seconds=10,                          # quote takes NO prompt — just model + duration (+ optional resolution)
+    duration_seconds=10,                          # quote takes NO prompt — model + duration (+ resolution; + image_url for i2v with aspect_ratio="auto")
     resolution="1080p",
 )
 print(f"Estimated cost: ${quote.quote}")          # VideoQuoteResponse.quote (a number)

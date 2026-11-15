@@ -50,8 +50,12 @@ await client.video.run(
     end_image_url=None,                         # str | None — target end frame (interpolation)
     audio_url=None,                             # str | None — source audio to sync to
     video_url=None,                             # str | None — input video for video-to-video
-    reference_image_urls=None,                  # list[str] | None — ≤9 style/identity references
-    reference_audio_urls=None,                  # list[str] | None — ≤3 R2V audio donors (Seedance 2.0)
+    reference_image_urls=None,                  # list[str] | None — ≤30 style/identity references
+    reference_audio_urls=None,                  # list[str] | None — ≤10 R2V audio donors (Seedance 2.0)
+    image_references=None,                      # list[VideoImageReference | dict] | None — ≤30, each with type/ref_name/audio_url
+    video_references=None,                      # list[VideoVideoReference | dict] | None — ≤5 clips, each with an optional voice
+    draft=None,                                 # bool | None — Seedance 2.5: fast 480p draft (see "Drafts")
+    draft_task_id=None,                         # str | None — upgrade a draft; prefer client.video.upgrade_draft()
     elements=None,                              # list[VideoElement] | None — scene composition
     scene_image_urls=None,                      # list[str] | None — multi-shot composition
 )
@@ -147,13 +151,17 @@ Video is the most expensive Venice modality. Always quote first:
 ```python
 quote = await client.video.quote(
     model=await client.models.resolve_video(video_type="text-to-video"),
-    duration_seconds="10s",                       # quote takes NO prompt — just model + duration (+ optional resolution)
+    duration_seconds="10s",                       # quote takes NO prompt — model + duration (+ resolution; + image_url for i2v with aspect_ratio="auto")
     resolution="1080p",
 )
 print(f"Estimated cost: ${quote.quote}")          # VideoQuoteResponse.quote (a number)
 if float(quote.quote) > MY_BUDGET:
     raise SystemExit("over budget")
 ```
+
+For image-to-video with `aspect_ratio="auto"`, pass the same `image_url` to
+`quote()`: the quote reads the image the way queue billing does, so leaving it
+out can quote a different price than the job bills.
 
 For automatic cheapest-model selection across all candidates:
 
@@ -170,6 +178,55 @@ job = await client.video.submit(model=result.model, prompt="...", **result.reque
 Each candidate is quoted at its own cheapest valid request (shortest listed duration, lowest listed resolution, 16:9 when listed, `audio=False` where configurable), so models without a 5-second clip are still compared. Pass `duration=` or `resolution=` to pin one; models that don't list it are skipped. `result.all_quotes` maps every quoted model to its USD price and `result.skipped` says why any candidate was left out. `cheapest_video_params(constraints)` from `venice_ai.models.selection` builds the same request for a model you picked yourself.
 
 `resolve_cheapest_video` issues one quote call per candidate (at most 8 at once). Quotes are free, but cache the result rather than calling it in a loop.
+
+## Drafts (Seedance 2.5)
+
+Seedance 2.5 models can render a fast 480p draft first (the API names a
+`supportsDraftMode` capability but `/models` does not publish it yet). Review it, then pay for the HD version only if it is worth keeping. The
+upgrade is a new, billed job, available for 7 days:
+
+```python
+params = dict(prompt="A paper boat in the rain", duration_seconds=5, aspect_ratio="16:9")
+draft = await client.video.submit(model=draft_model, draft=True, **params)
+# ... wait for the draft and review it ...
+if draft.draft_task_id:
+    cost = await client.video.quote(
+        model=draft.model, draft_task_id=draft.draft_task_id, duration_seconds=5,
+    )
+    hd = await client.video.upgrade_draft(
+        model=draft.model, draft_task_id=draft.draft_task_id, **params,
+    )
+```
+
+Queue and retrieve responses carry `is_draft`, `draft_task_id`,
+`can_upgrade_to_hd` and `draft_expires_at`; the draft's `draft_task_id` is its
+`queue_id`, so with `run(draft=True)` use `job.queue_id`. The API says the
+upgrade follows the draft, but it still validates the upgrade like a new
+generation: pass the draft's `prompt`, `duration_seconds` and `aspect_ratio`
+(text-to-video) or `image_url` (image-to-video) again, and `duration_seconds` on
+the upgrade quote. `draft` and `draft_task_id` cannot be combined.
+
+## Per-reference objects (`image_references`, `video_references`)
+
+Use these instead of `reference_image_urls` / `reference_video_urls` when a
+reference needs more than a URL: a role (`type="subject"` or `"background"`, for
+PixVerse C1), a prompt name (`ref_name`), or its own voice (`audio_url`, on
+models whose `model_spec.constraints.per_reference_audio` is true, e.g. Wan 2.7
+R2V):
+
+```python
+from venice_ai.types import VideoImageReference
+
+await client.video.submit(
+    model=r2v_model,
+    prompt="Hero walks through Forest",
+    duration_seconds=5,
+    image_references=[
+        VideoImageReference(image_url=hero_png, ref_name="Hero", audio_url=hero_voice_mp3),
+        {"image_url": forest_png, "type": "background", "ref_name": "Forest"},
+    ],
+)
+```
 
 ## Multi-shot composition (`elements` and `scene_image_urls`)
 
@@ -220,7 +277,7 @@ async with await client.video.run(
 ## Reference audio (R2V — Seedance 2.0)
 
 Reference-to-video models (e.g. `seedance-2-0-reference-to-video`,
-`seedance-2-0-fast-reference-to-video`) accept up to 3 `reference_audio_urls` —
+`seedance-2-0-fast-reference-to-video`) accept up to 10 `reference_audio_urls` —
 donor clips for vocal timbre / narration / SFX. Each clip is 2–15s,
 `.wav`/`.mp3` (aggregate ≤15s), supplied as a public URL or a `data:` URL, and
 **must be paired with at least one reference image or video**:

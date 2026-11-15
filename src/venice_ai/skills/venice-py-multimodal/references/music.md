@@ -53,7 +53,7 @@ await client.music.run(
 The exact parameter set is model-specific. Common controls (model-dependent):
 - **Genre / style hints in `prompt`** — "lo-fi beats, 90 BPM, mellow"
 - **`duration_seconds`** — typically 10s to 120s; check the model's max
-- **`negative_prompt`** — what to avoid (some models)
+- **`reference_audio_urls`** — clips the prompt names in order as `@Audio1`, `@Audio2`... Each must be a base64 `data:` URL (http(s) URLs are rejected locally) of audio without video, at most 30 s and 10 MB. Only on models whose spec reports `supports_reference_audios=true`, up to `max_reference_audios`; a declared `false` or too many clips raises `ValueError` before sending. Cannot be combined with a preset `voice` (omit it or use `"Describe in prompt"`).
 
 ## Cost-quote BEFORE running
 

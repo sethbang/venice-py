@@ -74,7 +74,7 @@ Note:
     same endpoint, so this resource targets ``/decisions`` only.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from .._resource import APIResource
@@ -82,6 +82,7 @@ from ..exceptions import InvalidRequestError
 from ..types.api.decisions import DecisionResponse
 from ..types.api.requests.decisions import (
     CreateDecisionRequest,
+    DecisionAsset,
     DecisionImage,
     DecisionState,
 )
@@ -107,6 +108,7 @@ class Decisions(APIResource["VeniceClient"]):
         state: DecisionState,
         questions: dict[str, Any],
         images: Sequence[str | DecisionImage | dict[str, Any]] | None = None,
+        assets: Mapping[str, DecisionAsset | dict[str, Any]] | None = None,
     ) -> DecisionResponse:
         """
         Evaluate ``state`` against a map of typed questions.
@@ -140,6 +142,14 @@ class Decisions(APIResource["VeniceClient"]):
             rejects the request with :class:`InvalidRequestError`. Omitted
             from the request when ``None``.
         :type images: Optional[Sequence[Union[str, DecisionImage, Dict[str, Any]]]]
+        :param assets: Jev only: images keyed by the reference string your
+            ``state``, ``instructions`` or ``criteria`` use to name them, each a
+            :class:`~venice_ai.types.api.requests.decisions.DecisionAsset` (see
+            :meth:`DecisionAsset.from_file`) or an equivalent
+            ``{"data_base64", "format"}`` dict. Other decision models reject
+            the request with :class:`InvalidRequestError`. Omitted from the
+            request when ``None``.
+        :type assets: Optional[Mapping[str, Union[DecisionAsset, Dict[str, Any]]]]
 
         :return: The model's answers, one per question, plus token usage.
         :rtype: ~venice_ai.types.api.decisions.DecisionResponse
@@ -224,14 +234,16 @@ class Decisions(APIResource["VeniceClient"]):
                 body=None,
             )
 
-        # Dicts are validated into DecisionImage by the request model.
+        # Dicts are validated into DecisionImage / DecisionAsset by the request model.
         image_list: list[Any] | None = None if images is None else list(images)
+        asset_map: dict[str, Any] | None = None if assets is None else dict(assets)
         try:
             decision_request = CreateDecisionRequest(
                 model=model,
                 state=state,
                 questions=questions,
                 images=image_list,
+                assets=asset_map,
             )
         except ValueError as exc:
             # Surface local schema violations as the SDK's own request error

@@ -108,6 +108,21 @@ response = await client.decisions.create(
 - **Remote URLs are not fetched.** A string must be a `data:image/png;base64,...` or `data:image/jpeg;base64,...` URI; anything else fails locally before the request is sent.
 - **Images add input tokens**, so a request with images costs more than the same request without them.
 
+### Named assets (Jev)
+
+Jev also takes `assets`: images keyed by the name your `state`, `instructions` or `criteria` uses for them, so a question can say which image it means. Other decision models reject the request. Each value is a `DecisionAsset` (or a `{"data_base64", "format"}` dict); `data_base64` is raw base64 with no `data:` prefix:
+
+```python
+from venice_ai.types.api import DecisionAsset, NoulQuestion
+
+response = await client.decisions.create(
+    model=jev_model,
+    state="Compare receipt_photo with the claimed total of $42.10.",
+    questions={"match": NoulQuestion(instructions="Does receipt_photo show the claimed total?")},
+    assets={"receipt_photo": DecisionAsset.from_file("receipt.jpg")},
+)
+```
+
 ## Cost
 
 Pricing differs by decision model: some bill input tokens only, others bill output too. Read the model's `model_spec.pricing` from the catalog rather than assuming. `response.usage` reports both counts on every model, so `output_tokens` being non-zero is expected and not a billing signal.

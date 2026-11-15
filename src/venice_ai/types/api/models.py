@@ -348,6 +348,13 @@ class VideoModelConstraints(BaseModel):
         default=False, description="Whether audio can be toggled via request parameter"
     )
     video_input: bool = Field(default=False, description="Whether model accepts video input")
+    per_reference_audio: bool | None = Field(
+        default=None,
+        description=(
+            "Whether each entry of ``image_references`` / ``video_references`` can "
+            "carry its own ``audio_url`` voice."
+        ),
+    )
 
 
 class PricingTier(BaseModel):
@@ -815,6 +822,14 @@ class MusicModelSpec(ModelSpec):
     supports_loop: bool | None = Field(
         default=None,
         description="Whether the model supports the ``loop`` flag.",
+    )
+    supports_reference_audios: bool | None = Field(
+        default=None,
+        description="Whether the model accepts ``reference_audio_urls``.",
+    )
+    max_reference_audios: int | None = Field(
+        default=None,
+        description="Most ``reference_audio_urls`` clips one request may carry.",
     )
 
     supports_language_code: bool | None = Field(

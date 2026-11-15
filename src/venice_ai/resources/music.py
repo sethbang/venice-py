@@ -173,6 +173,41 @@ async def _preflight_validate_loop(
         )
 
 
+async def _preflight_validate_reference_audios(
+    client: VeniceClient,
+    model_id: str,
+    reference_audio_urls: list[str] | None,
+) -> None:
+    """Pre-flight check ``reference_audio_urls`` against the model's spec.
+
+    Best-effort, like :func:`_preflight_validate_loop`: it raises only when the
+    catalog declares the request will fail. An undeclared capability
+    (``supports_reference_audios`` or ``max_reference_audios`` is ``None``), a
+    catalog miss or a non-music spec defers to the server.
+    """
+    if not reference_audio_urls:
+        return
+    try:
+        entry = await client.models.get(model_id)
+    except Exception:  # noqa: BLE001 - catalog miss => let server validate
+        return
+    spec = entry.model_spec
+    if not isinstance(spec, MusicModelSpec):
+        return
+    if spec.supports_reference_audios is False:
+        raise ValueError(
+            f"reference_audio_urls is not supported by model {model_id!r}; omit the "
+            "parameter or pick a model whose "
+            "``model_spec.supports_reference_audios`` is true."
+        )
+    limit = spec.max_reference_audios
+    if limit is not None and len(reference_audio_urls) > limit:
+        raise ValueError(
+            f"model {model_id!r} takes at most {limit} reference_audio_urls; "
+            f"got {len(reference_audio_urls)}."
+        )
+
+
 def _log_unsuccessful_release(queue_id: str, model: str) -> None:
     logger.warning(
         "Releasing music job queue_id=%s (model %s) did not complete: Venice "
@@ -546,6 +581,7 @@ class Music(APIResource["VeniceClient"]):
         language_code: str | None = None,
         speed: float | None = None,
         loop: bool | None = None,
+        reference_audio_urls: list[str] | None = None,
     ) -> MusicQueueResponse:
         """Queue a music generation request.
 
@@ -579,6 +615,15 @@ class Music(APIResource["VeniceClient"]):
                 its start without an audible seam. Only supported when
                 ``/models`` reports ``supports_loop=true``. Defaults to
                 ``None`` (model default applies).
+            reference_audio_urls: Reference clips the prompt names in order
+                as ``@Audio1``, ``@Audio2``... Each must be a base64
+                ``data:`` URL (http(s) URLs are not supported) of audio
+                without video, at most 30 s and 10 MB. Only for models whose
+                ``/models`` entry reports ``supports_reference_audios=true``,
+                up to ``max_reference_audios`` clips; a ``ValueError`` is
+                raised before sending when the catalog says otherwise.
+                Cannot be combined with a preset ``voice`` other than
+                ``"Describe in prompt"``.
 
         Returns:
             :class:`MusicQueueResponse` containing the ``queue_id`` to poll
@@ -596,6 +641,7 @@ class Music(APIResource["VeniceClient"]):
         await _preflight_validate_music_duration(self._client, model, duration_seconds)
         await _preflight_validate_force_instrumental(self._client, model, force_instrumental)
         await _preflight_validate_loop(self._client, model, loop)
+        await _preflight_validate_reference_audios(self._client, model, reference_audio_urls)
         request = MusicQueueRequest.model_validate(
             {
                 "model": model,
@@ -608,6 +654,7 @@ class Music(APIResource["VeniceClient"]):
                 "language_code": language_code,
                 "speed": speed,
                 "loop": loop,
+                "reference_audio_urls": reference_audio_urls,
             }
         )
         body = request.model_dump(exclude_none=True)
@@ -847,6 +894,7 @@ class Music(APIResource["VeniceClient"]):
         language_code: str | None = None,
         speed: float | None = None,
         loop: bool | None = None,
+        reference_audio_urls: list[str] | None = None,
     ) -> MusicJob:
         """Submit a music generation and return a managed :class:`MusicJob`.
 
@@ -874,6 +922,8 @@ class Music(APIResource["VeniceClient"]):
             speed: Playback-speed multiplier where supported.
             loop: If ``True``, renders the clip so its end splices back into
                 its start seamlessly. Requires ``supports_loop=true``.
+            reference_audio_urls: Reference clips named in the prompt as
+                ``@Audio1``, ``@Audio2``... (see :meth:`submit`).
 
         Returns:
             A :class:`MusicJob` ready to use as an async context manager.
@@ -913,6 +963,7 @@ class Music(APIResource["VeniceClient"]):
             language_code=language_code,
             speed=speed,
             loop=loop,
+            reference_audio_urls=reference_audio_urls,
         )
         return MusicJob(client=self._client, queue_response=queue_response)
 
