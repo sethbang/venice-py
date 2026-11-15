@@ -22,6 +22,11 @@ Catches up with the Venice API specification of 2026-11-13 (`20261113.174621`). 
 
 - **`is_draft`, `draft_task_id`, `can_upgrade_to_hd` and `draft_expires_at` on video queue and retrieve responses, `supports_reference_audios` and `max_reference_audios` on `MusicModelSpec`, and `per_reference_audio` on `VideoModelConstraints` are typed fields.** They no longer appear in `model_extra`; read them as attributes.
 - **`VideoQuoteRequest` accepts `image_url`**, which it used to reject as an unknown field.
+
+### Security
+
+- **The `observability` extra requires `opentelemetry-api` and `opentelemetry-sdk` 1.45.2 or later**, for CVE-2026-126360.
+- Development dependencies: tornado (pulled in by `snakeviz`) is locked at 6.6.1, for CVE-2026-126347. The unused `beautifulsoup4` is removed, and with it soupsieve 2.9.2 (CVE-2026-126190, -126191, -126192 and -126193). Neither ships in the package.
 - **`reference_image_urls` takes up to 30 URLs, and `reference_video_urls` and `reference_audio_urls` up to 10 each**, on `video.submit()`, `video.run()` and the CLI, matching the API. They were capped at 9, 3 and 3, which refused requests the API accepts.
 
 ## [2.11.0] - 2026-11-09
