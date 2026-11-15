@@ -1071,7 +1071,6 @@ class Video(APIResource["VeniceClient"]):
         prompt: str,
         duration_seconds: int | str,
         aspect_ratio: str | None = None,
-        image_url: str | None = None,
         resolution: str | None = None,
         consents: VideoConsents | dict | None = None,
     ) -> VideoQueueResponse:
@@ -1087,7 +1086,8 @@ class Video(APIResource["VeniceClient"]):
         validation still requires the fields a new generation needs, so pass
         the values the draft was made with: ``prompt`` and
         ``duration_seconds``, plus ``aspect_ratio`` for a text-to-video model.
-        For an image-to-video model, also pass the draft's ``image_url``.
+        Media inputs are not resent: an image-to-video upgrade needs no
+        ``image_url``, since the result follows the draft.
 
         :param model: The model the draft was made with.
         :param draft_task_id: The draft's ``draft_task_id`` (its ``queue_id``).
@@ -1095,7 +1095,6 @@ class Video(APIResource["VeniceClient"]):
         :param duration_seconds: The draft's duration.
         :param aspect_ratio: The draft's aspect ratio. Required by
             text-to-video models.
-        :param image_url: The draft's source image, for image-to-video models.
         :param resolution: Target resolution (e.g. ``"1080p"``). Omit for the
             server default.
         :param consents: Provider consent attestations, as for :meth:`submit`.
@@ -1126,7 +1125,6 @@ class Video(APIResource["VeniceClient"]):
             prompt=prompt,
             duration_seconds=duration_seconds,
             aspect_ratio=aspect_ratio,
-            image_url=image_url,
             resolution=resolution,
             consents=consents,
         )

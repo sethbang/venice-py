@@ -130,9 +130,13 @@ class TestQueueWireBody:
 
 
 class TestUpgradeDraft:
-    """The API validates an upgrade like a new generation (live 400s, 2026-11-15):
-    ``/video/queue`` with only ``model`` and ``draft_task_id`` answered that
-    ``prompt``, ``duration`` and ``aspect_ratio`` were required."""
+    """The API validates an upgrade like a new generation (live 400s, 2026-11-15).
+
+    With only ``model`` and ``draft_task_id``, ``/video/queue`` named the missing
+    fields: ``prompt``, ``duration`` and ``aspect_ratio`` on a text-to-video model,
+    ``prompt`` and ``duration`` on an image-to-video one (no ``image_url``). With
+    those added, both reached the draft lookup.
+    """
 
     @pytest.mark.asyncio
     async def test_sends_the_fields_the_api_requires(self) -> None:
@@ -157,16 +161,26 @@ class TestUpgradeDraft:
         assert result.queue_id == "q-1"
 
     @pytest.mark.asyncio
-    async def test_image_to_video_upgrade_forwards_the_image(self) -> None:
+    async def test_image_to_video_upgrade_sends_no_media(self) -> None:
         client = _video_client()
         await Video(client).upgrade_draft(
-            model=MODEL,
+            model="seedance-2-5-image-to-video-basic",
             draft_task_id=DRAFT_ID,
             prompt="p",
             duration_seconds=5,
-            image_url="https://example.com/seed.png",
         )
-        assert _body(client)["image_url"] == "https://example.com/seed.png"
+        assert _body(client) == {
+            "model": "seedance-2-5-image-to-video-basic",
+            "draft_task_id": DRAFT_ID,
+            "prompt": "p",
+            "duration": "5s",
+        }
+
+    def test_media_inputs_are_not_parameters(self) -> None:
+        """The upgrade follows the draft, so it takes no image or video input."""
+        params = inspect.signature(Video.upgrade_draft).parameters
+        for name in ("image_url", "video_url", "reference_image_urls"):
+            assert name not in params
 
     @pytest.mark.asyncio
     async def test_consents_are_forwarded(self) -> None:
