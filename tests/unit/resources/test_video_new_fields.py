@@ -9,9 +9,9 @@ forwards:
 - ``end_image_url`` (str) — end-frame reference
 - ``audio_url`` (str) — background audio input
 - ``video_url`` (str) — video-to-video / upscale input
-- ``reference_image_urls`` (list[str], max 9) — identity/style references
-- ``reference_audio_urls`` (list[str], max 3) — R2V audio donors (Seedance 2.0)
-- ``reference_video_urls`` (list[str], max 3) — R2V video donors (Seedance 2.0)
+- ``reference_image_urls`` (list[str], max 30) — identity/style references
+- ``reference_audio_urls`` (list[str], max 10) — R2V audio donors (Seedance 2.0)
+- ``reference_video_urls`` (list[str], max 10) — R2V video donors (Seedance 2.0)
 - ``elements`` (list[VideoElement], max 4) — structured character/scene elements
 - ``scene_image_urls`` (list[str], max 4) — scene references
 

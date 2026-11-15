@@ -716,9 +716,9 @@ venice-py video generate <PROMPT> [OPTIONS]
 | `--aspect-ratio` | | `16:9` | Aspect ratio (e.g., `16:9`, `9:16`, `1:1`) |
 | `--negative-prompt` | | — | Content to avoid in the video |
 | `--audio / --no-audio` | | — | Generate audio if the model supports it (omitted from the request unless set) |
-| `--reference-image-urls` | | — | Reference image URL for character/style consistency (repeatable, up to 9) |
-| `--reference-video-urls` | | — | Reference video URL for R2V models (repeatable, up to 3) |
-| `--reference-audio-urls` | | — | Reference audio donor URL for R2V models (repeatable, up to 3) |
+| `--reference-image-urls` | | — | Reference image URL for character/style consistency (repeatable, up to 30) |
+| `--reference-video-urls` | | — | Reference video URL for R2V models (repeatable, up to 10) |
+| `--reference-audio-urls` | | — | Reference audio donor URL for R2V models (repeatable, up to 10) |
 | `--end-image-url` | | — | End-frame image URL for models that support transitions |
 | `--output` | `-o` | `video_<timestamp>.mp4` | Output file path |
 | `--save-dir` | | `.` | Directory to save the video |
@@ -727,7 +727,7 @@ venice-py video generate <PROMPT> [OPTIONS]
 
 > \* No static default — resolved at runtime: `--model` wins, else a matching `defaults.video_t2v_model` in your config if set, else the live API-recommended model.
 >
-> The CLI exposes the flat reference/transition fields above. The structured `elements[]` (per-segment prompts) and `scene_image_urls` parameters remain SDK-only — pass them through `client.video.run()`/`submit()`.
+> The CLI exposes the flat reference/transition fields above. The structured `elements[]` (per-segment prompts), `scene_image_urls`, `image_references` / `video_references`, and Seedance 2.5 drafts (`draft=True`, `client.video.upgrade_draft()`) remain SDK-only — pass them through `client.video.run()`/`submit()`.
 
 ```bash
 # Basic video generation
@@ -766,9 +766,9 @@ venice-py video from-image <INPUT_FILE> [OPTIONS]
 | `--duration` | | `5s` | Duration (e.g., `5s`, `10s`) |
 | `--resolution` | | — | Output resolution |
 | `--audio / --no-audio` | | — | Generate audio if the model supports it (omitted from the request unless set) |
-| `--reference-image-urls` | | — | Reference image URL for character/style consistency (repeatable, up to 9) |
-| `--reference-video-urls` | | — | Reference video URL for R2V models (repeatable, up to 3) |
-| `--reference-audio-urls` | | — | Reference audio donor URL for R2V models (repeatable, up to 3) |
+| `--reference-image-urls` | | — | Reference image URL for character/style consistency (repeatable, up to 30) |
+| `--reference-video-urls` | | — | Reference video URL for R2V models (repeatable, up to 10) |
+| `--reference-audio-urls` | | — | Reference audio donor URL for R2V models (repeatable, up to 10) |
 | `--end-image-url` | | — | End-frame image URL for models that support transitions |
 | `--image-strength` | | — | How strongly the input image guides the video, from 0 to 1, on models that declare image strength (provider default 1) |
 | `--output` | `-o` | `video_<timestamp>.mp4` | Output file path |

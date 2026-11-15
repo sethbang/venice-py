@@ -15,7 +15,32 @@ from pydantic import ConfigDict, Discriminator, Field, PrivateAttr, Tag
 from ...core.models.common import VeniceBaseModel
 
 
-class VideoQueueResponse(VeniceBaseModel):
+class _VideoDraftFields(VeniceBaseModel):
+    """Draft fields Venice adds to queue and retrieve responses for Seedance 2.5 drafts.
+
+    All are absent for a job that is not a draft.
+    """
+
+    is_draft: bool | None = Field(
+        default=None, description="Present and true when this job is a draft."
+    )
+    draft_task_id: str | None = Field(
+        default=None,
+        description=(
+            "Pass to ``client.video.upgrade_draft`` (or as ``draft_task_id`` on a new "
+            "queue request) to upgrade this draft to 1080p or 4k."
+        ),
+    )
+    can_upgrade_to_hd: bool | None = Field(
+        default=None, description="Whether the draft can be upgraded to HD right now."
+    )
+    draft_expires_at: str | None = Field(
+        default=None,
+        description="ISO timestamp after which the draft can no longer be upgraded.",
+    )
+
+
+class VideoQueueResponse(_VideoDraftFields):
     """
     Response from queue video generation.
 
@@ -54,7 +79,7 @@ class VideoQuoteResponse(VeniceBaseModel):
     quote: int | float = Field(..., description="Estimated cost in USD")
 
 
-class VideoProcessingStatus(VeniceBaseModel):
+class VideoProcessingStatus(_VideoDraftFields):
     """
     Status response when video is still being generated.
 
@@ -108,7 +133,7 @@ class VideoFailedStatus(VeniceBaseModel):
     error_code: str | None = Field(default=None, description="Error code if available")
 
 
-class VideoCompletedStatus(VeniceBaseModel):
+class VideoCompletedStatus(_VideoDraftFields):
     """
     Status response when video generation is complete.
 

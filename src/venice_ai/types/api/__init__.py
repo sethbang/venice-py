@@ -208,6 +208,8 @@ from .requests import (
     CreateApiKeyRequest,
     CreateDecisionRequest,
     DateRangeParams,
+    DecisionAsset,
+    DecisionAssetFormat,
     DecisionImage,
     DecisionImageContentType,
     DecisionImageInput,
@@ -299,6 +301,7 @@ from .requests import (
     VeniceParameters,
     VideoCompleteRequest,
     VideoConsents,
+    VideoImageReference,
     VideoImageToVideoRequest,
     VideoQueueRequest,
     VideoQuoteRequest,
@@ -307,6 +310,7 @@ from .requests import (
     VideoRetrieveRequest,
     VideoTextToVideoRequest,
     VideoTranscriptionRequest,
+    VideoVideoReference,
     Web3CreateApiKeyRequest,
 )
 from .responses import (
@@ -474,6 +478,8 @@ __all__ = [
     "UnknownAnswer",
     "ChoiceQuestion",
     "CreateDecisionRequest",
+    "DecisionAsset",
+    "DecisionAssetFormat",
     "DecisionImage",
     "DecisionImageContentType",
     "DecisionImageInput",
@@ -698,6 +704,8 @@ __all__ = [
     # From requests module - Video request models
     "VideoRequestBase",
     "CameraKeyframe",
+    "VideoImageReference",
+    "VideoVideoReference",
     "VideoConsents",
     "SeedanceConsents",
     "VideoTextToVideoRequest",

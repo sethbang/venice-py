@@ -2158,7 +2158,7 @@ class TestFromImageCLINewFlags:
 
 
 # ---------------------------------------------------------------------------
-# CLI-B-03: --reference-audio-urls (R2V donor audio, up to 3) wired to submit()
+# CLI-B-03: --reference-audio-urls (R2V donor audio, up to 10) wired to submit()
 # ---------------------------------------------------------------------------
 
 

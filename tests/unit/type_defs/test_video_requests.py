@@ -168,7 +168,8 @@ class TestVideoImageToVideoRequest:
 class TestVideoQuoteRequest:
     """Test quote request validation — ``/video/quote`` accepts only the
     pricing-relevant subset (model, duration, aspect_ratio, resolution,
-    upscale_factor, audio, video_url)."""
+    upscale_factor, audio, video_url, image_url, the enhancement and frame-rate
+    fields, and draft / draft_task_id)."""
 
     def test_minimal_request(self):
         request = VideoQuoteRequest(
@@ -205,10 +206,13 @@ class TestVideoQuoteRequest:
             )  # type: ignore
 
     def test_rejects_prompt_and_image_fields(self):
-        """Prompt and reference-image fields are not part of the quote spec."""
+        """Prompt and reference-image fields are not part of the quote spec.
+
+        The image-to-video ``image_url`` is, since it prices an ``"auto"``
+        aspect ratio.
+        """
         for extra in (
             {"prompt": "anything"},
-            {"image_url": "https://example.com/x.png"},
             {"negative_prompt": "blurry"},
             {"reference_image_urls": ["https://example.com/a.png"]},
             {"elements": [{"frontal_image_url": "https://example.com/a.png"}]},

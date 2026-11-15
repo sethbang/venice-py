@@ -62,6 +62,8 @@ from .common import (
 from .decisions import (
     ChoiceQuestion,
     CreateDecisionRequest,
+    DecisionAsset,
+    DecisionAssetFormat,
     DecisionImage,
     DecisionImageContentType,
     DecisionImageInput,
@@ -126,6 +128,7 @@ from .video import (
     SeedanceConsents,
     VideoCompleteRequest,
     VideoConsents,
+    VideoImageReference,
     VideoImageToVideoRequest,
     VideoQueueRequest,
     VideoQuoteRequest,
@@ -133,6 +136,7 @@ from .video import (
     VideoRetrieveRequest,
     VideoTextToVideoRequest,
     VideoTranscriptionRequest,
+    VideoVideoReference,
 )
 from .voice_changer import (
     CompleteVoiceChangerRequest,
@@ -237,6 +241,8 @@ __all__ = [
     # Video requests
     "VideoRequestBase",
     "CameraKeyframe",
+    "VideoImageReference",
+    "VideoVideoReference",
     "VideoConsents",
     "SeedanceConsents",
     "VideoTextToVideoRequest",
@@ -259,6 +265,8 @@ __all__ = [
     # Decision requests
     "CreateDecisionRequest",
     "DecisionState",
+    "DecisionAsset",
+    "DecisionAssetFormat",
     "DecisionImage",
     "DecisionImageContentType",
     "DecisionImageInput",

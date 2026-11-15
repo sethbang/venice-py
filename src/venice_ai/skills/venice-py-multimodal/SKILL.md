@@ -212,10 +212,12 @@ the server is the backstop.
 Other patterns:
 - **Image-to-video**: pass `image_url="https://..."` (a public or `data:` URL string) to `client.video.run()`. Resolve with `video_type="image-to-video"` for a plain image-to-video model; reference-to-video, transition, first/last-frame and multi-angle models share that catalog type and need `input_mode="reference"` (etc.) instead.
 - **Upscale**: `client.video.run(model=..., video_url=..., upscale_factor=2)` (model-dependent).
-- **Reference fields** (`run()`/`submit()`): `reference_image_urls` (≤9, style/identity),
-  `reference_audio_urls` (≤3, R2V audio donors for vocal timbre/narration/SFX on
+- **Reference fields** (`run()`/`submit()`): `reference_image_urls` (≤30, style/identity),
+  `reference_audio_urls` (≤10, R2V audio donors for vocal timbre/narration/SFX on
   Seedance 2.0 R2V models — each 2–15s `.wav`/`.mp3`, **must be paired with a
-  reference image/video**), `end_image_url` (transitions), and `elements` /
+  reference image/video**), `reference_video_urls` (≤10, R2V motion/style donors),
+  `image_references` / `video_references` (references as objects with a role,
+  prompt name or voice), `end_image_url` (transitions), and `elements` /
   `scene_image_urls` (element-aware models). Each accepts a public URL or a `data:` URL.
 - **Release a finished job's stored media**: `await job.cancel()` on the `VideoJob` (the `async with` block does it on a clean exit once the job finished). It does not stop generation or refund the job, and before the job finishes it deletes nothing. Models whose queue response carries a `download_url` keep the file behind that link: `job.cancel()` sends `DELETE` to it (no API key) before `/video/complete`, which does not know such a job: it answers 400 "Request ID is invalid" or `success: false`. `job.cancel()` accepts either once the file is gone; a 404 counts as gone only for a finished job. The resource-level `client.video.cancel(model=..., queue_id=...)` (keyword-only) only calls `/video/complete`.
 - `client.video.quote(...)` returns USD cost before launching.
@@ -227,7 +229,7 @@ Music and video jobs can be expensive — quote first when budgets matter:
 ```python
 quote = await client.video.quote(
     model=await client.models.resolve_video(video_type="text-to-video"),
-    duration_seconds=10,           # quote takes NO prompt — just model + duration (+ optional resolution)
+    duration_seconds=10,           # quote takes NO prompt — model + duration (+ resolution; + image_url for i2v with aspect_ratio="auto")
     resolution="1080p",
 )
 if quote.quote > BUDGET_USD:

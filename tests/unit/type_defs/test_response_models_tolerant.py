@@ -92,6 +92,7 @@ NOT_FROM_SERVER.update(
     {
         "venice_ai.core.models.base.VeniceBaseModel": "base class; subclasses are checked",
         "venice_ai.core.models.base.TimestampMixin": "mixin; models using it are checked",
+        "venice_ai.types.api.video._VideoDraftFields": "mixin; models using it are checked",
         "venice_ai.core.models.common.AudioContent": "request content part",
         "venice_ai.core.models.common.CacheControl": (
             "request cache breakpoint; response parts type cache_control as an open dict"

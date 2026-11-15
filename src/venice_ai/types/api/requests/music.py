@@ -12,7 +12,11 @@ server-side against the selected model's capability matrix.
 
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+#: The ``voice`` value that leaves the voice to the prompt; the only preset
+#: allowed alongside ``reference_audio_urls``.
+_DESCRIBE_IN_PROMPT = "Describe in prompt"
 
 
 class MusicQueueRequest(BaseModel):
@@ -97,6 +101,43 @@ class MusicQueueRequest(BaseModel):
             "audible seam. Only supported when ``/models`` reports ``supports_loop=true``."
         ),
     )
+    reference_audio_urls: list[str] | None = Field(
+        default=None,
+        description=(
+            "Reference clips the prompt names in order as ``@Audio1``, ``@Audio2``... "
+            "Each is a base64 ``data:`` URL of audio without video (at most 30 s and "
+            "10 MB). Only for models whose ``/models`` entry reports "
+            "``supports_reference_audios=true``, up to ``max_reference_audios``. "
+            "Cannot be combined with a preset ``voice``."
+        ),
+    )
+
+    @field_validator("reference_audio_urls")
+    @classmethod
+    def _require_audio_data_urls(cls, v: list[str] | None) -> list[str] | None:
+        """The API takes inline audio only; it does not fetch http(s) URLs.
+
+        An empty list is dropped, so a model without the capability never sees the field.
+        """
+        if not v:
+            return None
+        for url in v:
+            if not url.startswith("data:"):
+                raise ValueError(
+                    "each reference_audio_urls entry must be a base64 data: URL "
+                    "(data:audio/mpeg;base64,...); http(s) URLs are not supported."
+                )
+        return v
+
+    @model_validator(mode="after")
+    def _reject_reference_audio_with_preset_voice(self) -> "MusicQueueRequest":
+        """Reference clips replace the preset voice, so the two cannot be combined."""
+        if self.reference_audio_urls and self.voice not in (None, _DESCRIBE_IN_PROMPT):
+            raise ValueError(
+                "reference_audio_urls cannot be combined with a preset voice; omit "
+                f"voice or set it to {_DESCRIBE_IN_PROMPT!r}."
+            )
+        return self
 
 
 class MusicQuoteRequest(BaseModel):

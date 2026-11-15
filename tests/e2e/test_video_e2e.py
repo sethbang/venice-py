@@ -711,8 +711,9 @@ class TestVideoE2E:
         i2v = await _resolve_i2v(venice_client)
         with vcr_cassette:
             try:
-                # Quote — /video/quote ignores prompt/image refs;
-                # price is driven by model + duration + resolution.
+                # Quote — /video/quote ignores prompt and reference images;
+                # price is driven by model + duration + resolution (an i2v
+                # image_url matters only for aspect_ratio="auto").
                 quote = await venice_client.video.quote(
                     model=i2v.model,
                     **i2v.request_params,
