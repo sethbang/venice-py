@@ -202,9 +202,9 @@ Queue and retrieve responses carry `is_draft`, `draft_task_id`,
 `can_upgrade_to_hd` and `draft_expires_at`; the draft's `draft_task_id` is its
 `queue_id`, so with `run(draft=True)` use `job.queue_id`. The API says the
 upgrade follows the draft, but it still validates the upgrade like a new
-generation: pass the draft's `prompt`, `duration_seconds` and `aspect_ratio`
-(text-to-video) or `image_url` (image-to-video) again, and `duration_seconds` on
-the upgrade quote. `draft` and `draft_task_id` cannot be combined.
+generation: pass the draft's `prompt` and `duration_seconds` again, plus its
+`aspect_ratio` on a text-to-video model (an image-to-video upgrade needs no
+`image_url`), and `duration_seconds` on the upgrade quote. `draft` and `draft_task_id` cannot be combined.
 
 ## Per-reference objects (`image_references`, `video_references`)
 

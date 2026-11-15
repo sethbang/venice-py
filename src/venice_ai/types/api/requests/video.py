@@ -430,7 +430,8 @@ class VideoRequestBase(BaseModel):
         description=(
             "Seedance 2.5 only: the ``queue_id`` of your own draft to upgrade. The "
             "API still validates the upgrade like a new generation, so send the "
-            "draft's prompt, duration and aspect ratio too. Cannot be combined "
+            "draft's prompt and duration (and, for text-to-video, aspect ratio) too; "
+            "media inputs are not needed. Cannot be combined "
             "with ``draft``."
         ),
     )

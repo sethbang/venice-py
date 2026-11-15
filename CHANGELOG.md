@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-11-15
+
 Catches up with the Venice API specification of 2026-11-13 (`20261113.174621`). One change can affect working code: the draft fields on video responses, and the reference-audio fields on `MusicModelSpec` and `VideoModelConstraints`, move from `model_extra` to typed fields.
 
 ### Added
 
-- **Seedance 2.5 drafts.** `draft=True` on `video.submit()`, `video.run()` and `video.quote()` asks for a fast 480p draft. **`video.upgrade_draft(model=..., draft_task_id=...)`** queues its HD version, which is a new, billed job, within 7 days. Price it first with `video.quote(model=..., draft_task_id=..., duration_seconds=...)`. The API says an upgrade follows the draft, but it validates the request like a new generation, so `upgrade_draft()` requires the draft's `prompt` and `duration_seconds` and takes its `aspect_ratio` (required by text-to-video models) or `image_url`. `draft` and `draft_task_id` cannot be combined.
+- **Seedance 2.5 drafts.** `draft=True` on `video.submit()`, `video.run()` and `video.quote()` asks for a fast 480p draft. **`video.upgrade_draft(model=..., draft_task_id=...)`** queues its HD version, which is a new, billed job, within 7 days. Price it first with `video.quote(model=..., draft_task_id=..., duration_seconds=...)`. The API says an upgrade follows the draft, but it validates the request like a new generation, so `upgrade_draft()` requires the draft's `prompt` and `duration_seconds`, and takes its `aspect_ratio`, which text-to-video models also require. An image-to-video upgrade needs no `image_url`. `draft` and `draft_task_id` cannot be combined.
 - **`image_references` and `video_references`** on `video.submit()` and `video.run()`. These are references given as objects, so each one can have a role, a prompt name or its own voice. They take **`VideoImageReference`** (`image_url`, `type` of `"subject"` or `"background"`, `ref_name`, `audio_url`; up to 30) and **`VideoVideoReference`** (`video_url`, `ref_name`, `audio_url`; up to 5), or equivalent dicts.
 - **`image_url` on `video.quote()`.** With `aspect_ratio="auto"`, an image-to-video quote reads the image the same way the job is billed. Without the image, the quote can differ from what the job costs.
 - **`assets` on `decisions.create()`**: Jev images keyed by the reference string the state, instructions or criteria use for them. Other decision models reject the request. Each asset is a **`DecisionAsset`** (`data_base64`, `format` of `png`, `jpg` or `jpeg`), built with `DecisionAsset.from_file()` or `from_bytes()`, or an equivalent dict. It is separate from the positional `images` list. An empty map is not sent.
@@ -1430,7 +1432,8 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.11.0...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.12.0...HEAD
+[2.12.0]: https://github.com/sethbang/venice-py/compare/v2.11.0...v2.12.0
 [2.11.0]: https://github.com/sethbang/venice-py/compare/v2.10.0...v2.11.0
 [2.10.0]: https://github.com/sethbang/venice-py/compare/v2.9.0...v2.10.0
 [2.9.0]: https://github.com/sethbang/venice-py/compare/v2.8.0...v2.9.0
