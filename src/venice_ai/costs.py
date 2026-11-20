@@ -19,7 +19,9 @@ Pricing Models:
     * **Output Tokens**: Cost for generating output text (completions, responses)
     * **Cache Reads / Writes**: Prompt tokens served from or written to the
       prompt cache, billed at ``cache_input`` / ``cache_write`` where the
-      model publishes those rates
+      model publishes those rates. Writes with a 1-hour TTL bill at
+      ``cache_write_1h``, or at ``cache_write`` when the model publishes no
+      1-hour rate
     * **Extended Context**: Long-context rates that apply to the whole request
       once the prompt exceeds the model's ``context_token_threshold``
     * **Flat Rate Models**: Simple per-request pricing for some operations
@@ -193,6 +195,7 @@ class _Rates(NamedTuple):
     output: Decimal
     cache_input: Decimal
     cache_write: Decimal
+    cache_write_1h: Decimal
 
 
 def _usd(tier: PricingTier | None) -> Decimal | None:
@@ -208,8 +211,9 @@ def _rates_for(model_pricing: ModelPricing, prompt_tokens: int) -> _Rates:
     the total prompt (cached and cache-written tokens included) exceeds
     ``extended.context_token_threshold``; the extended rates then apply to
     the whole request. A missing cache rate falls back to the input rate of
-    the same tier, and a missing extended input/output rate falls back to the
-    standard one.
+    the same tier, a missing ``cache_write_1h`` falls back to the same tier's
+    resolved ``cache_write``, and a missing extended input/output rate falls
+    back to the standard one.
     """
     input_usd = _usd(model_pricing.input) or _ZERO
     output_usd = _usd(model_pricing.output) or _ZERO
@@ -217,6 +221,7 @@ def _rates_for(model_pricing: ModelPricing, prompt_tokens: int) -> _Rates:
     # carry ``input`` / ``output`` still price as a standard-tier model.
     cache_input_usd = _usd(getattr(model_pricing, "cache_input", None))
     cache_write_usd = _usd(getattr(model_pricing, "cache_write", None))
+    cache_write_1h_usd = _usd(getattr(model_pricing, "cache_write_1h", None))
 
     extended = getattr(model_pricing, "extended", None)
     threshold = extended.context_token_threshold if extended is not None else None
@@ -227,12 +232,15 @@ def _rates_for(model_pricing: ModelPricing, prompt_tokens: int) -> _Rates:
         output_usd = output_usd if extended_output is None else extended_output
         cache_input_usd = _usd(extended.cache_input)
         cache_write_usd = _usd(extended.cache_write)
+        cache_write_1h_usd = _usd(extended.cache_write_1h)
 
+    cache_write = input_usd if cache_write_usd is None else cache_write_usd
     return _Rates(
         input=input_usd,
         output=output_usd,
         cache_input=input_usd if cache_input_usd is None else cache_input_usd,
-        cache_write=input_usd if cache_write_usd is None else cache_write_usd,
+        cache_write=cache_write,
+        cache_write_1h=cache_write if cache_write_1h_usd is None else cache_write_1h_usd,
     )
 
 
@@ -273,12 +281,21 @@ def calculate_completion_cost(
         * **Cache reads** (``prompt_tokens_details.cached_tokens``, or the
           top-level ``cache_read_input_tokens`` mirror) at ``cache_input``
         * **Cache writes** (``prompt_tokens_details.cache_creation_input_tokens``,
-          or the top-level ``cache_creation_input_tokens`` mirror) at
-          ``cache_write``
+          or the top-level ``cache_creation_input_tokens`` mirror, or
+          ``prompt_tokens_details.cache_write_tokens``). When
+          ``prompt_tokens_details`` splits the write by TTL, the
+          ``cache_creation_1h_input_tokens`` part bills at ``cache_write_1h``
+          and the ``cache_creation_5m_input_tokens`` part, plus any of the
+          total the split leaves uncovered, at ``cache_write``. Without a
+          split the whole write bills at ``cache_write``. If the split adds up
+          to more than the reported total, or no total is sent, the split's
+          sum is billed as the amount written, capped at the uncached prompt.
         * **Uncached remainder** at ``input``
 
         Completion tokens bill at ``output``. A model without a published
-        ``cache_input`` / ``cache_write`` rate bills those tokens at ``input``.
+        ``cache_input`` / ``cache_write`` rate bills those tokens at ``input``,
+        and a model without ``cache_write_1h`` bills 1-hour writes at
+        ``cache_write``.
         When the model publishes ``extended`` pricing and ``prompt_tokens``
         exceeds ``extended.context_token_threshold``, the extended rates
         apply to the entire request.
@@ -338,16 +355,24 @@ def calculate_completion_cost(
     written = _token_count(
         getattr(details, "cache_creation_input_tokens", None),
         getattr(usage, "cache_creation_input_tokens", None),
+        getattr(details, "cache_write_tokens", None),
     )
+    # The TTL split, when sent, breaks ``written`` down by lifetime.
+    written_5m = _token_count(getattr(details, "cache_creation_5m_input_tokens", None))
+    written_1h = _token_count(getattr(details, "cache_creation_1h_input_tokens", None))
     cached = min(cached, prompt_tokens)
-    written = min(written, prompt_tokens - cached)
+    # Cap rule: when the split exceeds the uncached prompt, the 1h part keeps
+    # priority, so inconsistent usage over-reports rather than under-reports.
+    written = min(max(written, written_5m + written_1h), prompt_tokens - cached)
+    written_1h = min(written_1h, written)
     uncached = prompt_tokens - cached - written
 
     rates = _rates_for(model_pricing, prompt_tokens)
     usd_cost = (
         _per_million(uncached, rates.input)
         + _per_million(cached, rates.cache_input)
-        + _per_million(written, rates.cache_write)
+        + _per_million(written - written_1h, rates.cache_write)
+        + _per_million(written_1h, rates.cache_write_1h)
         + _per_million(completion_tokens, rates.output)
     )
     return {"usd": usd_cost}
@@ -641,6 +666,13 @@ class CostTracker:
       response.
     * **From-client factory** — :meth:`from_client` builds a tracker
       pre-populated with the live pricing map.
+
+    Chat responses are billed by :func:`calculate_completion_cost`: cache
+    reads at ``cache_input``, 5-minute cache writes at ``cache_write``,
+    1-hour cache writes at ``cache_write_1h`` (``cache_write`` when the model
+    publishes no 1-hour rate), the rest of the prompt at ``input`` and the
+    completion at ``output``, with the ``extended`` rates applying to the
+    whole request above the model's context threshold.
 
     A response from a model absent from the map is recorded at $0, with one
     ``UserWarning`` per model until :meth:`reset`.

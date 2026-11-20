@@ -30,7 +30,7 @@ ToolMessage(
 )
 ```
 
-`ttl` is `"5m"` (the default) or `"1h"`; any other value is rejected. A one-hour cache write costs more than a five-minute one, so use it only when the prefix will be reused after more than five minutes. `ttl` sets the lifetime of one marked breakpoint; `prompt_cache_retention` (below) is a request-wide hint for models that support it.
+`ttl` is `"5m"` (the default) or `"1h"`; any other value is rejected. A five-minute write bills at the model's `pricing.cache_write` rate and a one-hour write at `pricing.cache_write_1h`, which is higher, so use it only when the prefix will be reused after more than five minutes. `ttl` sets the lifetime of one marked breakpoint; `prompt_cache_retention` (below) is a request-wide hint for models that support it.
 
 The catalog has no prompt-caching capability flag. The only signal is a cached-input price, which `require_prompt_caching=True` filters on:
 
@@ -79,7 +79,10 @@ if response.usage:
     usage = response.usage
     print(f"Cached: {usage.cached_tokens} / {usage.prompt_tokens} prompt tokens")
     print(f"Written to cache: {usage.cache_write_tokens}")
+    print(f"  5m: {usage.cache_write_5m_tokens}, 1h: {usage.cache_write_1h_tokens}")
 ```
+
+`cache_write_tokens` is the total written. `cache_write_5m_tokens` and `cache_write_1h_tokens` split it by TTL when the model reports a split, and read `0` when it does not.
 
 Some models omit `prompt_tokens_details` entirely when nothing was cached; the accessors read that as `0`, not as "this model does not cache".
 
@@ -167,13 +170,14 @@ In production, surface `cache_hit_pct` as a Prometheus metric alongside cost —
 
 ## Cost calculation
 
-Cached tokens are billed at a reduced rate (specifics depend on the model). The rates are in the model's pricing metadata via `client.models.list()`: `pricing.cache_input` for cache reads, `pricing.cache_write` for cache writes, and `pricing.extended` for the long-context tier above `extended.context_token_threshold` (a missing cache rate bills at `input`). With `CostTracker`:
+Cached tokens are billed at a reduced rate (specifics depend on the model). The rates are in the model's pricing metadata via `client.models.list()`: `pricing.cache_input` for cache reads, `pricing.cache_write` for five-minute cache writes, `pricing.cache_write_1h` for one-hour cache writes, and `pricing.extended` for the long-context tier above `extended.context_token_threshold`. A missing `cache_input` or `cache_write` bills at `input`, and a missing `cache_write_1h` bills at `cache_write`. Write tokens the usage does not split by TTL bill at `cache_write`. With `CostTracker`:
 
 ```python
-tracker = await CostTracker.from_client(client)  # fetches live pricing including cache rates
-async with VeniceClient(cost_tracker=tracker) as client:
+tracker = CostTracker()
+async with VeniceClient() as client:
+    await client.attach_cost_tracker(tracker)  # fetches live pricing including cache rates
     response = await client.chat.completions.create(...)
-# tracker.total_cost_usd reflects the cache-discounted cost automatically
+# tracker.total_cost_usd reflects the cache-aware cost automatically
 ```
 
 ## Common bugs

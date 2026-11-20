@@ -31,6 +31,12 @@ class PromptTokensDetails(BaseModel):
             reducing costs
         cache_creation_input_tokens: Number of prompt tokens written to cache
             (cache write); charged at a premium rate by some providers
+        cache_write_tokens: The same total as ``cache_creation_input_tokens``,
+            under the name some models send it
+        cache_creation_5m_input_tokens: Part of the cache write with a
+            5-minute TTL, billed at ``cache_write``
+        cache_creation_1h_input_tokens: Part of the cache write with a
+            1-hour TTL, billed at ``cache_write_1h``
         audio_tokens: Number of audio tokens present in the prompt (for audio input models)
 
     Note:
@@ -51,6 +57,21 @@ class PromptTokensDetails(BaseModel):
             "Number of prompt tokens written to cache (cache write); charged at "
             "a premium rate by some providers."
         ),
+    )
+    cache_write_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Number of prompt tokens written to cache; the same total as "
+            "cache_creation_input_tokens."
+        ),
+    )
+    cache_creation_5m_input_tokens: int | None = Field(
+        default=None,
+        description="Prompt tokens written to cache with a 5-minute TTL",
+    )
+    cache_creation_1h_input_tokens: int | None = Field(
+        default=None,
+        description="Prompt tokens written to cache with a 1-hour TTL",
     )
     audio_tokens: int | None = Field(
         default=None,

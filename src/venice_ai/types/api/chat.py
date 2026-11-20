@@ -448,13 +448,48 @@ class ChatUsage(BaseModel):
         """Prompt tokens written to the prompt cache (cache write), ``0`` if none.
 
         Reads ``prompt_tokens_details.cache_creation_input_tokens``, falling
-        back to the top-level ``cache_creation_input_tokens`` mirror.
+        back to the top-level ``cache_creation_input_tokens`` mirror and then
+        to ``prompt_tokens_details.cache_write_tokens``. This is the total
+        across TTLs; :attr:`cache_write_5m_tokens` and
+        :attr:`cache_write_1h_tokens` split it when the model reports a split.
+        A count of ``0`` reads as absent and falls through to the next source,
+        the same way :func:`~venice_ai.costs.calculate_completion_cost` reads it.
         """
         details = self.prompt_tokens_details
-        nested = details.cache_creation_input_tokens if details is not None else None
-        if nested is not None:
-            return nested
-        return self.cache_creation_input_tokens or 0
+        candidates = (
+            details.cache_creation_input_tokens if details is not None else None,
+            self.cache_creation_input_tokens,
+            details.cache_write_tokens if details is not None else None,
+        )
+        for value in candidates:
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+        return 0
+
+    @property
+    def cache_write_5m_tokens(self) -> int:
+        """Prompt tokens written to the cache with a 5-minute TTL, ``0`` if none.
+
+        Reads ``prompt_tokens_details.cache_creation_5m_input_tokens``. A model
+        that reports no TTL split reads as ``0`` here even when
+        :attr:`cache_write_tokens` is not.
+        """
+        details = self.prompt_tokens_details
+        if details is None:
+            return 0
+        return details.cache_creation_5m_input_tokens or 0
+
+    @property
+    def cache_write_1h_tokens(self) -> int:
+        """Prompt tokens written to the cache with a 1-hour TTL, ``0`` if none.
+
+        Reads ``prompt_tokens_details.cache_creation_1h_input_tokens``. These
+        tokens bill at the model's ``cache_write_1h`` rate.
+        """
+        details = self.prompt_tokens_details
+        if details is None:
+            return 0
+        return details.cache_creation_1h_input_tokens or 0
 
     def __str__(self) -> str:
         """Concise human-readable summary, suitable for logs and notebooks.
