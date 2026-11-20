@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "venice-py"
-version = "2.12.0"
+version = "2.13.0"
 description = "Unofficial, community-maintained Python SDK for Venice.ai, offering comprehensive access to the API with unified architecture and intelligent rate limiting."
 readme = "README.md"
 license = "MIT"
@@ -88,6 +88,9 @@ cryptography = { version = ">=46.0.0,<51.0.0", optional = true } # secp256k1 ECD
 # Ceiling allows 46–50; 49 dropped Intel-macOS/32-bit-Windows wheels but the TEE primitives we use are unchanged. The floor
 # stays at 46 deliberately: CVE-2026-69247 (fixed in 50.0.0) is a Bleichenbacher oracle in PKCS#7 EnvelopedData decryption,
 # an API this SDK never calls, so requiring 50 would narrow platform support without closing a reachable hole.
+# Keccak-256 for the TEE attestation key-binding check (signing_public_key must derive to signing_address).
+# Also pulled in transitively by eth-account for the x402 extra.
+pycryptodome = { version = ">=3.20,<4", optional = true }
 # Full client-side Intel TDX attestation verification — install with pip install venice-py[e2ee-verify]
 dcap-qvl = { version = ">=0.6.1,<0.8.0", optional = true }      # Phala pure-Rust DCAP TDX quote verifier
 
@@ -108,8 +111,8 @@ redis = ["redis"]
 adaptive = ["adaptive-rate-limiter", "redis"]
 x402 = ["eth-account", "siwe", "abnf"]
 x402-solana = ["solders"]
-e2ee = ["cryptography"]
-e2ee-verify = ["dcap-qvl", "cryptography"]
+e2ee = ["cryptography", "pycryptodome"]
+e2ee-verify = ["dcap-qvl", "cryptography", "pycryptodome"]
 enterprise = [
     "adaptive-rate-limiter",
     "redis",
@@ -138,6 +141,7 @@ all = [
     "abnf",
     "solders",
     "cryptography",
+    "pycryptodome",
     "dcap-qvl",
 ]
 
