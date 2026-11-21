@@ -6,21 +6,22 @@ Venice AI SDK - TEE Client-Side End-to-End Encryption (E2EE)
 Demonstrates Venice confidential-compute (TEE) chat with client-side E2EE.
 Messages are encrypted in-process to the attested model key and the streamed
 response deltas are decrypted locally, so Venice's infrastructure receives your
-``user`` / ``system`` content only as ciphertext. That holds as far as the
-attestation does (see the security note below). The model ID, token counts,
-message roles and timing stay in the clear.
+``user`` / ``system`` content, assistant history and ``reasoning_content`` only as
+ciphertext. That holds as far as the attestation does (see the security note
+below). The model ID, token counts, message roles, timing and ciphertext lengths
+stay in the clear.
 
 What this script can and cannot show: the session section shows the encrypted
 form the SDK produces locally, and the chats show that replies decrypt and read
 correctly. Nothing here observes the wire, so the checks cannot by themselves
 tell an encrypted exchange from a plaintext one.
 
-Cost: two short chats capped at 512 tokens on the cheapest E2EE model that
+Cost: three short chats capped at 512 tokens on the cheapest E2EE model that
 answers, typically under $0.001. Attestation and signature reads are not known to
 bill (read ``x-venice-balance-usd`` if that matters), but ``/tee/attestation``
 rate-limits after about 10 quick reads, across all models.
 
-Requires the ``[e2ee]`` extra (pulls in ``cryptography``)::
+Requires the ``[e2ee]`` extra (pulls in ``cryptography`` and ``pycryptodome``)::
 
     pip install 'venice-py[e2ee]'
 
@@ -37,6 +38,9 @@ Features Demonstrated:
       attached to the chat calls with e2ee=TeeOptions(verifier=...)
     - Streaming encrypted chat, consuming decrypted text deltas
     - A stream=False call returning a reassembled (decrypted) response
+    - A multi-turn follow-up: the assistant reply goes back in the history,
+      encrypted client-side, and the model must recall it
+    - response.e2ee, the TeeTrust trust level ("baseline" or "full_quote")
     - client.tee.get_signature(...) for a completion's enclave signature, with a
       fabricated request ID as the control
     - client.tee.open_session(...) for a manually managed session
@@ -52,6 +56,7 @@ Security note:
 
 import asyncio
 import math
+import re
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -66,7 +71,7 @@ from venice_ai.exceptions import (
 )
 from venice_ai.tee import DcapTdxVerifier, TeeOptions
 from venice_ai.tee.types import TeeAttestation
-from venice_ai.types.api import SystemMessage, TextModelSpec, UserMessage
+from venice_ai.types.api import ChatMessageParam, SystemMessage, TextModelSpec, UserMessage
 
 MAX_COMPLETION_TOKENS = 512
 
@@ -158,8 +163,9 @@ async def build_full_verifier(attestation: TeeAttestation) -> DcapTdxVerifier | 
         # dcap-qvl raises ValueError for an unparseable quote / FMSPC and
         # RuntimeError when the PCCS request fails.
         print(f"   ⏭️  Could not fetch TDX collateral ({type(e).__name__}: {e})")
-    print("      The chats below use baseline verification only (the SDK warns")
-    print("      once per call about that limitation).")
+    print("      The chats below use baseline verification only. The SDK warns about")
+    print("      that on each call; Python shows it once per create() call site and")
+    print("      once per process through stream().")
     return None
 
 
@@ -297,11 +303,11 @@ async def manual_session(client: VeniceClient, model: str) -> bool | None:
 
 
 async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
-    """Attest *model*, verify its quote, then run streaming and non-streaming E2EE chat.
+    """Attest *model*, verify its quote, then run streaming, non-streaming and multi-turn E2EE chat.
 
     Returns a failed result when full quote verification rejects the enclave,
-    an encrypted reply is truncated or wrong, a signature check fails, or the
-    second paid call fails after the first was billed (moving to another model
+    an encrypted reply is truncated or wrong, a signature check fails, or
+    a later paid call fails after the first was billed (moving to another model
     would pay for both again). Raises ``NodeUnavailableError`` on a transient
     server error before that, so the caller can try another model, and lets
     ``TeeAttestationError`` propagate: a failed attestation check is a security
@@ -407,9 +413,34 @@ async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
         # the SDK reassembles the decrypted deltas into a normal
         # ChatCompletionResponse for you.
         print("\n📦 Non-streaming E2EE response:")
+        history: list[ChatMessageParam] = [
+            UserMessage(
+                content="Pick one random English noun and reply with only that word, in capitals."
+            )
+        ]
         response = await client.chat.completions.create(
             model=model,
-            messages=[UserMessage(content="Reply with exactly: ENCRYPTED OK")],
+            messages=history,
+            e2ee=e2ee,
+            stream=False,
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
+            temperature=0.0,
+        )
+
+        # --- (4) Multi-turn: send the reply back ------------------------------
+        # The history is that turn's own prompt, then its reply as returned
+        # (response.choices[0].message), then a question only the reply can
+        # answer: the prompt never names the word. The assistant turn is
+        # encrypted client-side like the user turn. Developer and tool
+        # messages, tool calls and extra message keys are refused.
+        print("\n🔁 Second turn (the model must recall its own earlier reply):")
+        history += [
+            response.choices[0].message,
+            UserMessage(content="What exact word did you reply with? Answer with only that word."),
+        ]
+        follow_up = await client.chat.completions.create(
+            model=model,
+            messages=history,
             e2ee=e2ee,
             stream=False,
             max_completion_tokens=MAX_COMPLETION_TOKENS,
@@ -419,7 +450,7 @@ async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
         raise
     except APIError as e:
         if streamed is not None:
-            print(f"\n   ❌ The second encrypted call failed ({type(e).__name__}): {e}")
+            print(f"\n   ❌ A later encrypted call failed ({type(e).__name__}): {e}")
             print("      Not trying another model: the first call here was already billed.")
             return DemoResult(ok=False, full_verification=full_verification)
         if _is_transient(e):
@@ -429,11 +460,34 @@ async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
         raise
 
     reply = (response.text or "").strip()
+    first_word = re.search(r"[A-Za-z]+", reply)
+    expected_word = first_word.group(0) if first_word else ""
     finish = response.choices[0].finish_reason if response.choices else None
     print(f"   {reply}")
     print(f"   🏁 Finish reason: {finish}")
 
+    follow_up_reply = (follow_up.text or "").strip()
+    print(f"   {follow_up_reply}")
+    trust = follow_up.e2ee
+    print(f"   🔒 Trust level: {trust.verification if trust else None}")
+
     ok = True
+    if trust is None:
+        print("   ❌ The encrypted response carried no trust level")
+        ok = False
+    elif full_verification and trust.verification != "full_quote":
+        print(f"   ❌ Expected full_quote verification, got {trust.verification!r}")
+        ok = False
+    # A word shorter than three letters ("A", "IT") would match by chance, so
+    # it cannot show recall; the match is on whole words, ignoring case.
+    if len(expected_word) < 3:
+        print("   ❌ The first reply had no word of at least three letters to recall")
+        ok = False
+    elif not re.search(
+        rf"\b{re.escape(expected_word)}\b", follow_up_reply, re.IGNORECASE
+    ) or reached_cap(follow_up):
+        print("   ❌ The second-turn reply did not recall the earlier encrypted reply")
+        ok = False
     for label, result in (("streamed", streamed), ("non-streaming", response)):
         if reached_cap(result):
             print(f"   ❌ The {label} E2EE reply may be cut off (cap reached or no usage)")
@@ -441,8 +495,8 @@ async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
     if stream_finish != "stop" or not streamed_text.strip():
         print("   ❌ The streamed E2EE answer was empty or cut off")
         ok = False
-    if finish != "stop" or "ENCRYPTED OK" not in reply.upper():
-        print("   ❌ The non-streaming E2EE reply was not the requested text")
+    if finish != "stop":
+        print("   ❌ The non-streaming E2EE reply was cut off")
         ok = False
 
     exercised: list[str] = []
@@ -533,6 +587,8 @@ async def main() -> int:
         print("   - e2ee=TeeOptions(verifier=...) to verify every encrypted session")
     print("   - Streaming E2EE chat with locally decrypted deltas")
     print("   - Non-streaming E2EE chat with a reassembled response")
+    print("   - Multi-turn E2EE chat: the model recalled its own encrypted reply")
+    print("   - response.e2ee, the TeeTrust trust level of the session")
     for line in result.exercised:
         print(f"   - {line}")
     if result.full_verification:

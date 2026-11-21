@@ -553,7 +553,11 @@ class Models(APIResource["VeniceClient"]):
         :param require_multiple_images: Chat only. Only consider models that accept
             several images in one request (``capabilities.supportsMultipleImages``).
         :param require_e2ee: Chat only. Only consider end-to-end encrypted models
-            (``capabilities.supportsE2EE``), which need the client-side encryption flow.
+            (``capabilities.supportsE2EE``), for use with ``create(..., e2ee=True)``.
+            The catalog's function-calling and vision flags on these models describe
+            TEE-only use; with ``e2ee=True``, ``create()`` refuses tools and
+            non-text content, so do not combine this with ``require_function_calling``
+            or ``require_vision`` for an E2EE call.
         :param exclude_e2ee: Chat only. Skip end-to-end encrypted models under any
             ranking, for endpoints that reject them such as ``/responses``. Raises
             ``ValueError`` with ``require_e2ee``.

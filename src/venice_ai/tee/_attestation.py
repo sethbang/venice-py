@@ -12,10 +12,18 @@ are:
    ``sent_nonce`` is supplied by the caller, not read back from the response.)
 3. **REPORTDATA binding** — ``server_verification.tdx.reportData`` (64 bytes,
    128 hex) equals ``signing_address``(20B, lowercased, no ``0x``) ``|| 12 zero
-   bytes || sent_nonce``(32B). Binds the model encryption key to the enclave and
-   to this fresh request.
+   bytes || sent_nonce``(32B). Binds the signing address to the enclave and to
+   this fresh request. REPORTDATA does not contain the model encryption key.
 4. **TDX debug-mode flag rejected** — bit 0 (``TUD.DEBUG``) of the little-endian
    ``measurements.tdAttributes`` field must be clear.
+5. **Key binding** — when ``signing_public_key`` is present, its Keccak-256
+   address (``keccak256(pubkey[1:])[-20:]``, the Ethereum derivation) must equal
+   ``signing_address``. Requests are encrypted to ``signing_public_key``, so this
+   check is what ties the encryption key to the address that REPORTDATA binds.
+   It runs on every path, before any :class:`FullQuoteVerifier`. Keccak-256
+   comes from ``pycryptodome`` (the ``[e2ee]`` extra); when it is missing,
+   verifying an attestation that carries a key raises :class:`ImportError`
+   instead of skipping the check.
 
 .. warning::
     **SECURITY LIMITATION — the baseline trusts Venice's server-side**
@@ -25,9 +33,9 @@ are:
     compromised or malicious Venice endpoint that forges ``verified:true``
     together with a self-consistent ``reportData`` (it controls both fields in
     the response it returns) would **NOT** be detected by baseline verification.
-    The nonce/REPORTDATA binding proves freshness and key-to-enclave binding *as
-    asserted by the server*, but not cryptographically to Intel/NVIDIA roots
-    independently of the server.
+    The nonce/REPORTDATA binding and the key binding prove freshness and
+    key-to-enclave binding *as asserted by the server*, but not cryptographically
+    to Intel/NVIDIA roots independently of the server.
 
     Closing this gap for Intel TDX is shipped: :class:`venice_ai.tee.DcapTdxVerifier`
     (the optional ``[e2ee-verify]`` extra) is a concrete :class:`FullQuoteVerifier`
@@ -68,6 +76,16 @@ _REPORTDATA_LEN_HEX = (_ADDR_LEN_BYTES + _ZERO_PAD_LEN_BYTES + NONCE_LEN_BYTES) 
 
 #: Bit 0 of the little-endian TD_ATTRIBUTES field is ``TUD.DEBUG``.
 _TDX_DEBUG_BIT = 0x1
+
+#: An uncompressed SEC1 secp256k1 public key: ``0x04 || X(32) || Y(32)``.
+_UNCOMPRESSED_KEY_LEN_BYTES = 65
+_UNCOMPRESSED_KEY_PREFIX = 0x04
+
+_KECCAK_INSTALL_HINT = (
+    "Verifying a Venice TEE attestation that carries a model encryption key "
+    "needs Keccak-256 from the ``pycryptodome`` package, which is an optional "
+    "dependency. Install it with: pip install 'venice-py[e2ee]'"
+)
 
 
 @runtime_checkable
@@ -157,6 +175,73 @@ def _get_tdx(attestation: TeeAttestation) -> dict[str, Any]:
     return tdx
 
 
+def _keccak256(data: bytes) -> bytes:
+    """Return the Keccak-256 digest of ``data`` (Ethereum's hash, not SHA3-256).
+
+    SHA3-256 (``hashlib.sha3_256``) uses different padding and gives a different
+    digest, so it must not be substituted here.
+
+    Raises:
+        ImportError: If ``pycryptodome`` is not installed, with a hint to install
+            the ``[e2ee]`` extra.
+    """
+    try:
+        # pycryptodome (maintained) reuses PyCrypto's ``Crypto`` namespace, which B413 flags by name.
+        from Crypto.Hash import keccak  # noqa: PLC0415  # nosec B413
+    except ImportError as exc:
+        raise ImportError(_KECCAK_INSTALL_HINT) from exc
+    digest: bytes = keccak.new(digest_bits=256, data=data).digest()
+    return digest
+
+
+def _uncompressed_key_bytes(signing_public_key: str) -> bytes | None:
+    """Decode ``signing_public_key`` to its 65 uncompressed SEC1 bytes, or ``None``.
+
+    Normalizes the same way the session does before encrypting to the key
+    (strip, lowercase, drop ``0x``, prepend ``04`` to a bare 128-hex point body),
+    so the bytes hashed here are the bytes requests are encrypted to.
+    """
+    normalized = signing_public_key.strip().lower().removeprefix("0x")
+    if len(normalized) == (_UNCOMPRESSED_KEY_LEN_BYTES - 1) * 2:
+        normalized = "04" + normalized
+    try:
+        raw = bytes.fromhex(normalized)
+    except ValueError:
+        return None
+    if len(raw) != _UNCOMPRESSED_KEY_LEN_BYTES or raw[0] != _UNCOMPRESSED_KEY_PREFIX:
+        return None
+    return raw
+
+
+def _check_key_binding(signing_public_key: str, signing_address: str) -> str | None:
+    """Check that ``signing_public_key`` derives to ``signing_address``.
+
+    The address of a secp256k1 key is the last 20 bytes of the Keccak-256 hash
+    of the 64-byte point body (the key without its ``0x04`` prefix).
+
+    Returns:
+        ``None`` when the key derives to the address, otherwise a failure
+        message that quotes no key material.
+
+    Raises:
+        ImportError: If ``pycryptodome`` is not installed.
+    """
+    raw = _uncompressed_key_bytes(signing_public_key)
+    if raw is None:
+        return (
+            "TEE attestation signing_public_key is malformed (expected a 65-byte "
+            "uncompressed secp256k1 key); refusing to encrypt to it (fail-closed)."
+        )
+    derived = _keccak256(raw[1:])[-_ADDR_LEN_BYTES:].hex()
+    if derived != _normalize_address(signing_address):
+        return (
+            "TEE attestation key-binding mismatch: signing_public_key does not "
+            "derive to the attested signing_address; refusing to encrypt to it "
+            "(fail-closed)."
+        )
+    return None
+
+
 def _decode_model_public_key(signing_public_key: str | None) -> bytes | None:
     """Best-effort decode of the 130-hex signing key to 65 raw bytes."""
     if not isinstance(signing_public_key, str):
@@ -176,11 +261,12 @@ def verify_attestation(
 ) -> TeeVerificationResult:
     """Run baseline TEE attestation verification, fail-closed by default.
 
-    Performs the four baseline checks (server ``verified``; nonce echo;
-    REPORTDATA binding; TDX debug-flag rejection) against the
-    **client-generated** ``sent_nonce``. If ``verifier`` is supplied, it is
-    invoked after the baseline checks pass as a :class:`FullQuoteVerifier`
-    extension point.
+    Performs the baseline checks (server ``verified``; nonce echo; REPORTDATA
+    binding; TDX debug-flag rejection) against the **client-generated**
+    ``sent_nonce``, then the key binding (``signing_public_key`` must derive to
+    ``signing_address``) when the attestation carries a key. If ``verifier`` is
+    supplied, it is invoked after those checks pass as a
+    :class:`FullQuoteVerifier` extension point.
 
     Args:
         attestation: The parsed attestation response.
@@ -199,6 +285,8 @@ def verify_attestation(
     Raises:
         TeeAttestationError: When ``fail_closed`` and any check fails, including
             a missing/malformed field that a check depends on.
+        ImportError: If the attestation carries a ``signing_public_key`` and
+            ``pycryptodome`` (the ``[e2ee]`` extra) is not installed.
     """
     sent_nonce = preflight_nonce(sent_nonce)
 
@@ -294,7 +382,19 @@ def verify_attestation(
             else:
                 checks["debug_flag"] = True
 
-    # (5) Optional full-quote verifier (extension point). Only run if the
+    # (5) Key binding: the key requests are encrypted to must derive to the
+    # address REPORTDATA binds. Skipped only when the attestation publishes no
+    # key, in which case no session can be built from it.
+    if attestation.signing_public_key is not None:
+        key_failure = _check_key_binding(
+            attestation.signing_public_key, attestation.signing_address
+        )
+        if key_failure is None:
+            checks["key_binding"] = True
+        else:
+            fail("key_binding", key_failure)
+
+    # (6) Optional full-quote verifier (extension point). Only run if the
     # baseline passed; a False return or exception is a failure.
     if verifier is not None and not failures:
         try:

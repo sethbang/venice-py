@@ -4,9 +4,11 @@ This package implements client-side support for Venice's confidential-compute
 E2EE chat path (``e2ee-*`` models): attestation verification and per-message
 encryption/decryption over secp256k1 ECDH + HKDF-SHA256 + AES-256-GCM.
 
-``cryptography`` is an **optional** dependency (the ``[e2ee]`` extra); this
-package imports cleanly on a bare install and only requires it lazily when an
-encryption path is actually used (see :func:`_require_crypto`).
+``cryptography`` and ``pycryptodome`` are **optional** dependencies (the
+``[e2ee]`` extra); this package imports cleanly on a bare install and only
+requires them lazily: ``cryptography`` when an encryption path is used (see
+:func:`_require_crypto`), ``pycryptodome`` when an attestation that carries a
+model key is verified (its Keccak-256 key-binding check).
 
 .. warning::
     The baseline attestation verifier trusts Venice's server-side ``verified``
@@ -20,7 +22,7 @@ Public symbols are re-exported here: the typed TEE exceptions
 (:class:`TeeError`, :class:`TeeAttestationError`, :class:`TeeEncryptionError`),
 the attestation and quote verifiers (:class:`FullQuoteVerifier`,
 :class:`DcapTdxVerifier`), the encrypted session (:class:`TeeSession`),
-:class:`TeeOptions`, and the :func:`_require_crypto` helper.
+:class:`TeeOptions`, :class:`TeeTrust`, and the :func:`_require_crypto` helper.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from ._attestation import FullQuoteVerifier
 from ._crypto import _require_crypto
 from ._session import TeeSession
 from ._verify import DcapTdxVerifier
-from .types import TeeOptions
+from .types import TeeOptions, TeeTrust
 
 __all__ = [
     "TeeError",
@@ -39,6 +41,7 @@ __all__ = [
     "FullQuoteVerifier",
     "DcapTdxVerifier",
     "TeeOptions",
+    "TeeTrust",
     "TeeSession",
     "_require_crypto",
 ]

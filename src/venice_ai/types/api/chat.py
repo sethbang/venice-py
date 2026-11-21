@@ -33,6 +33,7 @@ from ..identifiers import ModelId
 from .common import CompletionTokensDetails, PromptTokensDetails, WebSearchCitation
 
 if TYPE_CHECKING:
+    from ...tee.types import TeeTrust
     from .models import LLMModelPricing
 
 _T = TypeVar("_T", bound=BaseModel)
@@ -447,13 +448,48 @@ class ChatUsage(BaseModel):
         """Prompt tokens written to the prompt cache (cache write), ``0`` if none.
 
         Reads ``prompt_tokens_details.cache_creation_input_tokens``, falling
-        back to the top-level ``cache_creation_input_tokens`` mirror.
+        back to the top-level ``cache_creation_input_tokens`` mirror and then
+        to ``prompt_tokens_details.cache_write_tokens``. This is the total
+        across TTLs; :attr:`cache_write_5m_tokens` and
+        :attr:`cache_write_1h_tokens` split it when the model reports a split.
+        A count of ``0`` reads as absent and falls through to the next source,
+        the same way :func:`~venice_ai.costs.calculate_completion_cost` reads it.
         """
         details = self.prompt_tokens_details
-        nested = details.cache_creation_input_tokens if details is not None else None
-        if nested is not None:
-            return nested
-        return self.cache_creation_input_tokens or 0
+        candidates = (
+            details.cache_creation_input_tokens if details is not None else None,
+            self.cache_creation_input_tokens,
+            details.cache_write_tokens if details is not None else None,
+        )
+        for value in candidates:
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+        return 0
+
+    @property
+    def cache_write_5m_tokens(self) -> int:
+        """Prompt tokens written to the cache with a 5-minute TTL, ``0`` if none.
+
+        Reads ``prompt_tokens_details.cache_creation_5m_input_tokens``. A model
+        that reports no TTL split reads as ``0`` here even when
+        :attr:`cache_write_tokens` is not.
+        """
+        details = self.prompt_tokens_details
+        if details is None:
+            return 0
+        return details.cache_creation_5m_input_tokens or 0
+
+    @property
+    def cache_write_1h_tokens(self) -> int:
+        """Prompt tokens written to the cache with a 1-hour TTL, ``0`` if none.
+
+        Reads ``prompt_tokens_details.cache_creation_1h_input_tokens``. These
+        tokens bill at the model's ``cache_write_1h`` rate.
+        """
+        details = self.prompt_tokens_details
+        if details is None:
+            return 0
+        return details.cache_creation_1h_input_tokens or 0
 
     def __str__(self) -> str:
         """Concise human-readable summary, suitable for logs and notebooks.
@@ -515,6 +551,8 @@ class ChatCompletionResponse(VeniceBaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    _e2ee: "TeeTrust | None" = PrivateAttr(default=None)
+
     id: str = Field(..., description="The ID of the request")
     object: str = Field(
         ..., description='The type of object returned, normally ``"chat.completion"``'
@@ -552,6 +590,18 @@ class ChatCompletionResponse(VeniceBaseModel):
     cost: ChatCost | None = Field(
         default=None, description="Request cost split by billing currency"
     )
+
+    @property
+    def e2ee(self) -> "TeeTrust | None":
+        """The E2EE attestation trust level, or ``None`` for a non-E2EE response.
+
+        Kept out of the serialized response and out of each message. It is a
+        private attribute, and pydantic's ``==`` compares private attributes,
+        so a response with ``.e2ee`` set does not compare equal to an otherwise
+        identical response without it; compare ``model_dump()`` output to
+        compare content only.
+        """
+        return self._e2ee
 
     # ── Content accessors ─────────────────────────────────────────────
 

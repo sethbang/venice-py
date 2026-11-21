@@ -203,8 +203,9 @@ async def character_example(client: VeniceClient) -> bool | None:
     print_section_header("Character-Based Chat Example", "🎭")
 
     characters = [c async for c in client.characters.iter_all(max_items=MAX_CHARACTERS)]
-    # A plain chat cannot run on an end-to-end encrypted model, and an offline or
-    # beta model may not answer at all.
+    # An end-to-end encrypted model answers a plain chat only in TEE-only mode,
+    # without client-side encryption, and an offline or beta model may not answer
+    # at all, so this example picks an ordinary model.
     text_models = {
         model.id: model
         for model in (await client.models.list(type="text")).data

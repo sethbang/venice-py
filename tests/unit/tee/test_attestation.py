@@ -73,6 +73,7 @@ def test_happy_path_passes_baseline(raw_attestation: dict[str, Any], sent_nonce:
         "nonce_echo": True,
         "reportdata_binding": True,
         "debug_flag": True,
+        "key_binding": True,
     }
     # signing_address normalized (lowercase, no 0x); model key decoded to 65 bytes.
     assert result.signing_address == raw_attestation["signing_address"].lower().removeprefix("0x")

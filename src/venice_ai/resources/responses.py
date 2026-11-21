@@ -9,7 +9,7 @@ containing ``reasoning``, ``message``, ``function_call``,
 ``custom_tool_call``, ``tool_search_call``, and ``web_search_call`` blocks.
 It is stateless — each request is independent
 and no conversation state is persisted between calls. E2EE-capable models
-are not supported; use ``/chat/completions`` with E2EE headers instead.
+are not supported; use ``client.chat.completions.create(..., e2ee=True)``.
 
 Streaming is supported via Server-Sent Events when ``stream=True``; the
 returned :class:`~venice_ai.streaming.Stream` yields
@@ -23,6 +23,7 @@ from collections.abc import AsyncIterable, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from .._resource import APIResource
+from ..exceptions import InvalidRequestError
 from ..streaming import Stream
 from ..types.api.requests.common import Tool
 from ..types.api.requests.responses import (
@@ -41,6 +42,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = ["Responses"]
+
+
+def _refuse_enable_e2ee(body: dict[str, Any]) -> None:
+    """Refuse a /responses body whose ``enable_e2ee`` is not absent or ``False``.
+
+    Runs on the built body, after the request model has coerced values such as
+    ``1`` or ``"true"`` to ``True``, so it also sees values that skipped
+    validation (``VeniceParameters.model_construct`` or a loosened subclass).
+
+    Raises:
+        InvalidRequestError: ``enable_e2ee`` is on the wire with any value other
+            than ``False`` or ``None``. The message does not quote the value.
+    """
+    wire = body.get("venice_parameters")
+    if not isinstance(wire, dict):
+        return
+    value = wire.get("enable_e2ee")
+    if value is None or value is False:
+        return
+    raise InvalidRequestError(
+        "E2EE is not supported on /responses; use client.chat.completions.create(..., e2ee=True)",
+        request=None,
+        response=None,
+        body=None,
+    )
 
 
 class Responses(APIResource["VeniceClient"]):
@@ -150,7 +176,7 @@ class Responses(APIResource["VeniceClient"]):
 
         Args:
             model: Model ID. E2EE-capable models are not supported; use
-                ``/chat/completions`` with E2EE headers instead.
+                ``client.chat.completions.create(..., e2ee=True)``.
             input: Prompt - either a plain string or a list of structured
                 input items (messages, reasoning items, tool calls and their
                 outputs) as documented in the OpenAI Responses API. Items can
@@ -205,7 +231,10 @@ class Responses(APIResource["VeniceClient"]):
         Raises:
             InvalidRequestError: If parameters fail server-side validation
                 (e.g. malformed ``input``, unsupported tool type, or an
-                E2EE-capable model is supplied).
+                E2EE-capable model is supplied), or, before any network call,
+                if ``venice_parameters.enable_e2ee`` is anything other than
+                absent, ``None`` or ``False``: /responses does not support
+                E2EE, so the input would be sent in plaintext.
             AuthenticationError: If the API key is missing or invalid.
             PermissionDeniedError: If the account lacks access to the
                 Responses API or the requested model.
@@ -267,6 +296,7 @@ class Responses(APIResource["VeniceClient"]):
                 _vp.pop(_k, None)
             if _vp:
                 body["venice_parameters"] = _vp
+        _refuse_enable_e2ee(body)
 
         if stream:
             body["stream"] = True

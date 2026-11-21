@@ -357,3 +357,11 @@ class TestChatResponseModelsPreserveExtraFields:
         assert usage.model_dump(exclude_none=True).get("completion_tokens_details") == {
             "reasoning_tokens": 3
         }
+
+
+def test_chat_message_param_admits_response_chat_message():
+    import typing
+
+    from venice_ai.types.api import ChatMessageParam
+
+    assert ChatMessage in typing.get_args(ChatMessageParam)

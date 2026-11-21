@@ -111,11 +111,15 @@ def test_decrypt_chunk_round_trips_from_a_server_ephemeral() -> None:
 
 def test_from_attestation_builds_a_working_session() -> None:
     """from_attestation pulls model_pub + algo off the attestation and works E2E."""
+    pytest.importorskip("Crypto.Hash.keccak", reason="key binding needs the [e2ee] extra")
+    from venice_ai.tee._attestation import _keccak256
+
     _model_priv, model_pub_hex = _model_keypair()
+    address = _keccak256(bytes.fromhex(model_pub_hex)[1:])[-20:].hex()
     attestation = TeeAttestation(
         verified=True,
         signing_public_key=model_pub_hex,
-        signing_address="0x" + "ab" * 20,
+        signing_address="0x" + address,
         signing_algo="ecdsa",
         nonce="00" * 32,
     )

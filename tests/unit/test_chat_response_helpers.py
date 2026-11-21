@@ -474,6 +474,84 @@ class TestChatUsageCacheAccessors:
         assert usage.cached_tokens == 512
         assert usage.cache_write_tokens == 64
 
+    def test_nested_cache_write_tokens_is_the_last_fallback(self):
+        usage = self._usage(prompt_tokens_details={"cache_write_tokens": 300})
+        assert usage.cache_write_tokens == 300
+        usage = self._usage(
+            prompt_tokens_details={"cache_write_tokens": 300}, cache_creation_input_tokens=64
+        )
+        assert usage.cache_write_tokens == 64
+
+    def test_a_zero_count_falls_through_like_the_bill(self):
+        """A ``0`` reads as absent, as in ``calculate_completion_cost``."""
+        usage = self._usage(
+            prompt_tokens_details={"cache_creation_input_tokens": 0, "cache_write_tokens": 700}
+        )
+        assert usage.cache_write_tokens == 700
+        usage = self._usage(
+            prompt_tokens_details={"cache_creation_input_tokens": 0},
+            cache_creation_input_tokens=0,
+        )
+        assert usage.cache_write_tokens == 0
+        usage = self._usage(
+            prompt_tokens_details={"cache_creation_input_tokens": 0}, cache_creation_input_tokens=64
+        )
+        assert usage.cache_write_tokens == 64
+
+    def test_live_one_hour_write_usage(self):
+        usage = ChatUsage.model_validate(
+            {
+                "prompt_tokens": 14381,
+                "completion_tokens": 4,
+                "total_tokens": 14385,
+                "prompt_tokens_details": {
+                    "cached_tokens": 0,
+                    "cache_creation_input_tokens": 12622,
+                    "cache_write_tokens": 12622,
+                    "cache_creation_1h_input_tokens": 12622,
+                },
+                "cache_creation_input_tokens": 12622,
+            }
+        )
+        assert usage.cache_write_tokens == 12622
+        assert usage.cache_write_1h_tokens == 12622
+        assert usage.cache_write_5m_tokens == 0
+        assert usage.cached_tokens == 0
+        details = usage.prompt_tokens_details
+        assert details is not None
+        assert details.cache_creation_1h_input_tokens == 12622
+        assert details.cache_creation_5m_input_tokens is None
+        assert details.cache_write_tokens == 12622
+        assert not (details.model_extra or {})
+
+    def test_live_five_minute_write_usage(self):
+        usage = self._usage(
+            prompt_tokens_details={
+                "cached_tokens": 0,
+                "cache_creation_input_tokens": 2900,
+                "cache_write_tokens": 2900,
+                "cache_creation_5m_input_tokens": 2900,
+            },
+            cache_creation_input_tokens=2900,
+        )
+        assert usage.cache_write_5m_tokens == 2900
+        assert usage.cache_write_1h_tokens == 0
+        assert usage.cache_write_tokens == 2900
+
+    def test_live_cache_read_usage_has_no_write_split(self):
+        usage = self._usage(
+            prompt_tokens_details={"cached_tokens": 2900}, cache_read_input_tokens=2900
+        )
+        assert usage.cached_tokens == 2900
+        assert usage.cache_write_tokens == 0
+        assert usage.cache_write_5m_tokens == 0
+        assert usage.cache_write_1h_tokens == 0
+
+    def test_absent_details_split_reads_as_zero(self):
+        usage = self._usage()
+        assert usage.cache_write_5m_tokens == 0
+        assert usage.cache_write_1h_tokens == 0
+
     def test_responses_usage_cached_tokens(self):
         from venice_ai.types.api.responses import ResponsesUsage
 
@@ -624,6 +702,32 @@ class TestSummary:
         pricing = _make_pricing(input_usd=3.0, output_usd=15.0)
         out = resp.summary(pricing=pricing)
         assert "$0.0105" in out
+
+    def test_summary_with_pricing_bills_a_one_hour_write_at_cache_write_1h(self):
+        # 100_000 tokens written with a 1h TTL: $0.4000 at cache_write_1h ($4/M).
+        # The 5-minute cache_write rate ($2/M) would give $0.2000.
+        resp = _make_response()
+        resp.usage = ChatUsage.model_validate(
+            {
+                "prompt_tokens": 100_000,
+                "completion_tokens": 0,
+                "total_tokens": 100_000,
+                "prompt_tokens_details": {
+                    "cache_creation_input_tokens": 100_000,
+                    "cache_creation_1h_input_tokens": 100_000,
+                },
+            }
+        )
+        pricing = LLMModelPricing(
+            input=PricingTier(usd=1.0, diem=1.0),
+            output=PricingTier(usd=1.0, diem=1.0),
+            cache_input=None,
+            cache_write=PricingTier(usd=2.0, diem=2.0),
+            cache_write_1h=PricingTier(usd=4.0, diem=4.0),
+        )
+        out = resp.summary(pricing=pricing)
+        assert "$0.4000" in out
+        assert "$0.2000" not in out
 
     def test_summary_omits_usage_when_none(self):
         resp = _make_response()

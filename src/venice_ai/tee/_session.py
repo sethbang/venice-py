@@ -35,8 +35,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..exceptions import TeeEncryptionError
+from ..exceptions import TeeAttestationError, TeeEncryptionError
 from . import _crypto
+from ._attestation import _check_key_binding
 from ._constants import (
     HEADER_CLIENT_PUB_KEY,
     HEADER_MODEL_PUB_KEY,
@@ -48,7 +49,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
     from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePrivateKey
 
-    from .types import TeeAttestation
+    from .types import TeeAttestation, TeeTrust
 
 __all__ = ["TeeSession"]
 
@@ -70,13 +71,14 @@ class TeeSession:
     .. warning::
         **Security limitation.** A :class:`TeeSession` is only as trustworthy as
         the attestation it is built from, and that attestation is **baseline-
-        verified**: the verifier trusts Venice's server-side ``verified`` claim
-        and the nonce / report-data binding but does **not** perform full client-
-        side Intel TDX / NVIDIA quote verification. A malicious Venice operator
+        verified**: the verifier trusts Venice's server-side ``verified`` claim,
+        checks the nonce / report-data binding and that the model key derives to
+        the attested signing address, but does **not** perform full client-side
+        Intel TDX / NVIDIA quote verification. A malicious Venice operator
         forging a self-consistent attestation would not be detected. Messages
         you encrypt with this session are confidential against a passive network
         observer, not against a hostile enclave operator. Supply a
-        :class:`~venice_ai.tee._attestation.FullQuoteVerifier` to
+        :class:`venice_ai.tee.FullQuoteVerifier` to
         :meth:`venice_ai.resources.tee.Tee.open_session` if your threat model
         requires it.
     """
@@ -87,6 +89,7 @@ class TeeSession:
         session_private_key: EllipticCurvePrivateKey,
         model_public_key_hex: str,
         signing_algo: str,
+        trust: TeeTrust | None = None,
     ) -> None:
         """Construct a session from an already-generated SESSION keypair.
 
@@ -100,29 +103,47 @@ class TeeSession:
             model_public_key_hex: The model's 130-hex uncompressed ECDH/signing
                 public key (``attestation.signing_public_key``).
             signing_algo: The signing algorithm (``"ecdsa"``).
+            trust: The attestation trust level this session was opened with.
         """
+        self._trust = trust
         self._session_private_key: EllipticCurvePrivateKey | None = session_private_key
         self._session_public_key_hex = _crypto.uncompressed_hex(session_private_key.public_key())
         self._model_public_key_hex = model_public_key_hex
         self._signing_algo = signing_algo
 
     @classmethod
-    def from_attestation(cls, attestation: TeeAttestation) -> TeeSession:
+    def from_attestation(
+        cls, attestation: TeeAttestation, *, trust: TeeTrust | None = None
+    ) -> TeeSession:
         """Build a session by generating a fresh SESSION keypair for ``attestation``.
 
         The attestation must already be **verified** (the resource layer verifies
         fail-closed before calling this). The model key and signing algorithm are
         taken from the attestation.
 
+        Whatever verification the caller ran, this method itself checks that
+        ``attestation.signing_public_key`` derives to
+        ``attestation.signing_address`` before any session key is generated, so a
+        session never encrypts to a key the attested address does not bind. It
+        does not repeat the other attestation checks (server claim, nonce,
+        report-data binding, debug flag); those need the request context that
+        :meth:`venice_ai.resources.tee.Tee.get_attestation` has.
+
         Args:
             attestation: A verified :class:`~venice_ai.tee.types.TeeAttestation`.
+            trust: The trust level to carry on the session, if known.
 
         Returns:
             A new :class:`TeeSession`.
 
         Raises:
-            ImportError: If the ``[e2ee]`` extra (``cryptography``) is not
-                installed (raised lazily by :func:`_crypto.generate_session_keypair`).
+            TeeEncryptionError: If the attestation has no ``signing_public_key``.
+            TeeAttestationError: If ``signing_public_key`` is malformed or does
+                not derive to ``signing_address``. The message quotes no key
+                material.
+            ImportError: If the ``[e2ee]`` extra is not installed: ``pycryptodome``
+                for the key-binding check, or ``cryptography`` for the SESSION
+                keypair (both raised lazily).
         """
         if attestation.signing_public_key is None:
             raise TeeEncryptionError(
@@ -130,12 +151,26 @@ class TeeSession:
                 "signing_public_key (model public key). This model does not "
                 "publish a model key for end-to-end encryption."
             )
+        key_failure = _check_key_binding(
+            attestation.signing_public_key, attestation.signing_address
+        )
+        if key_failure is not None:
+            raise TeeAttestationError(key_failure)
         session_priv = _crypto.generate_session_keypair()
         return cls(
             session_private_key=session_priv,
             model_public_key_hex=attestation.signing_public_key,
             signing_algo=attestation.signing_algo,
+            trust=trust,
         )
+
+    @property
+    def trust(self) -> TeeTrust | None:
+        """The attestation trust level this session was opened with.
+
+        Holds no key material and stays readable after :meth:`close`.
+        """
+        return self._trust
 
     @property
     def session_public_key_hex(self) -> str:
@@ -186,7 +221,8 @@ class TeeSession:
         ``ephemeral_pub(65) || gcm_nonce(12) || ciphertext+tag``.
 
         Args:
-            plaintext: The UTF-8 message content (a user/system message body).
+            plaintext: The UTF-8 text to encrypt: a user, system or assistant
+                ``content``, or an assistant ``reasoning_content``.
 
         Returns:
             The encrypted wire blob as lowercase hex.

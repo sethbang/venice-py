@@ -72,8 +72,16 @@ import inspect
 import json
 import logging
 import math
+import re
 import warnings
-from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    AsyncIterator,
+    Callable,
+    Mapping,
+    Sequence,
+)
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -84,7 +92,7 @@ from typing import (
     overload,
 )
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ..._resource import APIResource
 from ...costs import (
@@ -96,7 +104,7 @@ from ...costs import (
     ChatCostEstimate,
     _estimate_costs,
 )
-from ...exceptions import InvalidRequestError, MaxIterationsExceededError
+from ...exceptions import InvalidRequestError, MaxIterationsExceededError, TeeEncryptionError
 from ...helpers import tool_from_function
 from ...streaming import ChatStream, Stream
 from ...tee._crypto import looks_encrypted
@@ -123,7 +131,7 @@ from ...types.api import (
     UserMessage,
     VeniceParameters,
 )
-from ...types.api.chat import ParsedChatCompletion, ToolLoopResult
+from ...types.api.chat import ChatMessage, ParsedChatCompletion, ToolLoopResult
 from ...types.api.models import LLMModelPricing
 
 # Import streaming models from generated.streaming module
@@ -144,10 +152,22 @@ __all__ = ["ChatCompletions"]
 #: Prefix that marks a Venice confidential-compute (TEE) chat model.
 _E2EE_MODEL_PREFIX = "e2ee-"
 
-#: Roles whose message content is encrypted to the model under E2EE. Assistant /
-#: tool / developer content stays plaintext (the model never re-reads its own
-#: prior turns as ciphertext, and tool output is not a user secret).
-_E2EE_ENCRYPT_ROLES = frozenset({"user", "system"})
+#: Roles whose message fields are encrypted to the model under E2EE. The server
+#: decrypts every non-empty message field it receives, so plaintext in any of
+#: these roles is rejected; every other role is refused client-side.
+_E2EE_ENCRYPTED_ROLES: frozenset[str] = frozenset({"user", "system", "assistant"})
+
+#: Chat roles an E2EE refusal may name. A role outside this set is the caller's
+#: own text, so a refusal calls it "an unsupported role" instead of quoting it.
+_KNOWN_CHAT_ROLES: frozenset[str] = frozenset(
+    {"system", "user", "assistant", "tool", "developer", "function"}
+)
+
+#: Validates ``venice_parameters`` exactly as :class:`ChatCompletionRequest` does,
+#: so E2EE engagement reads the same ``enable_e2ee`` value the wire carries.
+_VENICE_PARAMETERS_ADAPTER: TypeAdapter[Any] = TypeAdapter(
+    cast(Any, ChatCompletionRequest.model_fields["venice_parameters"].annotation)
+)
 
 #: Emitted once per E2EE-engaged ``create`` call that uses the baseline
 #: attestation verifier (no ``TeeOptions(verifier=...)``). The wire path is real,
@@ -266,6 +286,20 @@ _ChatMessageModel = UserMessage | AssistantMessage | SystemMessage | ToolMessage
 _MESSAGE_LIST_ADAPTER: TypeAdapter[list[_ChatMessageModel]] = TypeAdapter(list[_ChatMessageModel])
 
 
+def _history_message(message: Any) -> Any:
+    """A response :class:`ChatMessage` as history input; anything else unchanged.
+
+    An assistant message goes through the same rule as
+    :meth:`AssistantMessage.from_chat_message`, so the ``cache_control`` the API
+    echoes is not sent back.
+    """
+    if not isinstance(message, ChatMessage):
+        return message
+    if message.role == "assistant":
+        return AssistantMessage.from_chat_message(message)
+    return message.model_dump(exclude_none=True)
+
+
 def _coerce_messages(messages: Sequence[ChatMessageParam]) -> list[_ChatMessageModel]:
     """Validate a caller's messages into the concrete message models.
 
@@ -273,9 +307,11 @@ def _coerce_messages(messages: Sequence[ChatMessageParam]) -> list[_ChatMessageM
     ``ChatCompletionRequest`` coerces mappings while building the request
     body. Methods that read or accumulate messages *before* that point need
     it explicitly, so that a caller passing plain dicts doesn't hit an
-    ``AttributeError`` on ``.content``.
+    ``AttributeError`` on ``.content``. A response :class:`ChatMessage` (for
+    example ``result.choices[0].message``) is accepted too, so it can be
+    appended to the history of the next turn.
     """
-    return _MESSAGE_LIST_ADAPTER.validate_python(list(messages))
+    return _MESSAGE_LIST_ADAPTER.validate_python([_history_message(m) for m in messages])
 
 
 def _schema_response_format(
@@ -379,31 +415,87 @@ def _venice_params_as_dict(venice_parameters: Any) -> dict[str, Any]:
     return {}
 
 
+def _validated_enable_e2ee(venice_parameters: Any) -> bool | None:
+    """``venice_parameters.enable_e2ee`` as the request model validates it.
+
+    ``ChatCompletionRequest`` coerces values such as ``1`` or ``"true"`` to
+    ``True`` before they reach the wire, so engagement must read the validated
+    value, not the raw one. When ``venice_parameters`` itself does not validate,
+    the request build raises later; until then only a literal ``True`` / ``False``
+    counts.
+    """
+    try:
+        validated = _VENICE_PARAMETERS_ADAPTER.validate_python(venice_parameters)
+    except ValidationError:
+        raw = _venice_params_as_dict(venice_parameters).get("enable_e2ee")
+        return raw if isinstance(raw, bool) else None
+    value = getattr(validated, "enable_e2ee", None)
+    return value if isinstance(value, bool) else None
+
+
+def _refuse_non_bool_wire_enable_e2ee(body: Mapping[str, Any]) -> None:
+    """Refuse a plaintext request whose wire ``enable_e2ee`` is not ``False``.
+
+    A :class:`VeniceParameters` built with ``model_construct`` or a subclass
+    that loosens the field skips validation, so the wire can carry a value such
+    as ``1`` that the SDK did not read as ``True`` and did not encrypt for. Only
+    ``False`` or an absent value may go out with plaintext content.
+
+    Raises:
+        InvalidRequestError: ``enable_e2ee`` is on the wire with any value other
+            than ``False`` or ``None``. The message does not quote the value.
+    """
+    wire = body.get("venice_parameters")
+    if not isinstance(wire, Mapping):
+        return
+    value = wire.get("enable_e2ee")
+    if value is None or value is False:
+        return
+    raise InvalidRequestError(
+        "venice_parameters.enable_e2ee must be a bool. Pass True to use E2EE "
+        "(or e2ee=True), or False / omit it for a plaintext request.",
+        request=None,
+        response=None,
+        body=None,
+    )
+
+
 def _e2ee_engaged(e2ee: bool | TeeOptions, venice_parameters: Any) -> bool:
     """Whether the E2EE flow should run for this call.
 
-    Engaged when the explicit ``e2ee`` argument is truthy OR when the caller set
-    ``venice_parameters.enable_e2ee`` to ``True``.
+    Engaged when the explicit ``e2ee`` argument is truthy OR when
+    ``venice_parameters.enable_e2ee`` validates to ``True``.
     """
     if e2ee:
         return True
-    return _venice_params_as_dict(venice_parameters).get("enable_e2ee") is True
+    return _validated_enable_e2ee(venice_parameters) is True
 
 
 def _validate_e2ee_request(
     *,
     model: str,
-    messages: Sequence[Any],
     tools: Any,
     venice_parameters: Any,
+    e2ee: bool | TeeOptions = False,
+    logprobs: Any = None,
+    top_logprobs: Any = None,
 ) -> None:
     """Fail loud, before any network call, on E2EE-incompatible requests.
 
     Raises:
-        InvalidRequestError: E2EE on a non-``e2ee-`` model; tools / web search /
-            web scraping requested; or any user/system message carrying non-text
-            (multimodal: image / file) content.
+        InvalidRequestError: ``e2ee`` set together with
+            ``venice_parameters.enable_e2ee=False``; E2EE on a non-``e2ee-``
+            model; tools / web search / web scraping / logprobs requested.
     """
+    if e2ee and _validated_enable_e2ee(venice_parameters) is False:
+        raise InvalidRequestError(
+            "e2ee=True conflicts with venice_parameters.enable_e2ee=False. Drop "
+            "enable_e2ee, or set it to True, to use E2EE.",
+            request=None,
+            response=None,
+            body=None,
+        )
+
     if not model.startswith(_E2EE_MODEL_PREFIX):
         raise InvalidRequestError(
             f"E2EE was requested but model {model!r} is not a Venice "
@@ -444,60 +536,413 @@ def _validate_e2ee_request(
             body=None,
         )
 
-    for msg in messages:
-        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
-        if role not in _E2EE_ENCRYPT_ROLES:
-            continue
-        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+    if logprobs or top_logprobs is not None:
+        raise InvalidRequestError(
+            "logprobs and top_logprobs are not supported under Venice E2EE: "
+            "token log probabilities would be returned outside the encrypted "
+            "channel. Drop `logprobs` / `top_logprobs` to use E2EE.",
+            request=None,
+            response=None,
+            body=None,
+        )
+
+
+def _e2ee_refusal(message: str) -> InvalidRequestError:
+    return InvalidRequestError(message, request=None, response=None, body=None)
+
+
+def _message_role(message: Any) -> str | None:
+    """The ``role`` of a caller's message, dict or model, when it is a string."""
+    role = message.get("role") if isinstance(message, Mapping) else getattr(message, "role", None)
+    return role if isinstance(role, str) else None
+
+
+def _e2ee_validation_refusal(
+    exc: ValidationError, messages: Sequence[ChatMessageParam]
+) -> InvalidRequestError:
+    """A content-free :class:`InvalidRequestError` for a failed E2EE request build.
+
+    Pydantic's message quotes the offending input, which under E2EE is message
+    text that must not leave the encrypted channel, not even in a traceback.
+    The replacement names only the message index, its role when it is a known
+    chat role, and the error types.
+    """
+    errors = exc.errors(include_url=False, include_context=False, include_input=False)
+    loc = errors[0]["loc"] if errors else ()
+    if loc[:1] == ("messages",):
+        loc = loc[1:]
+    error_types = ", ".join(sorted({str(error["type"]) for error in errors}))
+    if loc and isinstance(loc[0], int) and 0 <= loc[0] < len(messages):
+        index = loc[0]
+        role = _message_role(messages[index])
+        if role is None:
+            where = f"messages[{index}]"
+        elif role in _KNOWN_CHAT_ROLES:
+            where = f"messages[{index}] (role {role!r})"
+        else:
+            where = f"messages[{index}] (an unsupported role)"
+        return _e2ee_refusal(
+            f"{where} is not a valid chat message ({error_types}). Details are "
+            "withheld under Venice E2EE because they would quote message content."
+        )
+    field = str(loc[0]) if loc else "request"
+    return _e2ee_refusal(
+        f"Request field {field!r} is invalid ({error_types}). Details are withheld "
+        "under Venice E2EE because they could quote message content."
+    )
+
+
+def _coerce_messages_for(
+    messages: Sequence[ChatMessageParam], *, e2ee_engaged: bool
+) -> list[_ChatMessageModel]:
+    """:func:`_coerce_messages`, keeping message content out of errors under E2EE.
+
+    Under E2EE a pydantic :class:`ValidationError` is replaced by a content-free
+    :class:`InvalidRequestError` with no chained cause or context; otherwise it
+    propagates unchanged.
+    """
+    try:
+        return _coerce_messages(messages)
+    except ValidationError as exc:
+        if not e2ee_engaged:
+            raise
+        refusal = _e2ee_validation_refusal(exc, messages)
+    raise refusal from None
+
+
+def _build_chat_request(
+    *,
+    e2ee_engaged: bool,
+    model: str,
+    messages: Sequence[ChatMessageParam],
+    stream: bool,
+    api_params: dict[str, Any],
+) -> ChatCompletionRequest:
+    """Validate the caller's arguments into a :class:`ChatCompletionRequest`.
+
+    Under E2EE a pydantic :class:`ValidationError` is replaced by a content-free
+    :class:`InvalidRequestError` with no chained cause or context; otherwise it
+    propagates unchanged.
+    """
+    coerced = _coerce_messages_for(messages, e2ee_engaged=e2ee_engaged)
+    try:
+        return ChatCompletionRequest(
+            model=model,
+            messages=coerced,
+            stream=stream,
+            **api_params,
+        )
+    except ValidationError as exc:
+        if not e2ee_engaged:
+            raise
+        refusal = _e2ee_validation_refusal(exc, messages)
+    raise refusal from None
+
+
+def _is_absent(value: Any) -> bool:
+    """Whether a message field counts as absent: ``None``, ``False``, ``[]`` or ``{}``.
+
+    Uses identity and exact-type checks, so ``0`` and ``0.0`` (which compare
+    equal to ``False``) are present values.
+    """
+    if value is None or value is False:
+        return True
+    return type(value) in (list, dict) and not value
+
+
+def _validate_e2ee_messages(messages: list[dict[str, Any]]) -> None:
+    """Refuse, before any network call, messages E2EE cannot carry.
+
+    Runs on the dumped request body. A key whose value is ``None``, ``False``,
+    ``[]`` or ``{}`` counts as absent. Errors name the message index and the
+    offending role or key, never message content.
+
+    Raises:
+        InvalidRequestError: a role other than user / system / assistant, a key
+            other than ``role`` / ``content`` / (assistant) ``reasoning_content``,
+            or non-string ``content`` / ``reasoning_content``.
+    """
+    for index, msg in enumerate(messages):
+        role = msg.get("role")
+        if role == "developer":
+            raise _e2ee_refusal(
+                f"messages[{index}] has role 'developer', which is not supported "
+                "under Venice E2EE; use role 'system' instead."
+            )
+        if role not in _E2EE_ENCRYPTED_ROLES:
+            raise _e2ee_refusal(
+                f"messages[{index}] has role {role!r}, which is not supported under "
+                "Venice E2EE; only 'user', 'system' and 'assistant' messages can "
+                "be encrypted."
+            )
+        for key, value in msg.items():
+            if key in ("role", "content", "reasoning_content") or _is_absent(value):
+                continue
+            raise _e2ee_refusal(
+                f"messages[{index}] (role {role!r}) has field {key!r}, which is not "
+                "supported under Venice E2EE; only 'role', 'content' and, on "
+                "assistant messages, 'reasoning_content' can be sent."
+            )
+        if not _is_absent(msg.get("reasoning_content")) and role != "assistant":
+            raise _e2ee_refusal(
+                f"messages[{index}] (role {role!r}) has field 'reasoning_content', "
+                "which is only supported on assistant messages under Venice E2EE."
+            )
+        content = msg.get("content")
         if content is not None and not isinstance(content, str):
-            raise InvalidRequestError(
-                "Multimodal (image / file) message content is not supported under "
-                "Venice E2EE; only plain-text user/system messages can be "
-                "encrypted. Send text-only content to use E2EE.",
-                request=None,
-                response=None,
-                body=None,
+            raise _e2ee_refusal(
+                f"messages[{index}] (role {role!r}) has non-text 'content'; "
+                "multimodal (image / file) content is not supported under Venice "
+                "E2EE. Send text-only content to use E2EE."
+            )
+        reasoning = msg.get("reasoning_content")
+        if reasoning is not None and not isinstance(reasoning, str):
+            raise _e2ee_refusal(
+                f"messages[{index}] (role {role!r}) has non-text 'reasoning_content', "
+                "which is not supported under Venice E2EE."
             )
 
 
 def _encrypt_body_messages(body: dict[str, Any], session: "TeeSession") -> None:
-    """Encrypt user/system message content in the dumped body in place.
+    """Encrypt message text in the dumped body in place.
 
     Operates on the already-``model_dump``ed body (not caller objects), so the
-    caller's ``messages`` are never mutated. Assistant / tool / developer content
-    is left plaintext.
+    caller's ``messages`` are never mutated. Every non-empty string ``content``
+    (user / system / assistant) and assistant ``reasoning_content`` is
+    encrypted; empty strings are sent unchanged.
     """
     for msg in body.get("messages", []):
-        if not isinstance(msg, dict):
+        if msg.get("role") not in _E2EE_ENCRYPTED_ROLES:
             continue
-        if msg.get("role") not in _E2EE_ENCRYPT_ROLES:
+        fields = ("content", "reasoning_content") if msg["role"] == "assistant" else ("content",)
+        for field in fields:
+            value = msg.get(field)
+            if isinstance(value, str) and value:
+                msg[field] = session.encrypt_message(value)
+
+
+def _decrypt_delta_field(session: "TeeSession", delta: Any, field: str) -> None:
+    """Decrypt ``delta.<field>`` in place, refusing a non-empty value that is not ciphertext."""
+    value = getattr(delta, field)
+    if not value:
+        return
+    if not looks_encrypted(value):
+        raise TeeEncryptionError(
+            f"E2EE response delta carried unencrypted {field}; refusing to pass it through."
+        )
+    setattr(delta, field, session.decrypt_chunk(value))
+
+
+def _contains_text(value: Any) -> bool:
+    """Whether *value* carries text: a ``str``, or any non-empty mapping, anywhere.
+
+    Mapping keys are strings, so a non-empty mapping is text-bearing whatever
+    its values (a ``{token: logprob}`` map would otherwise carry tokens in its
+    keys). Lists and tuples are text-bearing if any element is.
+    """
+    if isinstance(value, str):
+        return True
+    if isinstance(value, Mapping):
+        return bool(value)
+    if isinstance(value, list | tuple):
+        return any(_contains_text(item) for item in value)
+    return False
+
+
+def _refuse_text_bearing_extras(
+    level: str,
+    extras: Mapping[str, Any] | None,
+    *,
+    permitted: Mapping[str, tuple[str, ...]] | None = None,
+) -> None:
+    """Raise if an undeclared field at *level* carries text the enclave did not encrypt.
+
+    A field carrying text in a key or a value is refused; numbers, booleans,
+    ``None`` and lists or tuples of only those pass through. A key in
+    *permitted* may also be exactly one of its listed strings. The error names
+    the level and key, never the value.
+    """
+    for key, value in (extras or {}).items():
+        if isinstance(value, str) and value in (permitted or {}).get(key, ()):
             continue
-        content = msg.get("content")
-        if isinstance(content, str):
-            msg["content"] = session.encrypt_message(content)
+        if _contains_text(value):
+            raise TeeEncryptionError(f"E2EE response {level} carried unexpected field {key!r}.")
+
+
+def _request_stop_values(stop: Any) -> tuple[str, ...]:
+    """The request's ``stop`` sequences as a tuple of strings (empty when unset)."""
+    if isinstance(stop, str):
+        return (stop,)
+    if isinstance(stop, list | tuple):
+        return tuple(item for item in stop if isinstance(item, str))
+    return ()
+
+
+#: Shape of a ``finish_reason`` under E2EE: protocol vocabulary such as
+#: ``stop``, ``length`` or ``content_filter``, never free text.
+_FINISH_REASON_PATTERN = re.compile(r"[a-z_]{1,32}")
+
+
+def _refuse_unencryptable_delta_fields(choice: Any, stop: tuple[str, ...] = ()) -> None:
+    """Raise if a choice or its delta carries anything the enclave does not encrypt.
+
+    A choice's ``matched_stop`` or ``stop_reason`` may be a stop token id, or
+    one of the request's own *stop* strings, which were sent unencrypted. A
+    delta ``role`` must be ``None`` or ``"assistant"``, and a ``finish_reason``
+    must be protocol vocabulary (lowercase letters and underscores, at most 32
+    characters), since neither is encrypted.
+    """
+    delta = choice.delta
+    if delta.role is not None and delta.role != "assistant":
+        raise TeeEncryptionError(
+            "E2EE response delta carried an unexpected role; refusing to pass it through."
+        )
+    finish_reason = choice.finish_reason
+    if finish_reason is not None and not (
+        isinstance(finish_reason, str) and _FINISH_REASON_PATTERN.fullmatch(finish_reason)
+    ):
+        raise TeeEncryptionError(
+            "E2EE response choice carried a finish_reason outside the protocol "
+            "vocabulary; refusing to pass it through."
+        )
+    if delta.tool_calls:
+        raise TeeEncryptionError("E2EE response delta carried tool_calls, which are not encrypted.")
+    if delta.reasoning_encrypted:
+        raise TeeEncryptionError(
+            "E2EE response delta carried reasoning_encrypted, which is not part of "
+            "the E2EE contract."
+        )
+    if delta.thought_signature:
+        raise TeeEncryptionError(
+            "E2EE response delta carried thought_signature, which is not encrypted."
+        )
+    _refuse_text_bearing_extras("delta", delta.model_extra)
+    _refuse_text_bearing_extras(
+        "choice", choice.model_extra, permitted={"matched_stop": stop, "stop_reason": stop}
+    )
+    if choice.logprobs is not None:
+        raise TeeEncryptionError("E2EE response choice carried logprobs, which are not encrypted.")
+
+
+_COST_METADATA_KEYS: frozenset[str] = frozenset({"usd", "diem"})
+
+
+def _is_cost_metadata(value: Any) -> bool:
+    """Whether *value* is the usage chunk's numeric ``cost``: ``usd`` / ``diem`` numbers or ``None``."""
+    return (
+        isinstance(value, Mapping)
+        and set(value) <= _COST_METADATA_KEYS
+        and all(
+            item is None or (isinstance(item, int | float) and not isinstance(item, bool))
+            for item in value.values()
+        )
+    )
+
+
+def _refuse_unencryptable_chunk_fields(chunk: ChatCompletionChunk) -> None:
+    """Raise if a chunk or its ``usage`` carries a text-bearing field outside the protocol.
+
+    The usage chunk's ``cost`` passes when it has the numeric shape
+    :func:`_is_cost_metadata` checks; any other ``cost`` is held to the text rule.
+    Undeclared fields on ``usage`` and its token-detail objects are held to the
+    text rule too.
+    """
+    extras = {
+        key: value
+        for key, value in (chunk.model_extra or {}).items()
+        if not (key == "cost" and _is_cost_metadata(value))
+    }
+    _refuse_text_bearing_extras("chunk", extras)
+    usage = chunk.usage
+    if usage is None:
+        return
+    _refuse_text_bearing_extras("usage", usage.model_extra)
+    if usage.prompt_tokens_details is not None:
+        _refuse_text_bearing_extras(
+            "usage.prompt_tokens_details", usage.prompt_tokens_details.model_extra
+        )
+    if usage.completion_tokens_details is not None:
+        _refuse_text_bearing_extras(
+            "usage.completion_tokens_details", usage.completion_tokens_details.model_extra
+        )
 
 
 async def _decrypting_chunks(
     raw_iterator: AsyncIterator[ChatCompletionChunk],
     session: "TeeSession",
-) -> AsyncIterator[ChatCompletionChunk]:
-    """Yield chunks with encrypted ``delta.content`` decrypted in place.
+    *,
+    stop: tuple[str, ...] = (),
+) -> AsyncGenerator[ChatCompletionChunk, None]:
+    """Yield chunks with encrypted ``content`` and ``reasoning_content`` decrypted in place.
 
     Each SSE chunk is independently encrypted, so decryption happens per chunk
-    *before* any reassembly. Non-encrypted deltas (role-only, finish, usage) pass
-    through untouched. The SESSION private key must outlive consumption, so the
-    session is closed in ``finally`` when the stream is exhausted or aborted.
+    *before* any reassembly, on every choice. Fails closed: a non-empty
+    ``content``/``reasoning_content`` that is not ciphertext, any
+    ``tool_calls``, ``reasoning_encrypted`` or ``thought_signature``, choice
+    ``logprobs``, or an undeclared field on a delta, choice, chunk or
+    ``usage`` that carries text in a key or a value raises
+    :class:`~venice_ai.exceptions.TeeEncryptionError` (the message names the
+    field, never the value). The usage chunk's numeric ``cost`` passes
+    through, and so does a choice's ``matched_stop`` or ``stop_reason`` when it
+    is a token id or one of the request's own *stop* strings. A delta ``role``
+    other than ``"assistant"`` or a ``finish_reason`` outside the protocol
+    vocabulary also raises. Role-only, finish and usage chunks pass through.
+    The SESSION private key must outlive consumption, so the session is closed in
+    ``finally`` when the stream is exhausted or aborted. A stream closed before
+    its first chunk never enters this body; :class:`_E2EEChunkIterator` closes
+    the session in that case.
     """
     try:
         async for chunk in raw_iterator:
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                content = delta.content
-                if content and looks_encrypted(content):
-                    delta.content = session.decrypt_chunk(content)
+            _refuse_unencryptable_chunk_fields(chunk)
+            for choice in chunk.choices or []:
+                delta = choice.delta
+                _decrypt_delta_field(session, delta, "content")
+                _decrypt_delta_field(session, delta, "reasoning_content")
+                _refuse_unencryptable_delta_fields(choice, stop)
             yield chunk
     finally:
         session.close()
+
+
+class _E2EEChunkIterator:
+    """The decrypted chunk iterator of an E2EE stream, closing the session on ``aclose()``.
+
+    ``aclose()`` on an async generator that has not started does not run its
+    ``finally``, so closing a :class:`~venice_ai.streaming.ChatStream` that was
+    never iterated would leave the SESSION private key referenced until garbage
+    collection. This wrapper closes the decrypting generator, the raw wire
+    iterator and the session whether or not iteration began.
+    """
+
+    def __init__(
+        self,
+        raw_iterator: AsyncIterator[ChatCompletionChunk],
+        session: "TeeSession",
+        *,
+        stop: tuple[str, ...] = (),
+    ) -> None:
+        self._raw = raw_iterator
+        self._session = session
+        self._chunks = _decrypting_chunks(raw_iterator, session, stop=stop)
+
+    def __aiter__(self) -> "_E2EEChunkIterator":
+        return self
+
+    async def __anext__(self) -> ChatCompletionChunk:
+        return await self._chunks.__anext__()
+
+    async def aclose(self) -> None:
+        """Close the decrypting generator and the raw iterator, then the session."""
+        try:
+            try:
+                await self._chunks.aclose()
+            finally:
+                raw_aclose = getattr(self._raw, "aclose", None)
+                if raw_aclose is not None:
+                    await raw_aclose()
+        finally:
+            self._session.close()
 
 
 # --- Resource Class ---
@@ -831,19 +1276,54 @@ class ChatCompletions(APIResource["VeniceClient"]):
                 behavior.
             e2ee: Engage Venice confidential-compute (TEE) end-to-end
                 encryption. The flow runs when ``e2ee`` is truthy OR when
-                ``venice_parameters.enable_e2ee`` is ``True``; it requires an
-                ``e2ee-*`` model and the ``[e2ee]`` extra (``cryptography``).
+                ``venice_parameters.enable_e2ee`` validates to ``True`` (so
+                ``1`` and ``"true"`` engage it too); it requires an
+                ``e2ee-*`` model and the ``[e2ee]`` extra (``cryptography``
+                and ``pycryptodome``). ``e2ee`` set together with
+                ``venice_parameters.enable_e2ee=False`` is refused.
                 ``True`` uses defaults; pass a
                 :class:`~venice_ai.tee.types.TeeOptions` to control the
                 attestation freshness nonce or supply a full quote verifier.
                 When engaged the SDK verifies the model's attestation
-                (fail-closed), encrypts each user/system message to the model
-                key, forces a wire stream with the ``X-Venice-TEE-*`` headers,
-                and decrypts the response locally (reassembling a normal
+                (fail-closed, including that the model key derives to the
+                attested signing address), encrypts ``user`` / ``system`` / ``assistant``
+                message content and assistant ``reasoning_content`` to the
+                model key, forces a wire stream with the ``X-Venice-TEE-*``
+                headers, and decrypts response ``content`` and
+                ``reasoning_content`` locally (reassembling a normal
                 :class:`ChatCompletionResponse` when ``stream`` is ``False``).
-                Tools, web search/scraping, and multimodal content are rejected
-                with :class:`~venice_ai.exceptions.InvalidRequestError` before
-                any network call, and the Venice system prompt is forced off.
+                Only message content is encrypted: every other request
+                parameter, such as ``stop``, ``response_format`` (including a
+                JSON schema), ``prompt_cache_key``, ``user``, ``metadata``,
+                ``seed`` and ``temperature``, is sent in plaintext.
+                Raised as :class:`~venice_ai.exceptions.InvalidRequestError`
+                before any network call: ``developer`` messages (use
+                ``system``), ``tool`` messages and any other role, message
+                keys other than ``role``, ``content`` and assistant
+                ``reasoning_content``, non-text content, ``logprobs`` /
+                ``top_logprobs``, tools, and web search/scraping; an invalid
+                message shape is reported without quoting its content. The
+                Venice system prompt is forced off. Fail closed: the response
+                raises :class:`~venice_ai.exceptions.TeeEncryptionError` on
+                any text outside the encrypted fields and the protocol
+                metadata listed here, such as a non-ciphertext ``content`` or
+                ``reasoning_content``, tool calls, ``logprobs``, a delta
+                ``role`` other than ``"assistant"``, a ``finish_reason``
+                outside the protocol vocabulary (``stop``, ``length``, ...),
+                or an unknown field carrying text in a key or a value. The
+                protocol metadata that passes through unencrypted is the
+                chunk ``id``, ``object``, ``model``, ``created`` and
+                ``system_fingerprint``, ``finish_reason``, the ``"assistant"``
+                role, ``usage`` with its numeric ``cost``, and
+                ``matched_stop`` / ``stop_reason`` when each is a token id or
+                one of the request's own ``stop`` strings. Ciphertext length
+                reveals plaintext length, for both the request messages and
+                each response delta. The returned stream or response carries
+                the attestation trust level as ``.e2ee``, a
+                :class:`~venice_ai.tee.types.TeeTrust`.
+                Consume or close a returned stream (prefer ``async with``):
+                the session private key is held until the stream is
+                exhausted, closed or garbage-collected.
                 SECURITY LIMITATION: the baseline attestation verifier trusts
                 Venice's server-side ``verified`` claim and does not perform
                 full client-side TDX / NVIDIA quote verification; a
@@ -858,7 +1338,10 @@ class ChatCompletions(APIResource["VeniceClient"]):
             :class:`~venice_ai.types.api.streaming.ChatCompletionChunk`.
 
         Raises:
-            InvalidRequestError: If parameters are invalid or malformed.
+            InvalidRequestError: If parameters are invalid or malformed,
+                including a ``venice_parameters.enable_e2ee`` that skipped
+                validation and is neither ``False`` nor ``None`` on a request
+                without E2EE.
             AuthenticationError: If the API key is invalid or missing.
             PermissionDeniedError: If access is denied to the requested
                 model or feature.
@@ -1032,12 +1515,15 @@ class ChatCompletions(APIResource["VeniceClient"]):
         remaining_kwargs = {k: v for k, v in kwargs.items() if k != "stream_cls" and v is not None}
         api_params.update(remaining_kwargs)
 
+        e2ee_engaged = _e2ee_engaged(e2ee, venice_parameters)
+
         # Create Pydantic request model
-        chat_request = ChatCompletionRequest(
+        chat_request = _build_chat_request(
+            e2ee_engaged=e2ee_engaged,
             model=model,
-            messages=_coerce_messages(messages),  # Mappings validated into message models
+            messages=messages,
             stream=stream,
-            **api_params,
+            api_params=api_params,
         )
 
         # Convert to API payload
@@ -1051,13 +1537,15 @@ class ChatCompletions(APIResource["VeniceClient"]):
             if wire_venice_parameters:
                 body["venice_parameters"] = wire_venice_parameters
 
+        if not e2ee_engaged:
+            _refuse_non_bool_wire_enable_e2ee(body)
+
         # --- E2EE (Venice confidential-compute) path -------------------------
         # Engaged when e2ee=... is truthy OR venice_parameters.enable_e2ee=True.
         # All guards FAIL LOUD before any network call (open_session does a GET).
-        if _e2ee_engaged(e2ee, venice_parameters):
+        if e2ee_engaged:
             return await self._create_e2ee(
                 model=model,
-                messages=messages,
                 body=body,
                 stream=stream,
                 e2ee=e2ee,
@@ -1162,7 +1650,6 @@ class ChatCompletions(APIResource["VeniceClient"]):
         self,
         *,
         model: str,
-        messages: Sequence[Any],
         body: dict[str, Any],
         stream: bool,
         e2ee: bool | TeeOptions,
@@ -1172,7 +1659,7 @@ class ChatCompletions(APIResource["VeniceClient"]):
         """Run the real Venice E2EE chat flow.
 
         Validates fail-closed, opens a verified :class:`TeeSession`, encrypts the
-        user/system message content, forces a wire stream with the three
+        message text, forces a wire stream with the three
         ``X-Venice-TEE-*`` headers, then either yields decrypted deltas
         (``stream=True``) or reassembles a surface-preserving
         :class:`ChatCompletionResponse` (``stream=False``).
@@ -1180,18 +1667,21 @@ class ChatCompletions(APIResource["VeniceClient"]):
         # (1) FAIL LOUD before any network call.
         _validate_e2ee_request(
             model=model,
-            messages=messages,
             tools=tools,
             venice_parameters=venice_parameters,
+            e2ee=e2ee,
+            logprobs=body.get("logprobs"),
+            top_logprobs=body.get("top_logprobs"),
         )
+        _validate_e2ee_messages(body.get("messages", []))
 
         opts = e2ee if isinstance(e2ee, TeeOptions) else TeeOptions()
 
         # (2) Attestation-trust limitation warning, emitted on every call that
         # relies on the baseline verifier (no module-global flag) so each such
-        # engagement is honest; Python's default filter handles per-callsite
-        # de-duplication for UX. A caller-supplied full quote verifier removes
-        # the limitation, so nothing is emitted then.
+        # engagement is honest. Python's default filter de-duplicates by
+        # attributed location (the caller of create()). A caller-supplied full
+        # quote verifier removes the limitation, so nothing is emitted then.
         if opts.verifier is None:
             warnings.warn(_E2EE_TRUST_WARNING, UserWarning, stacklevel=3)
 
@@ -1206,42 +1696,48 @@ class ChatCompletions(APIResource["VeniceClient"]):
         # (4) Shape the wire body: force stream + include_usage, encrypt content,
         # force the Venice system prompt off. E2EE mode has no Venice system
         # prompt (it would have to be encrypted client-side), so a caller's
-        # include_venice_system_prompt=True cannot apply here. Only pass
-        # enable_e2ee through if the caller set it (the body is NOT required for
-        # the flow to work).
-        body["stream"] = True
-        existing_stream_options = body.get("stream_options")
-        if isinstance(existing_stream_options, dict):
-            body["stream_options"] = {**existing_stream_options, "include_usage": True}
-        else:
-            body["stream_options"] = {"include_usage": True}
+        # include_venice_system_prompt=True cannot apply here. enable_e2ee is on
+        # the wire only if the caller set it, with the value the request model
+        # validated (the body is NOT required for the flow to work).
+        # Until the decrypting iterator owns the session, any failure here
+        # (an unencodable message, a malformed model key) must drop the
+        # session private key before the exception propagates.
+        try:
+            body["stream"] = True
+            existing_stream_options = body.get("stream_options")
+            if isinstance(existing_stream_options, dict):
+                body["stream_options"] = {**existing_stream_options, "include_usage": True}
+            else:
+                body["stream_options"] = {"include_usage": True}
 
-        vp = body.get("venice_parameters")
-        if not isinstance(vp, dict):
-            vp = {}
-        vp["include_venice_system_prompt"] = False
-        caller_enable_e2ee = _venice_params_as_dict(venice_parameters).get("enable_e2ee")
-        if caller_enable_e2ee is not None:
-            vp["enable_e2ee"] = caller_enable_e2ee
-        body["venice_parameters"] = vp
+            vp = body.get("venice_parameters")
+            if not isinstance(vp, dict):
+                vp = {}
+            vp["include_venice_system_prompt"] = False
+            body["venice_parameters"] = vp
 
-        _encrypt_body_messages(body, session)
+            _encrypt_body_messages(body, session)
 
-        # (5) Stream on the wire with the TEE headers; decrypt each delta.
-        raw_iterator = self._client._stream_request(
-            method="POST",
-            path="chat/completions",
-            json_data=body,
-            headers=session.request_headers(),
-            cast_to=ChatCompletionChunk,
-        )
-        decrypting = _decrypting_chunks(raw_iterator, session)
+            # (5) Stream on the wire with the TEE headers; decrypt each delta.
+            raw_iterator = self._client._stream_request(
+                method="POST",
+                path="chat/completions",
+                json_data=body,
+                headers=session.request_headers(),
+                cast_to=ChatCompletionChunk,
+            )
+            decrypting = _E2EEChunkIterator(
+                raw_iterator, session, stop=_request_stop_values(body.get("stop"))
+            )
+        except BaseException:
+            session.close()
+            raise
 
         if stream:
-            return ChatStream(decrypting, client=self._client)
+            return ChatStream(decrypting, client=self._client, e2ee=session.trust)
         # stream=False: consume the forced stream and reassemble a normal,
         # surface-preserving ChatCompletionResponse from the decrypted deltas.
-        return await ChatStream(decrypting, client=self._client).collect()
+        return await ChatStream(decrypting, client=self._client, e2ee=session.trust).collect()
 
     async def stream(
         self,
@@ -1280,8 +1776,16 @@ class ChatCompletions(APIResource["VeniceClient"]):
 
         Raises:
             InvalidRequestError: If parameters fail server-side validation, or
-                if E2EE is requested on an incompatible request (non-``e2ee-``
-                model, tools, web search/scraping, or multimodal content).
+                if E2EE is requested on an incompatible request, before any
+                network call: ``e2ee`` with ``venice_parameters.enable_e2ee``
+                set to ``False``; a non-``e2ee-`` model; ``developer`` (use
+                ``system``), ``tool`` or other-role messages; message keys
+                other than ``role``, ``content`` and assistant
+                ``reasoning_content``; non-text content; ``logprobs`` /
+                ``top_logprobs``; tools; or web search/scraping.
+            TeeEncryptionError: Under E2EE, if the response carries text
+                outside the encrypted fields and the protocol metadata listed
+                in :meth:`create`; raised while the stream is consumed.
             AuthenticationError: If the API key is missing or invalid.
             RateLimitError: If account-level rate limits are exceeded.
             APIError: For other HTTP-level failures.
@@ -1377,6 +1881,9 @@ class ChatCompletions(APIResource["VeniceClient"]):
             ValueError: If ``model`` is not present in
                 :meth:`client.models.list` or has no LLM token-based
                 pricing (the estimate would otherwise be meaningless).
+            InvalidRequestError: Under E2EE (an ``e2ee-`` model or
+                ``enable_e2ee``), for an invalid message, without quoting its
+                content.
             APIError: For HTTP-level failures while fetching the model
                 catalog.
 
@@ -1390,9 +1897,10 @@ class ChatCompletions(APIResource["VeniceClient"]):
             if estimate.total_cost_usd > Decimal("0.10"):
                 raise BudgetError(f"Too expensive: ${estimate.total_cost_usd}")
         """
+        e2ee_engaged = model.startswith("e2ee-") or _e2ee_engaged(False, venice_parameters)
+        coerced = _coerce_messages_for(messages, e2ee_engaged=e2ee_engaged)
         pricing = await self._fetch_chat_pricing(model)
 
-        coerced = _coerce_messages(messages)
         names = " ".join(str(n) for msg in coerced if (n := getattr(msg, "name", None)))
         prompt_text = f"{_concat_message_text(coerced)} {names}".strip()
         template_tokens = CHAT_TEMPLATE_TOKEN_ALLOWANCE + CHAT_MESSAGE_TOKEN_ALLOWANCE * len(
@@ -1688,7 +2196,9 @@ class ChatCompletions(APIResource["VeniceClient"]):
             TypeError: If :meth:`create` returns an unexpected
                 non-:class:`ChatCompletionResponse` value.
             InvalidRequestError: If parameters fail server-side
-                validation.
+                validation. Under E2EE (``e2ee`` or ``enable_e2ee``), also
+                for an invalid message, before any request and without
+                quoting its content.
             AuthenticationError: If the API key is missing or invalid.
             RateLimitError: If account-level rate limits are exceeded.
             APIError: For other HTTP-level failures during any iteration.
@@ -1702,7 +2212,12 @@ class ChatCompletions(APIResource["VeniceClient"]):
         tool_defs = [entry.tool for entry in registry.values()]
         on_error = on_tool_error or _default_on_tool_error
 
-        history: list[_ChatMessageModel] = _coerce_messages(messages)
+        history: list[_ChatMessageModel] = _coerce_messages_for(
+            messages,
+            e2ee_engaged=_e2ee_engaged(
+                create_kwargs.get("e2ee", False), create_kwargs.get("venice_parameters")
+            ),
+        )
 
         last_response: ChatCompletionResponse | None = None
         for iteration in range(1, max_iterations + 1):

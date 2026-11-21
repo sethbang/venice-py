@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from ..chat import ChatCompletionResponse
 
 from ...identifiers import ModelId
+from ..chat import ChatMessage
 from .common import (
     ANON_USER_ID_DESCRIPTION,
     AnonUserId,
@@ -205,8 +206,15 @@ class AssistantMessage(BaseModel):
         the API echoes, on the message or on a content part, is not: where to
         place a cache breakpoint is the caller's choice.
         """
-        choice = response.choices[choice_index]
-        msg = choice.message
+        return cls.from_chat_message(response.choices[choice_index].message)
+
+    @classmethod
+    def from_chat_message(cls, msg: ChatMessage) -> AssistantMessage:
+        """Create an AssistantMessage from a response :class:`ChatMessage`.
+
+        Carries over what :meth:`from_response` does and drops the echoed
+        ``cache_control`` the same way.
+        """
         content: str | list[TextContent | dict[str, Any]] | None
         if isinstance(msg.content, list):
             content = [_without_cache_control(part) for part in msg.content]
@@ -284,17 +292,21 @@ ChatMessageParam = (
     | SystemMessage
     | ToolMessage
     | DeveloperMessage
+    | ChatMessage
     | Mapping[str, Any]
 )
-"""What ``messages=`` accepts: a typed message model or a plain mapping.
+"""What ``messages=`` accepts: a typed message model, a response message, or a plain mapping.
 
 The models are the recommended form — they give completion, field
 validation at construction, and self-documenting call sites. Mappings in
 the OpenAI wire shape (``{"role": "user", "content": "hi"}``) are accepted
 too, and are validated into the corresponding model before the request is
 built, so a mistyped role or a missing field still raises rather than
-reaching the API. A message-level key the models do not declare is sent as
-given, so a response message passed back through
+reaching the API. A response :class:`~venice_ai.types.api.chat.ChatMessage`
+(``response.choices[0].message``) can be appended to the next turn's
+history as is; an assistant one goes through
+:meth:`AssistantMessage.from_chat_message`. A message-level key the models
+do not declare is sent as given, so a response message passed back through
 :meth:`AssistantMessage.from_response` or ``model_dump()`` keeps it.
 
 Note that this is deliberately wider than ``ChatCompletionRequest.messages``,

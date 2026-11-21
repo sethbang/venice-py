@@ -280,3 +280,36 @@ def test_decrypt_chunk_malformed_hex_raises() -> None:
 def test_decrypt_chunk_too_short_raises() -> None:
     with pytest.raises(TeeEncryptionError):
         _crypto.decrypt_chunk(_crypto.generate_session_keypair(), "abcd")
+
+
+# --- Errors carry no plaintext ------------------------------------------------
+
+
+def _assert_no_plaintext(error: BaseException, secret: str) -> None:
+    assert secret not in str(error)
+    assert secret not in repr(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert error.__suppress_context__ is True
+
+
+def test_encrypt_failure_does_not_chain_plaintext() -> None:
+    model_pub = _crypto.uncompressed_hex(ec.generate_private_key(_CURVE).public_key())
+    with pytest.raises(TeeEncryptionError, match="UnicodeEncodeError") as excinfo:
+        _crypto.encrypt_message(model_pub, "SECRETXYZ \ud800")
+    _assert_no_plaintext(excinfo.value, "SECRETXYZ")
+
+
+def test_decrypt_failure_does_not_chain_plaintext() -> None:
+    session_priv = _crypto.generate_session_keypair()
+    server_eph = ec.generate_private_key(_CURVE)
+    server_eph_pub = server_eph.public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
+    )
+    key = _server_derive_key(server_eph, session_priv.public_key())
+    gcm_nonce = b"\x04" * 12
+    ct = AESGCM(key).encrypt(gcm_nonce, b"SECRETXYZ \xe2\x82", None)
+    chunk_hex = (server_eph_pub + gcm_nonce + ct).hex()
+    with pytest.raises(TeeEncryptionError, match="UnicodeDecodeError") as excinfo:
+        _crypto.decrypt_chunk(session_priv, chunk_hex)
+    _assert_no_plaintext(excinfo.value, "SECRETXYZ")

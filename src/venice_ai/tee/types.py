@@ -9,11 +9,12 @@ keys may appear; ``extra='allow'`` preserves them on ``model_extra``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import ConfigDict, Field
 
 from ..core.models.base import VeniceBaseModel
+from ..exceptions import TeeEncryptionError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ._attestation import FullQuoteVerifier
@@ -31,13 +32,93 @@ class TeeOptions:
     Attributes:
         nonce: Optional 32-byte (64 lowercase hex) attestation freshness nonce.
             Generated automatically when ``None``.
-        verifier: Optional :class:`~venice_ai.tee._attestation.FullQuoteVerifier`
-            for full client-side Intel TDX / NVIDIA quote verification (the
-            baseline ships none).
+        verifier: Optional :class:`venice_ai.tee.FullQuoteVerifier` for full
+            client-side Intel TDX / NVIDIA quote verification (the baseline
+            ships none).
     """
 
     nonce: str | None = None
     verifier: FullQuoteVerifier | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TeeTrust:
+    """How much the attestation behind an E2EE session was trusted.
+
+    Read it from ``ChatStream.e2ee`` or ``ChatCompletionResponse.e2ee`` to see what
+    was verified for an E2EE request. It holds only public attestation fields, no
+    key material.
+
+    Attributes:
+        model: The model the session was opened for.
+        verification: ``"baseline"`` or ``"full_quote"``. ``"baseline"`` trusts
+            Venice's server-side ``verified`` claim: the SDK checks the nonce,
+            the report-data binding (REPORTDATA binds the signing address and
+            the nonce) and that ``model_public_key`` derives to
+            ``signing_address``, but does NOT verify the Intel TDX or NVIDIA
+            quote client-side. ``"full_quote"`` means a
+            :class:`venice_ai.tee.FullQuoteVerifier` you supplied also accepted
+            the attestation; the key-binding check runs on both levels.
+        verifier: The class name of the supplied verifier, or ``None`` for
+            ``"baseline"``.
+        server_verified: The attestation's ``verified`` claim from Venice.
+        nonce: The nonce the attestation echoed (checked against the nonce sent).
+        model_public_key: The model's 130-hex public key that requests are
+            encrypted to. When this trust level comes from
+            :meth:`venice_ai.resources.tee.Tee.get_attestation` or
+            :meth:`venice_ai.resources.tee.Tee.open_session`, verification
+            checked that the key derives to :attr:`signing_address`. A
+            :class:`TeeTrust` built by hand, or from an attestation that was not
+            verified, carries no such guarantee.
+        signing_address: The attested 20-byte signing address: bound into
+            REPORTDATA with the nonce, and the Keccak-256 address of
+            :attr:`model_public_key`.
+    """
+
+    model: str
+    verification: Literal["baseline", "full_quote"]
+    verifier: str | None
+    server_verified: bool
+    nonce: str
+    model_public_key: str
+    signing_address: str
+
+    @classmethod
+    def from_attestation(
+        cls,
+        attestation: TeeAttestation,
+        *,
+        model: str,
+        verifier: FullQuoteVerifier | None,
+    ) -> TeeTrust:
+        """Build the trust level from a verified attestation.
+
+        Args:
+            attestation: The verified attestation.
+            model: The model id the session was opened for.
+            verifier: The full-quote verifier used, or ``None`` for baseline.
+
+        Returns:
+            A frozen :class:`TeeTrust`.
+
+        Raises:
+            TeeEncryptionError: If the attestation has no ``signing_public_key``.
+        """
+        if attestation.signing_public_key is None:
+            raise TeeEncryptionError(
+                "Cannot establish a TEE E2EE session: the attestation has no "
+                "signing_public_key (model public key). This model does not "
+                "publish a model key for end-to-end encryption."
+            )
+        return cls(
+            model=model,
+            verification="baseline" if verifier is None else "full_quote",
+            verifier=None if verifier is None else type(verifier).__name__,
+            server_verified=attestation.verified,
+            nonce=attestation.nonce,
+            model_public_key=attestation.signing_public_key,
+            signing_address=attestation.signing_address,
+        )
 
 
 class TeeAttestation(VeniceBaseModel):
@@ -182,7 +263,9 @@ class TeeVerificationResult(VeniceBaseModel):
     Attributes:
         ok: ``True`` only if every baseline check passed.
         checks: Per-check pass/fail map (e.g. ``"verified"``, ``"nonce_echo"``,
-            ``"reportdata_binding"``, ``"debug_flag"``, ``"full_quote"``).
+            ``"reportdata_binding"``, ``"debug_flag"``, ``"key_binding"``,
+            ``"full_quote"``). ``"key_binding"`` is absent when the attestation
+            carries no ``signing_public_key``.
         failures: Human-readable messages for the checks that did not pass.
         signing_address: The lowercase, ``0x``-stripped signing address that the
             report-data binding was checked against.

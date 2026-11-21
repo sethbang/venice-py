@@ -404,7 +404,10 @@ class ExtendedPricing(BaseModel):
         default=None, description="Extended cached input token pricing"
     )
     cache_write: PricingTier | None = Field(
-        default=None, description="Extended cache write token pricing"
+        default=None, description="Extended 5-minute cache write token pricing"
+    )
+    cache_write_1h: PricingTier | None = Field(
+        default=None, description="Extended 1-hour cache write token pricing"
     )
 
 
@@ -415,6 +418,8 @@ class LLMModelPricing(BaseModel):
     The cache_input field is present on select models that support
     prompt caching (e.g., claude-opus-45, grok-41-fast). Some providers (e.g.
     Anthropic) also charge for ``cache_write`` (cache creation) at a premium.
+    ``cache_write`` is the rate for a 5-minute write; models that accept a
+    1-hour ``cache_control`` TTL also publish ``cache_write_1h``.
 
     ``extra="allow"`` keeps unknown live pricing keys on
     :attr:`pydantic.BaseModel.model_extra` (and in ``model_dump``) rather than
@@ -430,7 +435,14 @@ class LLMModelPricing(BaseModel):
     )
     cache_write: PricingTier | None = Field(
         default=None,
-        description="Cache creation token pricing (e.g. Anthropic charges ~1.25x input)",
+        description="5-minute cache creation token pricing (e.g. Anthropic charges ~1.25x input)",
+    )
+    cache_write_1h: PricingTier | None = Field(
+        default=None,
+        description=(
+            "1-hour cache creation token pricing, for writes marked with cache_control "
+            "ttl '1h'. Absent on models without a 1-hour rate."
+        ),
     )
     extended: ExtendedPricing | None = Field(
         default=None,

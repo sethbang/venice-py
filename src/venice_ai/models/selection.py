@@ -676,9 +676,12 @@ def _has_price(pricing: Any, key: str) -> bool:
 def _is_e2ee_model(model_data: dict[str, Any]) -> bool:
     """Return ``True`` for end-to-end encrypted chat models.
 
-    These need the client-side encryption flow, so a plain request to them
-    fails. The catalog flags them with ``supportsE2EE``; the ``e2ee-`` id
-    prefix is checked too in case the flag is missing.
+    A plain request to these models is answered in TEE-only mode, without
+    client-side encryption, which is why ``prefer="cheapest"`` skips them
+    unless ``require_e2ee=True``. The default ranking does not skip them, so it
+    can return one; E2EE callers pass ``require_e2ee=True``. The catalog flags
+    them with ``supportsE2EE``; the ``e2ee-`` id prefix is checked too in case
+    the flag is missing.
     """
     capabilities = model_data.get("model_spec", {}).get("capabilities", {})
     if capabilities.get("supportsE2EE", False):
@@ -1196,8 +1199,9 @@ class DynamicModelSelector:
 
         Beta models (when *exclude_beta*) and end-to-end encrypted chat models
         (when *exclude_e2ee*) are often the cheapest entries in the catalog, but
-        a plain request to an e2ee model fails and beta models can change or
-        disappear without notice.
+        a plain request to an e2ee model is answered in TEE-only mode without
+        client-side encryption, and beta models can change or disappear without
+        notice.
 
         Args:
             resource_type: Catalog type to scan (``"text"``, ``"image"`` ...).

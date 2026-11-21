@@ -90,7 +90,7 @@ Rules:
 - Equal prices go to the model with Venice's `default` trait, then catalog order, then model ID, so a tie lands where `prefer=None` would.
 - Price order is only as good as the catalog. A model whose listed capability or price is wrong upstream can still win; check the result if the request fails.
 - Beta models are skipped unless you pass `exclude_beta=False` (decision models are exempt: every one is beta).
-- End-to-end encrypted chat models (`e2ee-*`) are skipped unless you pass `require_e2ee=True`. `require_private=True` alone does not re-admit them, because they need the encryption flow.
+- With `prefer="cheapest"`, end-to-end encrypted chat models (`e2ee-*`) are skipped unless you pass `require_e2ee=True`; the default ranking does not filter on E2EE and can return one. For an E2EE call, always pass `require_e2ee=True`. Under `prefer="cheapest"`, `require_private=True` alone does not re-admit them, because a plain request to them runs in TEE-only mode, without client-side encryption. The catalog's function-calling and vision flags on `e2ee-*` models describe TEE-only use; with `e2ee=True`, `create()` refuses tools and non-text content, so don't combine `require_e2ee` with `require_function_calling` or `require_vision` for an E2EE call.
 - Music implies `exclude_non_music=True`, so a per-second sound-effect model can't win, and skips models that require lyrics.
 - A `preferred_models` entry that passes the filters still wins over price.
 
@@ -115,7 +115,7 @@ model = await client.models.resolve_chat(
     require_reasoning_effort=None,        # value must be in reasoningEffortOptions, e.g. "none"
     require_prompt_caching=False,         # lists a pricing.cache_input price (not a guarantee of hits)
     require_multiple_images=False,        # capabilities.supportsMultipleImages
-    require_e2ee=False,                   # capabilities.supportsE2EE (needs the e2ee flow)
+    require_e2ee=False,                   # capabilities.supportsE2EE (use with create(e2ee=True); not with function_calling/vision)
     exclude_reasoning=False,              # only models that never reason
     exclude_uncensored=False,             # skip models flagged uncensored
     preferred_models=None,
@@ -359,7 +359,7 @@ If neither preferred model is available (deprecation, region restrictions, etc.)
 | `require_transparent_background` (image, inpaint) | Constraints set `supportsTransparentBackground` | `image.create(transparent_background=True, format="png")` |
 | `input_mode` (video only) | What an image-to-video model takes as input | `input_mode="reference"` for R2V |
 | `require_multiple_images` (chat) | Model accepts several images in one request | Comparing screenshots |
-| `require_e2ee` (chat) | Model is end-to-end encrypted (`supportsE2EE`) | `chat.completions.create(e2ee=...)` |
+| `require_e2ee` (chat) | Model is end-to-end encrypted (`supportsE2EE`); don't combine with `require_function_calling`/`require_vision` for an E2EE call | `chat.completions.create(e2ee=...)` |
 | `exclude_non_music` (music only) | Skip TTS, sound-effect and voice-changer models typed as music | `music.generate(...)` |
 | `require_force_instrumental` (music only) | Model supports `force_instrumental` | Instrumental tracks |
 | `require_audio` (video only) | Video model includes audio track | Cinematic outputs |

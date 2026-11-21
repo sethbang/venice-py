@@ -199,6 +199,19 @@ def derive_key(priv: EllipticCurvePrivateKey, peer_pub: EllipticCurvePublicKey) 
 # --- Encrypt / decrypt --------------------------------------------------------
 
 
+def _content_free_error(prefix: str, exc: Exception) -> TeeEncryptionError:
+    """A :class:`TeeEncryptionError` naming only the type of ``exc``.
+
+    ``str(exc)`` and the exception object itself can carry message text (a
+    ``UnicodeEncodeError`` / ``UnicodeDecodeError`` keeps the whole input on
+    ``.object``), so the replacement quotes neither. Callers raise it outside
+    the ``except`` block so it has no ``__cause__`` and no ``__context__``.
+    """
+    error = TeeEncryptionError(f"{prefix} ({type(exc).__name__}).")
+    error.__suppress_context__ = True
+    return error
+
+
 def encrypt_message(model_pub: str, plaintext: str) -> str:
     """Encrypt a request message to the model's public key.
 
@@ -227,11 +240,11 @@ def encrypt_message(model_pub: str, plaintext: str) -> str:
         finally:
             for i in range(len(key)):
                 key[i] = 0
+        encrypted_hex: str = bytes.fromhex(eph_pub_hex).hex() + gcm_nonce.hex() + ct.hex()
+        return encrypted_hex
     except Exception as exc:  # noqa: BLE001 - fail closed on any crypto failure
-        raise TeeEncryptionError(f"TEE message encryption failed: {exc}") from exc
-
-    encrypted_hex: str = bytes.fromhex(eph_pub_hex).hex() + gcm_nonce.hex() + ct.hex()
-    return encrypted_hex
+        failure = _content_free_error("TEE message encryption failed", exc)
+    raise failure
 
 
 def decrypt_chunk(session_priv: EllipticCurvePrivateKey, content_hex: str) -> str:
@@ -265,19 +278,21 @@ def decrypt_chunk(session_priv: EllipticCurvePrivateKey, content_hex: str) -> st
             for i in range(len(key)):
                 key[i] = 0
     except Exception as exc:  # noqa: BLE001 - fail closed; never emit corrupt plaintext
-        raise TeeEncryptionError(f"TEE response chunk decryption failed: {exc}") from exc
+        failure = _content_free_error("TEE response chunk decryption failed", exc)
+    raise failure
 
 
 # --- Heuristic ----------------------------------------------------------------
 
 
 def looks_encrypted(s: str) -> bool:
-    """Heuristic: is ``s`` an encrypted wire blob (vs passthrough plaintext)?
+    """Shape check: could ``s`` be an encrypted wire blob?
 
     True iff ``s`` is all-lowercase hex, even-length, and at least
     :data:`MIN_ENCRYPTED_HEX_LEN` (186) characters — the minimum for
-    ``eph_pub(65) || nonce(12) || tag(16)`` = 93 bytes. A sufficiently long
-    all-hex-lowercase plaintext is a documented false-positive edge.
+    ``eph_pub(65) || nonce(12) || tag(16)`` = 93 bytes. This only gates
+    decryption: a value that fails the check is rejected by callers, and one
+    that passes is still authenticated by :func:`decrypt_chunk`.
     """
     if len(s) < MIN_ENCRYPTED_HEX_LEN or len(s) % 2 != 0:
         return False

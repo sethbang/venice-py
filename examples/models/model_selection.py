@@ -262,7 +262,7 @@ def _plain_chat_models(catalog: dict[str, ModelResponse]) -> list[ModelResponse]
     """Chat models with a listed context size, largest first, that any filter can return.
 
     Beta and end-to-end encrypted models are left out, because ``prefer="cheapest"``
-    skips them.
+    skips them: an encrypted model answers a plain request only in TEE-only mode.
     """
     models = []
     for model in catalog.values():
@@ -430,8 +430,8 @@ async def custom_selection_strategies() -> bool | None:
 
             # cheapest_model_strategy is the price ranking on its own, to call from a
             # strategy that adds rules of its own. selector= overrides the default.
-            # exclude_e2ee: an encrypted model is often cheapest, and needs client-side
-            # encryption that a plain request does not do.
+            # exclude_e2ee: an encrypted model is often cheapest, but a plain request
+            # to it runs in TEE-only mode, and this ranking wants ordinary models.
             pick = await selector.select_chat_model(
                 exclude_beta=True,
                 exclude_e2ee=True,

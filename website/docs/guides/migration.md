@@ -349,30 +349,26 @@ pip install 'venice-py[redis]'        # Redis-backed rate limiting / caching
 pip install 'venice-py[adaptive]'     # ADAPTIVE rate limiter
 pip install 'venice-py[x402]'         # SIWE wallet auth (eth-account + siwe)
 pip install 'venice-py[x402-solana]'  # Solana wallet settlement
-pip install 'venice-py[e2ee]'         # TEE client-side encryption (cryptography)
+pip install 'venice-py[e2ee]'         # TEE client-side encryption (cryptography, pycryptodome)
 ```
 
 ### Client-side E2EE (`enable_e2ee` / `e2ee=True`)
 
 New in v2: real client-side end-to-end encryption for confidential-compute models.
 Setting `enable_e2ee=True` (or `e2ee=True` on `client.chat.completions.create`) makes
-the SDK verify the model's attestation, encrypt each user/system message to the
+the SDK verify the model's attestation, encrypt each message's content (user,
+system and assistant turns, plus an assistant's `reasoning_content`) to the
 attested enclave key, stream the response, and decrypt it locally.
 
 **What to do:**
 
-- Install the extra: `pip install 'venice-py[e2ee]'` (pulls `cryptography`).
-  Baseline attestation works without it; only encryption needs it.
+- Install the extra: `pip install 'venice-py[e2ee]'` (pulls `cryptography` and
+  `pycryptodome`).
 - Use an `e2ee-*` confidential-compute model. Discover one dynamically — do not
   hardcode a model id:
 
   ```python
-  models = await client.models.list(type="text")
-  e2ee_model = next(
-      entry.id
-      for entry in models.data
-      if getattr(entry.model_spec.capabilities, "supportsE2EE", False)
-  )
+  e2ee_model = await client.models.resolve_chat(require_e2ee=True)
 
   resp = await client.chat.completions.create(
       model=e2ee_model,
@@ -381,12 +377,44 @@ attested enclave key, stream the response, and decrypt it locally.
   )
   ```
 
-- Note the constraints: tool calling, web search/scraping, and multimodal
-  (image/file) content are rejected with `InvalidRequestError` under E2EE.
+- Multi-turn works: pass the previous `resp.choices[0].message` back in `messages`.
+  The SDK encrypts assistant `content` and its `reasoning_content` client-side, and
+  `reasoning_content` from reasoning models comes back decrypted (streamed deltas and
+  the collected message).
+- Note the constraints: under E2EE, `create()` raises `InvalidRequestError` before
+  sending for `developer` messages (use `system` instead), `tool` messages, assistant
+  tool calls, message keys other than `role`/`content`/assistant `reasoning_content`
+  (for example `name`, `cache_control`), non-text (image/file) content on any role,
+  `logprobs`/`top_logprobs`, web search/scraping, and `e2ee=True` combined with
+  `enable_e2ee=False`. An `enable_e2ee` value that `VeniceParameters` validates as
+  `True`, such as `1` or `"true"`, turns E2EE on.
+- Any text in the response outside the encrypted fields and the listed protocol
+  metadata raises `TeeEncryptionError` instead of being passed through: a plaintext
+  delta, tool calls, `logprobs`, or an unknown field that carries text in a key or a
+  value. The protocol metadata that passes is `finish_reason`, the `assistant` role,
+  `usage` counts, the usage chunk's numeric `cost`, `matched_stop` and `stop_reason`
+  when each is a token id or one of your request's own `stop` strings, and each
+  chunk's `id`, `object`, `model`, `created` and `system_fingerprint`.
+- Read `resp.e2ee` (or `stream.e2ee`) for the trust level: a `TeeTrust` from
+  `venice_ai.tee` with `model`, `verification` (`"baseline"` or `"full_quote"`),
+  `verifier`, `server_verified`, `nonce`, `model_public_key` and `signing_address`.
+- Only message content is encrypted. Request parameters such as `stop`,
+  `response_format` (including a JSON schema), `prompt_cache_key`, `user`, `metadata`,
+  `seed` and `temperature` travel in plaintext, and ciphertext length reveals plaintext
+  length.
+- **TEE-only mode:** calling an `e2ee-*` model without `e2ee=True` returns an answer
+  with no error, but the prompt and reply are not encrypted between client and enclave.
 - **Security limitation:** attestation verification is **baseline** — it trusts
   Venice's server-side `verified` claim and the nonce / report-data binding, but
-  does **not** perform full client-side Intel TDX + NVIDIA quote verification. A
-  one-time `UserWarning` is emitted on engagement. Supply a `FullQuoteVerifier`
+  does **not** perform full client-side Intel TDX + NVIDIA quote verification.
+  REPORTDATA binds the enclave's signing address and the nonce; on every verifier
+  the SDK checks that the model encryption key derives to that address and raises
+  `TeeAttestationError` if it does not. A `UserWarning` is emitted on every E2EE
+  call that uses the baseline verifier.
+  Python's default warning filter shows each warning location once: calls to
+  `create()` from your own code warn once per call site, and calls through
+  `stream()`, `run_with_tools()` or the sync client warn once per process. Run with
+  `-W always::UserWarning` to see every one. Supply a `FullQuoteVerifier`
   via `e2ee=TeeOptions(verifier=...)` if your threat model requires it. See
   [CHANGELOG § TEE client-side end-to-end encryption](https://github.com/sethbang/venice-py/blob/main/CHANGELOG.md).
 

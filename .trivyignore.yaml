@@ -8,20 +8,15 @@
 # a finding that has since become fixable.
 
 vulnerabilities:
-  - id: CVE-2025-71329
+  - id: CVE-2026-118764
     paths:
       - "website/package-lock.json"
     statement: >-
-      image-size denial of service via a crafted image buffer. No fixed release
-      exists: 2.0.2 is the latest published version, and @docusaurus/mdx-loader
-      requires ^2.0.2. Reached only at build time, over images committed to this
-      repository.
-    expired_at: 2026-11-12
-
-  - id: CVE-2025-71330
-    paths:
-      - "website/package-lock.json"
-    statement: >-
-      image-size denial of service via a crafted ICNS buffer. Same unfixable
-      constraint and same build-time-only exposure as CVE-2025-71329.
-    expired_at: 2026-11-12
+      minimatch 9.0.9 denial of service via a crafted glob. The only 9.x copy is
+      the one docusaurus-plugin-llms pulls in: its latest release, 0.6.2, still
+      pins minimatch 9.0.3, which an override in website/package.json moves to
+      9.0.9. The plugin calls minimatch with {matchBase: true} only, while the
+      advisory needs optimizationLevel >= 2, and the patterns it matches come
+      from our own docusaurus config at build time. The fix, 11.0.1, is two
+      majors above what the plugin pins.
+    expired_at: 2027-02-20

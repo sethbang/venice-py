@@ -8,7 +8,11 @@ per-million rates for each billing category on ``LLMModelPricing``:
 * ``prompt_tokens_details.cached_tokens`` (mirrored at top level as
   ``cache_read_input_tokens`` on some models) is billed at ``cache_input``.
 * ``prompt_tokens_details.cache_creation_input_tokens`` (mirrored as
-  ``cache_creation_input_tokens``) is billed at ``cache_write``.
+  ``cache_creation_input_tokens``) is the total written to the cache. When
+  ``prompt_tokens_details`` splits it into ``cache_creation_5m_input_tokens``
+  and ``cache_creation_1h_input_tokens``, the 1h part is billed at
+  ``cache_write_1h`` and the rest at ``cache_write``; without a split the
+  whole write is billed at ``cache_write``.
 * The remainder is billed at ``input``; completion tokens at ``output``.
 * When prompt tokens exceed ``extended.context_token_threshold`` the extended
   rates apply to the entire request.
@@ -159,6 +163,10 @@ class TestCacheWriteBilling:
                 id="nested",
             ),
             pytest.param(_usage(10979, 50, cache_creation_input_tokens=10938), id="top-level"),
+            pytest.param(
+                _usage(10979, 50, details={"cache_write_tokens": 10938}),
+                id="nested-cache_write_tokens-only",
+            ),
         ],
     )
     def test_cache_write_tokens_billed_at_cache_write_rate(self, usage):
@@ -196,6 +204,225 @@ class TestCacheWriteBilling:
         pricing = _pricing(cache_input=_tier(0.26))
         expected = _per_million(1000, "1.40") + _per_million(10, "4.40")
         assert calculate_completion_cost(_response(usage), pricing)["usd"] == expected
+
+
+class TestCacheWriteTtlBilling:
+    """5-minute writes bill at ``cache_write``, 1-hour writes at ``cache_write_1h``."""
+
+    # Shape returned live for a 1h-marked write.
+    _PROMPT = 14381
+    _WRITTEN = 12622
+    _COMPLETION = 4
+
+    @staticmethod
+    def _ttl_pricing(**tiers: Any) -> LLMModelPricing:
+        body: dict[str, Any] = {
+            "input": _tier(1.00),
+            "output": _tier(5.00),
+            "cache_input": _tier(0.10),
+            "cache_write": _tier(1.25),
+            "cache_write_1h": _tier(2.00),
+        }
+        body.update(tiers)
+        return LLMModelPricing.model_validate(body)
+
+    def _expected(self, *, m5: int, h1: int, rest: int) -> Decimal:
+        return (
+            _per_million(self._PROMPT - self._WRITTEN, "1.00")
+            + _per_million(m5 + rest, "1.25")
+            + _per_million(h1, "2.00")
+            + _per_million(self._COMPLETION, "5.00")
+        )
+
+    def _details(self, **split: int) -> dict[str, int]:
+        return {
+            "cached_tokens": 0,
+            "cache_creation_input_tokens": self._WRITTEN,
+            "cache_write_tokens": self._WRITTEN,
+            **split,
+        }
+
+    def test_one_hour_only_write_bills_at_cache_write_1h(self):
+        usage = _usage(
+            self._PROMPT,
+            self._COMPLETION,
+            details=self._details(cache_creation_1h_input_tokens=self._WRITTEN),
+            cache_creation_input_tokens=self._WRITTEN,
+        )
+        cost = calculate_completion_cost(_response(usage), self._ttl_pricing())["usd"]
+        expected = self._expected(m5=0, h1=self._WRITTEN, rest=0)
+        assert cost == expected, f"1h writes must bill at cache_write_1h: got {cost}"
+
+    def test_five_minute_only_write_bills_at_cache_write(self):
+        usage = _usage(
+            self._PROMPT,
+            self._COMPLETION,
+            details=self._details(cache_creation_5m_input_tokens=self._WRITTEN),
+            cache_creation_input_tokens=self._WRITTEN,
+        )
+        cost = calculate_completion_cost(_response(usage), self._ttl_pricing())["usd"]
+        assert cost == self._expected(m5=self._WRITTEN, h1=0, rest=0)
+
+    def test_mixed_write_bills_each_part_at_its_rate(self):
+        usage = _usage(
+            self._PROMPT,
+            self._COMPLETION,
+            details=self._details(
+                cache_creation_5m_input_tokens=2622, cache_creation_1h_input_tokens=10000
+            ),
+        )
+        cost = calculate_completion_cost(_response(usage), self._ttl_pricing())["usd"]
+        assert cost == self._expected(m5=2622, h1=10000, rest=0)
+
+    def test_split_short_of_total_bills_remainder_at_cache_write(self):
+        usage = _usage(
+            self._PROMPT,
+            self._COMPLETION,
+            details=self._details(
+                cache_creation_5m_input_tokens=600, cache_creation_1h_input_tokens=10000
+            ),
+        )
+        cost = calculate_completion_cost(_response(usage), self._ttl_pricing())["usd"]
+        assert cost == self._expected(m5=600, h1=10000, rest=self._WRITTEN - 10600)
+
+    def test_no_split_bills_whole_write_at_cache_write(self):
+        usage = _usage(
+            self._PROMPT,
+            self._COMPLETION,
+            details={"cached_tokens": 0, "cache_creation_input_tokens": self._WRITTEN},
+        )
+        cost = calculate_completion_cost(_response(usage), self._ttl_pricing())["usd"]
+        assert cost == self._expected(m5=0, h1=0, rest=self._WRITTEN)
+
+    def test_split_without_total_still_bills_the_split(self):
+        usage = _usage(
+            self._PROMPT,
+            self._COMPLETION,
+            details={"cache_creation_1h_input_tokens": self._WRITTEN},
+        )
+        cost = calculate_completion_cost(_response(usage), self._ttl_pricing())["usd"]
+        assert cost == self._expected(m5=0, h1=self._WRITTEN, rest=0)
+
+    def test_split_larger_than_prompt_is_capped_at_the_prompt(self):
+        usage = _usage(1000, self._COMPLETION, details={"cache_creation_1h_input_tokens": 5000})
+        cost = calculate_completion_cost(_response(usage), self._ttl_pricing())["usd"]
+        assert cost == _per_million(1000, "2.00") + _per_million(self._COMPLETION, "5.00")
+
+    def test_model_without_cache_write_1h_falls_back_to_cache_write(self):
+        pricing = LLMModelPricing.model_validate(
+            {"input": _tier(1.00), "output": _tier(5.00), "cache_write": _tier(1.25)}
+        )
+        assert pricing.cache_write_1h is None
+        usage = _usage(
+            self._PROMPT,
+            self._COMPLETION,
+            details=self._details(cache_creation_1h_input_tokens=self._WRITTEN),
+        )
+        cost = calculate_completion_cost(_response(usage), pricing)["usd"]
+        assert cost == self._expected(m5=0, h1=0, rest=self._WRITTEN)
+
+    def test_model_without_any_write_rate_bills_1h_writes_at_input(self):
+        pricing = LLMModelPricing.model_validate({"input": _tier(1.00), "output": _tier(5.00)})
+        usage = _usage(
+            self._PROMPT,
+            self._COMPLETION,
+            details=self._details(cache_creation_1h_input_tokens=self._WRITTEN),
+        )
+        cost = calculate_completion_cost(_response(usage), pricing)["usd"]
+        assert cost == _per_million(self._PROMPT, "1.00") + _per_million(self._COMPLETION, "5.00")
+
+    def test_above_threshold_uses_extended_cache_write_1h(self):
+        pricing = self._ttl_pricing(
+            extended={
+                "context_token_threshold": 10_000,
+                "input": _tier(2.00),
+                "output": _tier(10.00),
+                "cache_write": _tier(2.50),
+                "cache_write_1h": _tier(4.00),
+            }
+        )
+        usage = _usage(
+            self._PROMPT,
+            self._COMPLETION,
+            details=self._details(
+                cache_creation_5m_input_tokens=2622, cache_creation_1h_input_tokens=10000
+            ),
+        )
+        expected = (
+            _per_million(self._PROMPT - self._WRITTEN, "2.00")
+            + _per_million(2622, "2.50")
+            + _per_million(10000, "4.00")
+            + _per_million(self._COMPLETION, "10.00")
+        )
+        assert calculate_completion_cost(_response(usage), pricing)["usd"] == expected
+
+    def test_extended_without_1h_rate_falls_back_to_extended_cache_write(self):
+        # The extended tier replaces the standard cache rates as a set, so a
+        # standard cache_write_1h never applies to a long-context request.
+        pricing = self._ttl_pricing(
+            extended={
+                "context_token_threshold": 10_000,
+                "input": _tier(2.00),
+                "output": _tier(10.00),
+                "cache_write": _tier(2.50),
+            }
+        )
+        usage = _usage(
+            self._PROMPT,
+            self._COMPLETION,
+            details=self._details(cache_creation_1h_input_tokens=self._WRITTEN),
+        )
+        expected = (
+            _per_million(self._PROMPT - self._WRITTEN, "2.00")
+            + _per_million(self._WRITTEN, "2.50")
+            + _per_million(self._COMPLETION, "10.00")
+        )
+        assert calculate_completion_cost(_response(usage), pricing)["usd"] == expected
+
+    @pytest.mark.asyncio
+    async def test_cost_tracker_bills_1h_writes_at_1h_rate(self):
+        tracker = CostTracker(pricing_map={_MODEL: self._ttl_pricing()})
+        usage = _usage(
+            self._PROMPT,
+            self._COMPLETION,
+            details=self._details(cache_creation_1h_input_tokens=self._WRITTEN),
+        )
+        cost = await tracker.track(_response(usage))
+        assert cost == self._expected(m5=0, h1=self._WRITTEN, rest=0)
+
+
+class TestCacheWrite1hCatalogParsing:
+    def test_catalog_pricing_with_cache_write_1h_parses(self):
+        pricing = LLMModelPricing.model_validate(
+            {
+                "input": {"usd": 1.0, "diem": 1.0},
+                "output": {"usd": 5.0, "diem": 5.0},
+                "cache_input": {"usd": 0.1, "diem": 0.1},
+                "cache_write": {"usd": 0.125, "diem": 0.125},
+                "cache_write_1h": {"usd": 0.2, "diem": 0.2},
+                "extended": {
+                    "context_token_threshold": 200000,
+                    "input": {"usd": 2.0, "diem": 2.0},
+                    "cache_write": {"usd": 0.25, "diem": 0.25},
+                    "cache_write_1h": {"usd": 0.4, "diem": 0.4},
+                },
+            }
+        )
+        assert pricing.cache_write_1h is not None
+        assert pricing.cache_write_1h.usd == 0.2
+        assert pricing.cache_write_1h.diem == 0.2
+        assert pricing.extended is not None
+        assert pricing.extended.cache_write_1h is not None
+        assert pricing.extended.cache_write_1h.usd == 0.4
+        assert "cache_write_1h" not in (pricing.model_extra or {})
+
+    def test_catalog_pricing_without_cache_write_1h_reads_none(self):
+        pricing = LLMModelPricing.model_validate(
+            {"input": _tier(1.0), "output": _tier(5.0), "extended": {"input": _tier(2.0)}}
+        )
+        assert pricing.cache_write_1h is None
+        assert pricing.extended is not None
+        assert pricing.extended.cache_write_1h is None
 
 
 class TestExtendedContextBilling:
@@ -265,6 +492,7 @@ _FULL_EXTENDED: dict[str, Any] = {
     "output": _tier(6.0),
     "cache_input": _tier(0.3),
     "cache_write": _tier(3.75),
+    "cache_write_1h": _tier(6.0),
 }
 
 
@@ -274,6 +502,7 @@ def _full_pricing(**overrides: Any) -> dict[str, Any]:
         "output": _tier(2.0),
         "cache_input": _tier(0.1),
         "cache_write": _tier(1.25),
+        "cache_write_1h": _tier(2.0),
         "extended": dict(_FULL_EXTENDED),
     }
     body.update(overrides)
@@ -282,11 +511,25 @@ def _full_pricing(**overrides: Any) -> dict[str, Any]:
 
 # Usage that exercises each pricing field of ``LLMModelPricing``. Standard-tier
 # scenarios stay below the extended threshold; extended scenarios exceed it.
+# Only part of each write is 1h, so both cache_write and cache_write_1h move
+# the cost.
 _STANDARD_USAGE = _usage(
-    500, 100, details={"cached_tokens": 200, "cache_creation_input_tokens": 100}
+    500,
+    100,
+    details={
+        "cached_tokens": 200,
+        "cache_creation_input_tokens": 100,
+        "cache_creation_1h_input_tokens": 40,
+    },
 )
 _EXTENDED_USAGE = _usage(
-    5_000, 100, details={"cached_tokens": 2_000, "cache_creation_input_tokens": 1_000}
+    5_000,
+    100,
+    details={
+        "cached_tokens": 2_000,
+        "cache_creation_input_tokens": 1_000,
+        "cache_creation_1h_input_tokens": 400,
+    },
 )
 
 _PRICING_FIELD_SCENARIOS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
@@ -295,6 +538,7 @@ _PRICING_FIELD_SCENARIOS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
     "output": (_full_pricing(output=_tier(9.0)), _STANDARD_USAGE),
     "cache_input": (_full_pricing(cache_input=_tier(0.9)), _STANDARD_USAGE),
     "cache_write": (_full_pricing(cache_write=_tier(9.0)), _STANDARD_USAGE),
+    "cache_write_1h": (_full_pricing(cache_write_1h=_tier(9.0)), _STANDARD_USAGE),
     "extended": (
         _full_pricing(extended={**_FULL_EXTENDED, "input": _tier(30.0)}),
         _EXTENDED_USAGE,
@@ -307,6 +551,7 @@ _EXTENDED_FIELD_SCENARIOS: dict[str, dict[str, Any]] = {
     "output": {**_FULL_EXTENDED, "output": _tier(60.0)},
     "cache_input": {**_FULL_EXTENDED, "cache_input": _tier(3.0)},
     "cache_write": {**_FULL_EXTENDED, "cache_write": _tier(37.5)},
+    "cache_write_1h": {**_FULL_EXTENDED, "cache_write_1h": _tier(60.0)},
 }
 
 

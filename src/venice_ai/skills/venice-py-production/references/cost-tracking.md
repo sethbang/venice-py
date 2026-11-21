@@ -95,7 +95,7 @@ from venice_ai.costs import calculate_completion_cost
 
 Two things agents reliably get wrong:
 
-1. **The first arg is the completion object, NOT a model id string.** Pass the full `ChatCompletionResponse` you got back from `client.chat.completions.create(...)`. The function reads `completion.usage` off that object: `prompt_tokens` (split into cache reads, cache writes and the uncached remainder, each at its own rate) and `completion_tokens`.
+1. **The first arg is the completion object, NOT a model id string.** Pass the full `ChatCompletionResponse` you got back from `client.chat.completions.create(...)`. The function reads `completion.usage` off that object: `prompt_tokens` (split into cache reads, five-minute and one-hour cache writes, and the uncached remainder, each at its own rate) and `completion_tokens`.
 2. **The return is a dict with a `"usd"` key**, not a `Decimal` directly. Do `costs["usd"]`, not `costs`.
 
 ```python

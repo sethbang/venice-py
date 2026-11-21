@@ -28,7 +28,7 @@ ec = pytest.importorskip(
 from venice_ai.exceptions import TeeAttestationError  # noqa: E402
 from venice_ai.resources.tee import Tee  # noqa: E402
 from venice_ai.tee import _crypto  # noqa: E402
-from venice_ai.tee._attestation import NONCE_LEN_HEX  # noqa: E402
+from venice_ai.tee._attestation import NONCE_LEN_HEX, _keccak256  # noqa: E402
 from venice_ai.tee._constants import (  # noqa: E402
     HEADER_CLIENT_PUB_KEY,
     HEADER_MODEL_PUB_KEY,
@@ -57,7 +57,8 @@ def _synthetic_attestation() -> tuple[dict[str, Any], ec.EllipticCurvePrivateKey
     """
     model_priv = ec.generate_private_key(_CURVE)
     model_pub_hex = _crypto.uncompressed_hex(model_priv.public_key())
-    addr = "ab" * 20  # arbitrary; only cross-checked against reportData
+    # The address the key derives to, as verify_attestation's key binding requires.
+    addr = _keccak256(bytes.fromhex(model_pub_hex)[1:])[-20:].hex()
     nonce = "cd" * 32
     report_data = addr + ("00" * 12) + nonce
     raw = {
@@ -158,6 +159,32 @@ async def test_open_session_round_trips_encrypt_decrypt(tee: Tee) -> None:
     # Response direction: server encrypts to the SESSION pub -> decrypt_chunk.
     server_blob = _crypto.encrypt_message(headers[HEADER_CLIENT_PUB_KEY], "reply")
     assert session.decrypt_chunk(server_blob) == "reply"
+
+
+@pytest.mark.asyncio
+async def test_open_session_attaches_trust(tee: Tee) -> None:
+    raw, _model_priv, nonce = _synthetic_attestation()
+    tee._client.get = AsyncMock(  # type: ignore[attr-defined]
+        return_value=TeeAttestation.model_validate(raw)
+    )
+    session = await tee.open_session(model="e2ee-x", nonce=nonce)
+    trust = session.trust
+    assert trust is not None
+    assert trust.model == "e2ee-x"
+    assert trust.verification == "baseline"
+    assert trust.verifier is None
+    assert trust.server_verified is True
+    assert trust.nonce == nonce
+    assert trust.model_public_key == raw["signing_public_key"]
+    assert trust.signing_address == raw["signing_address"]
+
+    session.close()
+    assert session.trust is trust
+
+    full = await tee.open_session(model="e2ee-x", nonce=nonce, verifier=_SpyVerifier(result=True))
+    assert full.trust is not None
+    assert full.trust.verification == "full_quote"
+    assert full.trust.verifier == "_SpyVerifier"
 
 
 @pytest.mark.asyncio
