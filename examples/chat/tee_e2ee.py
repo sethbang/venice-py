@@ -68,6 +68,7 @@ from venice_ai.exceptions import (
     TeeAttestationError,
     TeeEncryptionError,
     TeeError,
+    TeeTcbStatusError,
 )
 from venice_ai.tee import DcapTdxVerifier, TeeOptions
 from venice_ai.tee.types import TeeAttestation
@@ -346,6 +347,12 @@ async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
             # be quietly replaced by baseline trust.
             try:
                 verified = verifier.verify(attestation)
+            except TeeTcbStatusError as e:
+                print(
+                    f"   ❌ Full TDX quote verification REJECTED this enclave: TCB status {e.status!r}"
+                )
+                print(f"      advisories: {e.advisory_ids}  (tcb_policy={e.policy!r})")
+                return DemoResult(ok=False, full_verification=True)
             except TeeError as e:
                 print(f"   ❌ Full TDX quote verification REJECTED this enclave: {e}")
                 return DemoResult(ok=False, full_verification=True)
@@ -366,7 +373,7 @@ async def run_encrypted_demo(client: VeniceClient, model: str) -> DemoResult:
             )
             print("   ♻️  One verifier covers every machine with the same FMSPC and PCK CA, within")
             print("      the collateral's validity window. A quote from another FMSPC raises")
-            print("      TeeError; build a verifier for it with with_fetched_collateral.")
+            print("      TeeCollateralMismatchError; use collateral_provider to serve several.")
             print("   ℹ️  Tier B: this proves GENUINE non-debug Intel TDX hardware +")
             print("      a self-consistent dstack workload — but NOT that it is the")
             print("      legitimate Venice image. For per-dimension Tier A, pin an")
