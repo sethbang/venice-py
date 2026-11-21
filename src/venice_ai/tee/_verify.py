@@ -53,17 +53,27 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import time
 import warnings
+from datetime import UTC, datetime
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
 
-from ..exceptions import TeeError
+from ..exceptions import (
+    TeeAttestationError,
+    TeeCollateralExpiredError,
+    TeeCollateralMismatchError,
+    TeeCollateralUnavailableError,
+    TeeError,
+    TeeTcbStatusError,
+)
 from ._constants import INTEL_SGX_ROOT_CA_DER, PHALA_PCCS_URL
 from ._evidence import SCHEMA_EVIDENCE, NormalizedEvidence, normalize
+from .types import CollateralKey, _key_from_pem_chain
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from collections.abc import Callable
+
     from .types import TeeAttestation
 
 _INSTALL_HINT = (
@@ -84,10 +94,26 @@ _TDX_DEBUG_BIT = 0x1
 #: ``mr_config_id`` embeds the dstack compose hash as ``0x01 || sha256 || pad``.
 _COMPOSE_PREFIX = b"\x01"
 
-#: One PEM certificate's base64 body.
-_PEM_CERTIFICATE = re.compile(
-    r"-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----", re.DOTALL
-)
+
+def _lenient_key(chain_pem: str | bytes, fmspc: str, *, ca_index: int) -> CollateralKey:
+    """Like :func:`_key_from_pem_chain`, but an unusable chain gives an empty fingerprint.
+
+    The FMSPC comparison must still be able to refuse when a chain is corrupt; an
+    empty fingerprint never matches, so the PCK CA comparison refuses too.
+    """
+    try:
+        key = _key_from_pem_chain(chain_pem, fmspc, ca_index=ca_index)
+    except ValueError:
+        key = None
+    return key or CollateralKey(fmspc=fmspc.upper(), pck_ca_sha256="")
+
+
+def _collateral_key_from_quote(quote: Any) -> CollateralKey | None:
+    """The key for an already-parsed quote, or ``None`` when it embeds no PCK chain."""
+    embedded = getattr(quote, "cert_chain_pem_bytes", lambda: None)()
+    if not embedded:
+        return None
+    return _key_from_pem_chain(embedded, quote.fmspc(), ca_index=1)
 
 
 def _require_dcap() -> ModuleType:
@@ -129,17 +155,82 @@ class DcapTdxVerifier:
     Holds collateral / pinned root / measurement policy as constructor state and
     reads the evidence off the attestation. :meth:`verify` is **synchronous and
     offline** (it never touches the network); collateral is *injected*, either
-    directly or via the async :meth:`with_fetched_collateral` factory.
+    directly, via the async :meth:`with_fetched_collateral` factory, or per quote
+    through ``collateral_provider``.
 
     **Reusing one verifier.** Collateral describes a platform type (its FMSPC) and
     a PCK CA, not one machine, so a verifier can check quotes from every machine
     of that type, including a re-attestation that lands on another machine. Each
     quote is checked against the PCK certificate chain it embeds, validated to the
     pinned root; a chain attached to the collateral belongs to the machine it was
-    fetched for and is not used. A quote from another FMSPC or PCK CA raises
-    :class:`TeeError` that says so: build a verifier for it with
-    :meth:`with_fetched_collateral`. So does collateral past its validity window,
-    which limits how long one verifier lasts.
+    fetched for and is not used. With fixed ``collateral``, a quote from another
+    FMSPC or PCK CA raises :class:`~venice_ai.exceptions.TeeCollateralMismatchError`,
+    and collateral past its validity window is refused too, which limits how long
+    one verifier lasts.
+
+    **Collateral per quote.** To serve quotes from several FMSPCs or PCK CAs, or to
+    refresh collateral without rebuilding the verifier, pass ``collateral_provider``
+    instead of ``collateral``. :meth:`verify` calls it as ``provider(key, now_secs)``
+    with the quote's :class:`~venice_ai.tee.types.CollateralKey` and the epoch
+    seconds it checks validity windows against, and verifies with what it returns.
+    The returned collateral goes through the same FMSPC and PCK CA checks as fixed
+    collateral, and the crypto gate still decides. A provider must be synchronous
+    and must not block on the network: :meth:`verify` never fetches. Return
+    ``None`` for a cache miss; :meth:`verify` then raises
+    :class:`~venice_ai.exceptions.TeeCollateralUnavailableError`, which carries the
+    key and the raw quote so the application can fetch collateral asynchronously
+    and retry. Any exception the provider raises propagates unchanged. Decide
+    expiry from the ``now_secs`` the provider receives, not ``time.time()``::
+
+        import json
+        from datetime import datetime
+
+        import dcap_qvl
+        from cryptography import x509
+        from venice_ai.exceptions import (
+            TeeCollateralExpiredError,
+            TeeCollateralUnavailableError,
+        )
+        from venice_ai.tee import CollateralKey, DcapTdxVerifier
+
+        PCCS_URL = "https://pccs.phala.network"  # the with_fetched_collateral default
+
+        cache: dict[CollateralKey, tuple[object, int]] = {}
+
+        def expires_at(collateral) -> int:
+            def stamp(text: str) -> int:
+                return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+
+            crls = (collateral.pck_crl, collateral.root_ca_crl)
+            return min(
+                stamp(json.loads(collateral.tcb_info)["nextUpdate"]),
+                stamp(json.loads(collateral.qe_identity)["nextUpdate"]),
+                *(int(x509.load_der_x509_crl(crl).next_update_utc.timestamp()) for crl in crls),
+            )
+
+        def provider(key: CollateralKey, now_secs: int) -> object | None:
+            entry = cache.get(key)
+            if entry is None or entry[1] <= now_secs:
+                return None
+            return entry[0]
+
+        verifier = DcapTdxVerifier(collateral_provider=provider)
+
+        async def verify(attestation) -> bool:
+            try:
+                return verifier.verify(attestation)
+            except (TeeCollateralUnavailableError, TeeCollateralExpiredError) as err:
+                collateral = await dcap_qvl.get_collateral(PCCS_URL, err.raw_quote)
+                cache[err.key] = (collateral, expires_at(collateral))
+                return verifier.verify(attestation)
+
+    ``expires_at`` keeps collateral until the earliest of its TCB info, QE identity,
+    PCK CRL and root CA CRL is next updated; :meth:`verify` still checks every
+    validity window itself, and raises
+    :class:`~venice_ai.exceptions.TeeCollateralExpiredError` for an entry the
+    provider kept too long. With a provider, ``err.key`` is always set.
+    ``err.key`` equals ``CollateralKey.from_quote(err.raw_quote)``, so either can
+    key the store.
 
     **Checks may not be bool.** The ``"checks"`` mapping in :attr:`last_result`
     usually holds ``bool`` values, but ``checks["compose_binding"]`` may instead
@@ -151,7 +242,11 @@ class DcapTdxVerifier:
         collateral: An Intel-signed :class:`dcap_qvl.QuoteCollateralV3` (TCB info
             / QE identity / CRLs) for the quote's FMSPC. ``None`` means no
             collateral is available and :meth:`verify` will **reject** — it never
-            downgrades to baseline trust.
+            downgrades to baseline trust. Mutually exclusive with
+            ``collateral_provider``.
+        collateral_provider: A synchronous callable ``(key, now_secs)`` returning
+            the collateral for a quote's :class:`~venice_ai.tee.types.CollateralKey`,
+            or ``None`` when it has none. See *Collateral per quote* above.
         root_ca_der: The pinned Intel SGX Root CA in DER. Defaults to the baked
             :data:`~venice_ai.tee._constants.INTEL_SGX_ROOT_CA_DER`; override for
             the (rare) Intel root-rotation path.
@@ -194,7 +289,8 @@ class DcapTdxVerifier:
     def __init__(
         self,
         *,
-        collateral: Any | None,
+        collateral: Any | None = None,
+        collateral_provider: Callable[[CollateralKey, int], Any | None] | None = None,
         root_ca_der: bytes = INTEL_SGX_ROOT_CA_DER,
         now_secs: int | None = None,
         expected_measurements: dict[str, str] | None = None,
@@ -203,7 +299,10 @@ class DcapTdxVerifier:
     ) -> None:
         if tcb_policy not in ("reject", "advisory"):
             raise TeeError(f"tcb_policy must be 'reject' or 'advisory', got {tcb_policy!r}.")
+        if collateral is not None and collateral_provider is not None:
+            raise TeeError("Pass either collateral or collateral_provider, not both.")
         self._collateral = collateral
+        self._collateral_provider = collateral_provider
         self._root_ca_der = root_ca_der
         self._now_secs = now_secs
         self._expected_measurements = {
@@ -238,7 +337,16 @@ class DcapTdxVerifier:
 
         Returns:
             A :class:`DcapTdxVerifier` with freshly fetched collateral.
+
+        Raises:
+            TeeError: If ``collateral_provider`` is in ``kwargs``; a verifier takes
+                fixed collateral or a provider, not both.
         """
+        if "collateral_provider" in kwargs:
+            raise TeeError(
+                "with_fetched_collateral builds a verifier with fixed collateral; "
+                "construct DcapTdxVerifier(collateral_provider=...) directly instead."
+            )
         dcap = _require_dcap()
         raw = bytes.fromhex(probe_quote) if isinstance(probe_quote, str) else bytes(probe_quote)
         collateral = await dcap.get_collateral(pccs_url, raw)
@@ -276,17 +384,42 @@ class DcapTdxVerifier:
 
         # (2) THE TRUST GATE — signature + PCK chain to pinned root + TCB + QE id.
         # Every parsed byte below is trustworthy ONLY because this passes here.
-        if self._collateral is None:
+        now = self._now()
+        collateral_key: CollateralKey | None
+        if self._collateral_provider is not None:
+            collateral_key = self._provider_key(quote)
+            candidate = self._collateral_provider(collateral_key, now)
+            if candidate is None:
+                raise TeeCollateralUnavailableError(
+                    f"collateral_provider has no collateral for FMSPC {collateral_key.fmspc} "
+                    f"and PCK CA {collateral_key.pck_ca_sha256} (fail-closed).",
+                    key=collateral_key,
+                    raw_quote=raw_quote,
+                )
+            if not isinstance(candidate, dcap.QuoteCollateralV3):
+                raise TeeAttestationError(
+                    "collateral_provider returned "
+                    f"{type(candidate).__name__}, not a dcap_qvl.QuoteCollateralV3 "
+                    "(fail-closed)."
+                )
+        elif self._collateral is None:
             raise TeeError(
                 "No Intel-signed collateral available for full quote verification; "
                 "refusing to downgrade to baseline trust (fail-closed). Supply "
                 "collateral or use DcapTdxVerifier.with_fetched_collateral(...)."
             )
-        collateral = self._collateral_for_quote(dcap, quote)
+        else:
+            candidate = self._collateral
+            try:
+                collateral_key = _collateral_key_from_quote(quote)
+            except Exception:  # noqa: BLE001 - the key is informational on this path
+                collateral_key = None
+        collateral = self._collateral_for_quote(
+            dcap, quote, candidate, from_provider=self._collateral_provider is not None
+        )
+        self._check_collateral_window(collateral, collateral_key, raw_quote, now)
         try:
-            verified = dcap.verify_with_root_ca(
-                raw_quote, collateral, self._root_ca_der, self._now()
-            )
+            verified = dcap.verify_with_root_ca(raw_quote, collateral, self._root_ca_der, now)
         except Exception as exc:  # noqa: BLE001 - any crypto failure is fatal
             raise TeeError(
                 f"TDX quote signature/chain verification failed (fail-closed): {exc!r}"
@@ -337,6 +470,7 @@ class DcapTdxVerifier:
             "advisory_ids": advisory_ids,
             "workload_identity_pinned": workload_identity_pinned,
             "fmspc": fmspc,
+            "collateral_key": collateral_key,
             "unsigned_metadata": {
                 "os_image_hash": evidence.os_image_hash,
                 "repo_commit": evidence.repo_commit,
@@ -346,8 +480,94 @@ class DcapTdxVerifier:
 
     # --- step helpers --------------------------------------------------------
 
-    def _collateral_for_quote(self, dcap: ModuleType, quote: Any) -> Any:
+    def _provider_key(self, quote: Any) -> CollateralKey:
+        """The quote's collateral key for ``collateral_provider``, or refuse."""
+        try:
+            embedded = getattr(quote, "cert_chain_pem_bytes", lambda: None)()
+            key = _collateral_key_from_quote(quote) if embedded else None
+        except Exception as exc:  # noqa: BLE001 - an unreadable chain is fatal
+            raise TeeAttestationError(
+                "This TDX quote's embedded PCK chain could not be read, so "
+                f"collateral_provider cannot be given its FMSPC and PCK CA (fail-closed): {exc}"
+            ) from exc
+        if not embedded:
+            raise TeeAttestationError(
+                "This TDX quote carries no embedded PCK chain, so collateral_provider cannot "
+                "be given its FMSPC and PCK CA (fail-closed)."
+            )
+        if key is None:
+            raise TeeAttestationError(
+                "This TDX quote has no PCK CA certificate in its embedded chain, so "
+                "collateral_provider cannot be given its PCK CA (fail-closed)."
+            )
+        return key
+
+    @staticmethod
+    def _check_collateral_window(
+        collateral: Any, key: CollateralKey | None, raw_quote: bytes, now: int
+    ) -> None:
+        """Raise :class:`TeeCollateralExpiredError` for collateral past its ``nextUpdate``.
+
+        This only refuses earlier and more specifically than the crypto gate, which
+        still decides every acceptance. An item that cannot be read is skipped so
+        ``verify_with_root_ca`` rules on it; the only exception raised is the typed
+        expiry, for the item with the earliest ``nextUpdate``.
+        """
+        if not hasattr(collateral, "to_json"):
+            return
+        try:
+            stored = json.loads(collateral.to_json())
+        except Exception:  # noqa: BLE001 - unreadable collateral is left to dcap
+            return
+        if not isinstance(stored, dict):
+            return
+
+        expired: list[tuple[datetime, str]] = []
+        for item in ("tcb_info", "qe_identity", "pck_crl", "root_ca_crl"):
+            try:
+                parsed: datetime | None
+                if item in ("tcb_info", "qe_identity"):
+                    text = json.loads(stored[item])["nextUpdate"]
+                    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                else:
+                    from cryptography import x509
+
+                    parsed = x509.load_der_x509_crl(bytes.fromhex(stored[item])).next_update_utc
+                if parsed is None:
+                    continue
+                next_update = parsed
+                if next_update.tzinfo is None:
+                    next_update = next_update.replace(tzinfo=UTC)
+                # dcap refuses a CRL at exactly its nextUpdate; TCB info and QE identity
+                # keep a strict comparison.
+                if item in ("pck_crl", "root_ca_crl"):
+                    is_expired = now >= next_update.timestamp()
+                else:
+                    is_expired = now > next_update.timestamp()
+            except Exception:  # noqa: BLE001  # nosec B112 - an unreadable item is left to dcap
+                continue
+            if is_expired:
+                expired.append((next_update, item))
+        if not expired:
+            return
+        next_update, item = min(expired)
+        raise TeeCollateralExpiredError(
+            f"Attestation collateral {item} expired at {next_update.isoformat()} "
+            "(fail-closed); fetch fresh collateral for this quote.",
+            key=key,
+            item=item,  # type: ignore[arg-type]
+            next_update=next_update,
+            raw_quote=raw_quote,
+        )
+
+    def _collateral_for_quote(
+        self, dcap: ModuleType, quote: Any, candidate: Any, *, from_provider: bool
+    ) -> Any:
         """Return the collateral to verify ``quote`` with, or refuse a mismatch.
+
+        ``candidate`` is the fixed ``collateral`` or, when ``from_provider``, what
+        ``collateral_provider`` returned for this quote; both get the same checks,
+        and only the advice in a mismatch error differs.
 
         ``dcap_qvl.get_collateral`` attaches the probe machine's PCK chain to the
         collateral, and ``verify_with_root_ca`` prefers it to the chain in the
@@ -361,7 +581,7 @@ class DcapTdxVerifier:
         collateral says so, instead of failing with a generic error or, for the PCK
         CA, being checked against the CRL of a CA that did not issue its PCK.
         """
-        collateral: Any = self._collateral
+        collateral: Any = candidate
         embedded = getattr(quote, "cert_chain_pem_bytes", lambda: None)()
         if not embedded or not hasattr(collateral, "to_json"):
             return collateral
@@ -369,29 +589,45 @@ class DcapTdxVerifier:
         try:
             stored = json.loads(collateral.to_json())
             collateral_fmspc = json.loads(stored["tcb_info"])["fmspc"]
-            issuer_chain = _PEM_CERTIFICATE.findall(stored["pck_crl_issuer_chain"])
-            quote_chain = _PEM_CERTIFICATE.findall(embedded.decode("ascii", "replace"))
             quote_fmspc = quote.fmspc()
+            collateral_key = _lenient_key(
+                stored["pck_crl_issuer_chain"], collateral_fmspc, ca_index=0
+            )
+            quote_key = _lenient_key(embedded, quote_fmspc, ca_index=1)
         except Exception as exc:  # noqa: BLE001 - unreadable collateral is fatal
             raise TeeError(
                 f"TEE collateral could not be read for this quote (fail-closed): {exc!r}"
             ) from exc
 
-        needs_own = (
-            "Build a verifier for it with DcapTdxVerifier.with_fetched_collateral(...) "
-            "(fail-closed)."
-        )
-        if collateral_fmspc.upper() != quote_fmspc.upper():
-            raise TeeError(
+        if from_provider:
+            needs_own = (
+                "collateral_provider returned collateral that does not match the key it "
+                "was given; check how its store is keyed (fail-closed)."
+            )
+        else:
+            needs_own = (
+                "Build a verifier for it with DcapTdxVerifier.with_fetched_collateral(...) "
+                "(fail-closed)."
+            )
+        if collateral_key.fmspc != quote_key.fmspc:
+            raise TeeCollateralMismatchError(
                 f"TEE collateral is for FMSPC {collateral_fmspc}, but this quote is from "
-                f"FMSPC {quote_fmspc}. {needs_own}"
+                f"FMSPC {quote_fmspc}. {needs_own}",
+                reason="fmspc",
+                collateral_key=collateral_key,
+                quote_key=quote_key,
             )
         # A PCK chain runs leaf, PCK CA, root; a CRL issuer chain starts at the PCK CA.
-        pck_ca = "".join(quote_chain[1].split()) if len(quote_chain) > 1 else None
-        if not issuer_chain or "".join(issuer_chain[0].split()) != pck_ca:
-            raise TeeError(
+        if (
+            not collateral_key.pck_ca_sha256
+            or collateral_key.pck_ca_sha256 != quote_key.pck_ca_sha256
+        ):
+            raise TeeCollateralMismatchError(
                 f"TEE collateral's revocation data is for a different PCK CA than the one "
-                f"that issued this quote's certificate. {needs_own}"
+                f"that issued this quote's certificate. {needs_own}",
+                reason="pck_ca",
+                collateral_key=collateral_key,
+                quote_key=quote_key,
             )
 
         stored.pop("pck_certificate_chain", None)
@@ -408,9 +644,12 @@ class DcapTdxVerifier:
                 stacklevel=3,
             )
             return
-        raise TeeError(
+        raise TeeTcbStatusError(
             f"TEE TCB status {status!r} is not acceptable under the "
-            f"{self._tcb_policy!r} policy (fail-closed)."
+            f"{self._tcb_policy!r} policy (fail-closed).",
+            status=status,
+            advisory_ids=advisory_ids,
+            policy=self._tcb_policy,
         )
 
     def _check_debug_bit(self, report: Any) -> None:

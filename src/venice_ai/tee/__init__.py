@@ -19,25 +19,40 @@ model key is verified (its Keccak-256 key-binding check).
     shipped.
 
 Public symbols are re-exported here: the typed TEE exceptions
-(:class:`TeeError`, :class:`TeeAttestationError`, :class:`TeeEncryptionError`),
-the attestation and quote verifiers (:class:`FullQuoteVerifier`,
+(:class:`TeeError`, :class:`TeeAttestationError`, :class:`TeeEncryptionError`,
+:class:`TeeTcbStatusError`, :class:`TeeCollateralMismatchError`,
+:class:`TeeCollateralExpiredError`, :class:`TeeCollateralUnavailableError`),
+:class:`CollateralKey`, the attestation and quote verifiers (:class:`FullQuoteVerifier`,
 :class:`DcapTdxVerifier`), the encrypted session (:class:`TeeSession`),
 :class:`TeeOptions`, :class:`TeeTrust`, and the :func:`_require_crypto` helper.
 """
 
 from __future__ import annotations
 
-from ..exceptions import TeeAttestationError, TeeEncryptionError, TeeError
+from ..exceptions import (
+    TeeAttestationError,
+    TeeCollateralExpiredError,
+    TeeCollateralMismatchError,
+    TeeCollateralUnavailableError,
+    TeeEncryptionError,
+    TeeError,
+    TeeTcbStatusError,
+)
 from ._attestation import FullQuoteVerifier
 from ._crypto import _require_crypto
 from ._session import TeeSession
 from ._verify import DcapTdxVerifier
-from .types import TeeOptions, TeeTrust
+from .types import CollateralKey, TeeOptions, TeeTrust
 
 __all__ = [
     "TeeError",
     "TeeAttestationError",
     "TeeEncryptionError",
+    "TeeTcbStatusError",
+    "TeeCollateralMismatchError",
+    "TeeCollateralExpiredError",
+    "TeeCollateralUnavailableError",
+    "CollateralKey",
     "FullQuoteVerifier",
     "DcapTdxVerifier",
     "TeeOptions",

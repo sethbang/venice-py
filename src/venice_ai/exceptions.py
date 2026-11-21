@@ -47,9 +47,12 @@ import logging
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
 import aiohttp
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .tee.types import CollateralKey
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +181,10 @@ __all__ = [
     "TeeError",
     "TeeAttestationError",
     "TeeEncryptionError",
+    "TeeTcbStatusError",
+    "TeeCollateralMismatchError",
+    "TeeCollateralExpiredError",
+    "TeeCollateralUnavailableError",
 ]
 
 
@@ -741,6 +748,145 @@ class TeeEncryptionError(TeeError):
     Examples: a message could not be encrypted to the model key, or an encrypted
     response chunk could not be decrypted / authenticated (GCM tag mismatch).
     """
+
+
+def _rebuild_tee_error(cls: type[Any], message: str, attrs: dict[str, Any]) -> Any:
+    return cls(message, **attrs)
+
+
+class _TeeKeywordError(TeeAttestationError):
+    """Base for attestation errors whose attributes are required keyword-only arguments.
+
+    The default ``Exception`` pickling replays only positional ``args``, so these
+    classes name their attributes in ``_ATTRS`` and rebuild from them.
+    """
+
+    _ATTRS: ClassVar[tuple[str, ...]] = ()
+    message: str
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        attrs = {name: getattr(self, name) for name in self._ATTRS}
+        return (_rebuild_tee_error, (type(self), self.message, attrs))
+
+
+class TeeTcbStatusError(_TeeKeywordError):
+    """Raised when the platform's TCB status is not acceptable under the verifier's policy.
+
+    Attributes:
+        status: The TCB status string Intel's collateral reported (e.g. ``"OutOfDate"``).
+        advisory_ids: Intel security advisory IDs attached to that status.
+        policy: The ``tcb_policy`` in force (``"reject"`` or ``"advisory"``).
+    """
+
+    _ATTRS = (
+        "status",
+        "advisory_ids",
+        "policy",
+    )
+
+    def __init__(self, message: str, *, status: str, advisory_ids: list[str], policy: str) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.advisory_ids = advisory_ids
+        self.policy = policy
+
+
+class TeeCollateralMismatchError(_TeeKeywordError):
+    """Raised when the verifier's collateral is for a different platform than the quote.
+
+    Attributes:
+        reason: ``"fmspc"`` when the collateral covers another FMSPC, ``"pck_ca"``
+            when its revocation data is for a different PCK CA.
+        collateral_key: The key the held collateral covers.
+        quote_key: The key the quote needs.
+
+    ``pck_ca_sha256`` of either key may be ``""`` when its chain lacks the PCK CA
+    certificate; that always counts as a ``"pck_ca"`` mismatch.
+
+    The collateral key is read from collateral BEFORE its Intel signature is checked,
+    so treat it as describing your supplied collateral, not as an Intel-attested value.
+    """
+
+    _ATTRS = (
+        "reason",
+        "collateral_key",
+        "quote_key",
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: Literal["fmspc", "pck_ca"],
+        collateral_key: "CollateralKey",
+        quote_key: "CollateralKey",
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.reason = reason
+        self.collateral_key = collateral_key
+        self.quote_key = quote_key
+
+
+class TeeCollateralExpiredError(_TeeKeywordError):
+    """Raised when a collateral item is past its ``nextUpdate`` time.
+
+    Attributes:
+        key: The collateral key of the quote, when it could be determined.
+        item: Which collateral item expired.
+        next_update: When that item stopped being valid.
+        raw_quote: The quote being verified, so a caller can fetch fresh collateral
+            for it (``dcap_qvl.get_collateral(pccs_url, err.raw_quote)``).
+
+    ``next_update`` and the collateral key are read from collateral BEFORE its Intel
+    signature is checked, so treat them as describing your supplied collateral, not
+    as Intel-attested values.
+    """
+
+    _ATTRS = (
+        "key",
+        "item",
+        "next_update",
+        "raw_quote",
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        key: "CollateralKey | None",
+        item: Literal["tcb_info", "qe_identity", "pck_crl", "root_ca_crl"],
+        next_update: datetime,
+        raw_quote: bytes,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.key = key
+        self.item = item
+        self.next_update = next_update
+        self.raw_quote = raw_quote
+
+
+class TeeCollateralUnavailableError(_TeeKeywordError):
+    """Raised when a collateral provider has no collateral for the quote's key.
+
+    Attributes:
+        key: The collateral key that was requested.
+        raw_quote: The quote being verified, so a caller can fetch collateral for it
+            (``dcap_qvl.get_collateral(pccs_url, err.raw_quote)``).
+    """
+
+    _ATTRS = (
+        "key",
+        "raw_quote",
+    )
+
+    def __init__(self, message: str, *, key: "CollateralKey", raw_quote: bytes) -> None:
+        super().__init__(message)
+        self.message = message
+        self.key = key
+        self.raw_quote = raw_quote
 
 
 class MaxIterationsExceededError(VeniceError):

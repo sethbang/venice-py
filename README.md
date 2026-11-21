@@ -547,6 +547,17 @@ response = await client.chat.completions.create(
 > that the key derives to that signing address, and raises `TeeAttestationError` if it
 > does not, under both the baseline and the full-quote verifier.
 
+> **Failures are typed.** Four rejections raise a `TeeAttestationError` subclass,
+> unwrapped: `TeeTcbStatusError` (`.status`, `.advisory_ids`, `.policy`),
+> `TeeCollateralMismatchError`, `TeeCollateralExpiredError` and
+> `TeeCollateralUnavailableError` (the last two carry `.raw_quote` for fetching fresh
+> collateral). Other failures (signature, debug bit, measurements) still arrive wrapped
+> as `TeeAttestationError` from `verify_attestation`, or as a plain `TeeError` from a
+> direct `verify()`. To serve quotes from several platforms, pass
+> `DcapTdxVerifier(collateral_provider=fn)` instead of `collateral=`, with
+> `fn(key, now_secs)` returning collateral or `None`, and key your cache with
+> `CollateralKey.from_quote(raw_quote)`.
+
 > **What it proves (Tier B).** By default `DcapTdxVerifier` proves the model
 > runs on a *genuine, non-debug Intel TDX enclave* running a *self-consistent
 > dstack workload*. It does **not** by itself prove this is the legitimate

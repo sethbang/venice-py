@@ -22,20 +22,38 @@ Two-layer rejection structure (mirrors the design doc §7):
 
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import json
+import pickle
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
 import venice_ai.tee._verify as verify_mod
-from venice_ai.exceptions import TeeError
+from venice_ai.exceptions import (
+    TeeAttestationError,
+    TeeCollateralExpiredError,
+    TeeCollateralMismatchError,
+    TeeCollateralUnavailableError,
+    TeeError,
+    TeeTcbStatusError,
+)
+from venice_ai.tee._attestation import verify_attestation
 from venice_ai.tee._constants import INTEL_SGX_ROOT_CA_DER
-from venice_ai.tee._verify import DcapTdxVerifier
-from venice_ai.tee.types import TeeAttestation
+from venice_ai.tee._verify import DcapTdxVerifier, _collateral_key_from_quote
+from venice_ai.tee.types import _PEM_CERTIFICATE, CollateralKey, TeeAttestation
 
-from .fixtures import CAPTURE_EPOCH, FIXTURE_SLUGS, load_attestation, load_collateral_json
+from .fixtures import (
+    CAPTURE_EPOCH,
+    EVIDENCE_CAPTURE_EPOCH,
+    FIXTURE_SLUGS,
+    load_attestation,
+    load_collateral_json,
+)
 
 dcap_qvl = pytest.importorskip("dcap_qvl")
 
@@ -655,11 +673,15 @@ def test_quote_on_another_fmspc_is_refused_and_says_what_to_do(
     monkeypatch.setattr(verify_mod.dcap_qvl, "verify_with_root_ca", must_not_run)
     att, _nonce = _build_attestation(_OTHER_FMSPC)
 
-    with pytest.raises(TeeError, match="FMSPC") as excinfo:
+    with pytest.raises(TeeCollateralMismatchError, match="FMSPC") as excinfo:
         _verifier(_MACHINE_A).verify(att)
 
     assert _quote(_OTHER_FMSPC).fmspc() in str(excinfo.value)
     assert "with_fetched_collateral" in str(excinfo.value)
+    err = excinfo.value
+    assert err.reason == "fmspc"
+    assert err.quote_key.fmspc == _quote(_OTHER_FMSPC).fmspc().upper()
+    assert err.collateral_key.fmspc == json.loads(_collateral(_MACHINE_A).tcb_info)["fmspc"]
 
 
 def test_collateral_from_another_pck_ca_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -676,3 +698,671 @@ def test_collateral_from_another_pck_ca_is_refused(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises(TeeError, match="PCK CA"):
         _verifier(_MACHINE_A, collateral=collateral).verify(att)
+
+
+def test_pck_ca_mismatch_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def must_not_run(*_args: Any) -> None:
+        pytest.fail("verified with revocation data for another PCK CA")
+
+    monkeypatch.setattr(verify_mod.dcap_qvl, "verify_with_root_ca", must_not_run)
+    stored = json.loads(load_collateral_json(_MACHINE_A))
+    other = json.loads(load_collateral_json(_OTHER_FMSPC))
+    swapped = _PEM_CERTIFICATE.findall(other["tcb_info_issuer_chain"])[0]
+    rest = _PEM_CERTIFICATE.findall(stored["pck_crl_issuer_chain"])[1:]
+    stored["pck_crl_issuer_chain"] = "".join(
+        f"-----BEGIN CERTIFICATE-----{body}-----END CERTIFICATE-----\n" for body in [swapped, *rest]
+    )
+    collateral = dcap_qvl.QuoteCollateralV3.from_json(json.dumps(stored))
+    att, _nonce = _build_attestation(_MACHINE_B)
+
+    with pytest.raises(TeeCollateralMismatchError, match="PCK CA") as excinfo:
+        _verifier(_MACHINE_A, collateral=collateral).verify(att)
+
+    err = excinfo.value
+    assert err.reason == "pck_ca"
+    assert err.quote_key == CollateralKey.from_quote(bytes.fromhex(att.intel_quote))
+    assert err.collateral_key.fmspc == err.quote_key.fmspc
+    assert err.collateral_key.pck_ca_sha256 != err.quote_key.pck_ca_sha256
+
+
+def test_tcb_status_rejection_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    slug = "gemma_3_27b_p"
+    att, _ = _build_attestation(slug)
+    _stub_crypto(
+        monkeypatch, _real_report(slug), status="OutOfDate", advisory_ids=["INTEL-SA-00837"]
+    )
+    with pytest.raises(TeeTcbStatusError) as excinfo:
+        _verifier(slug).verify(att)
+    err = excinfo.value
+    assert isinstance(err, TeeError)
+    assert err.status == "OutOfDate"
+    assert err.advisory_ids == ["INTEL-SA-00837"]
+    assert err.policy == "reject"
+
+
+def test_advisory_status_rejected_under_reject_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    slug = "gemma_3_27b_p"
+    att, _ = _build_attestation(slug)
+    _stub_crypto(monkeypatch, _real_report(slug), status="SWHardeningNeeded")
+    with pytest.raises(TeeTcbStatusError) as excinfo:
+        _verifier(slug, tcb_policy="reject").verify(att)
+    assert excinfo.value.policy == "reject"
+    assert excinfo.value.status == "SWHardeningNeeded"
+
+    with pytest.warns(UserWarning):
+        assert _verifier(slug, tcb_policy="advisory").verify(att) is True
+
+
+def test_collateral_key_from_quote() -> None:
+    att, _ = _build_attestation("glm_5_1")
+    raw = bytes.fromhex(att.intel_quote)
+    quote = dcap_qvl.parse_quote(raw)
+    second = _PEM_CERTIFICATE.findall(quote.cert_chain_pem_bytes().decode("ascii"))[1]
+    expected = hashlib.sha256(base64.b64decode("".join(second.split()))).hexdigest()
+
+    key = CollateralKey.from_quote(raw)
+
+    assert key.fmspc == "90C06F000000"
+    assert key.pck_ca_sha256 == expected
+
+
+def test_collateral_key_from_quote_public() -> None:
+    att, _ = _build_attestation(_MACHINE_A)
+    raw = bytes.fromhex(att.intel_quote)
+
+    key = CollateralKey.from_quote(raw)
+
+    assert key == CollateralKey.from_quote(raw.hex())
+    assert {key: 1}[CollateralKey.from_quote(raw)] == 1
+    assert key == _collateral_key_from_quote(dcap_qvl.parse_quote(raw))
+
+
+def test_collateral_key_from_quote_without_chain_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Bare:
+        def cert_chain_pem_bytes(self) -> None:
+            return None
+
+        def fmspc(self) -> str:
+            return "90c06f000000"
+
+    monkeypatch.setattr(verify_mod.dcap_qvl, "parse_quote", lambda raw: _Bare())
+    assert _collateral_key_from_quote(_Bare()) is None
+    with pytest.raises(TeeAttestationError, match="no PCK certificate chain"):
+        CollateralKey.from_quote(b"\x00")
+
+
+def test_collateral_key_from_quote_unparseable_raises() -> None:
+    with pytest.raises(TeeAttestationError):
+        CollateralKey.from_quote(b"\x00\x01")
+    with pytest.raises(TeeAttestationError):
+        CollateralKey.from_quote("not hex")
+
+
+def test_collateral_key_from_quote_leaf_only_chain_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    att, _ = _build_attestation(_MACHINE_A)
+    raw = bytes.fromhex(att.intel_quote)
+    real = dcap_qvl.parse_quote(raw)
+    leaf = _PEM_CERTIFICATE.findall(real.cert_chain_pem_bytes().decode("ascii"))[0]
+
+    class _LeafOnly:
+        def cert_chain_pem_bytes(self) -> bytes:
+            return f"-----BEGIN CERTIFICATE-----{leaf}-----END CERTIFICATE-----\n".encode()
+
+        def fmspc(self) -> str:
+            return real.fmspc()
+
+    monkeypatch.setattr(verify_mod.dcap_qvl, "parse_quote", lambda _raw: _LeafOnly())
+    with pytest.raises(TeeAttestationError, match="no PCK CA certificate"):
+        CollateralKey.from_quote(raw)
+
+
+def test_fmspc_mismatch_is_reported_even_with_a_corrupt_issuer_chain() -> None:
+    stored = json.loads(load_collateral_json(_MACHINE_A))
+    stored["pck_crl_issuer_chain"] = "-----BEGIN CERTIFICATE-----!!!-----END CERTIFICATE-----"
+    collateral = dcap_qvl.QuoteCollateralV3.from_json(json.dumps(stored))
+    att, _nonce = _build_attestation(_OTHER_FMSPC)
+
+    with pytest.raises(TeeCollateralMismatchError) as excinfo:
+        _verifier(_MACHINE_A, collateral=collateral).verify(att)
+    assert excinfo.value.reason == "fmspc"
+    assert excinfo.value.collateral_key.pck_ca_sha256 == ""
+
+
+def test_typed_errors_survive_copy_and_pickle() -> None:
+    att, _ = _build_attestation(_MACHINE_A)
+    key = CollateralKey.from_quote(bytes.fromhex(att.intel_quote))
+    other = CollateralKey(fmspc="00AA", pck_ca_sha256="ff")
+    when = datetime(2026, 1, 2, tzinfo=UTC)
+    errors: list[TeeAttestationError] = [
+        TeeTcbStatusError("m", status="OutOfDate", advisory_ids=["x"], policy="reject"),
+        TeeCollateralMismatchError("m", reason="pck_ca", collateral_key=other, quote_key=key),
+        TeeCollateralExpiredError("m", key=key, item="pck_crl", next_update=when, raw_quote=b"q"),
+        TeeCollateralUnavailableError("m", key=key, raw_quote=b"q"),
+    ]
+    for err in errors:
+        for clone in (pickle.loads(pickle.dumps(err)), copy.deepcopy(err)):  # noqa: S301
+            assert type(clone) is type(err)
+            assert str(clone) == "m"
+            assert vars(clone) == vars(err)
+
+
+# --------------------------------------------------------------------------- #
+# collateral_provider: collateral chosen per quote
+# --------------------------------------------------------------------------- #
+
+_PROVIDER_SLUG = "glm_5_1"
+
+
+def _raw_quote(slug: str) -> bytes:
+    att, _nonce = _build_attestation(slug)
+    return bytes.fromhex(att.intel_quote)
+
+
+class _Provider:
+    """A dict-backed provider that records every call."""
+
+    def __init__(self, *slugs: str) -> None:
+        self.store = {CollateralKey.from_quote(_raw_quote(s)): _collateral(s) for s in slugs}
+        self.calls: list[tuple[CollateralKey, int]] = []
+
+    def __call__(self, key: CollateralKey, now_secs: int) -> Any:
+        self.calls.append((key, now_secs))
+        return self.store.get(key)
+
+
+def test_collateral_and_provider_are_mutually_exclusive() -> None:
+    with pytest.raises(TeeError, match="collateral_provider"):
+        DcapTdxVerifier(collateral=_collateral(_PROVIDER_SLUG), collateral_provider=_Provider())
+
+
+@pytest.mark.asyncio
+async def test_with_fetched_collateral_refuses_a_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def must_not_fetch(*_args: Any) -> None:
+        pytest.fail("fetched collateral for a verifier that cannot use it")
+
+    monkeypatch.setattr(verify_mod.dcap_qvl, "get_collateral", must_not_fetch)
+    with pytest.raises(TeeError, match="collateral_provider"):
+        await DcapTdxVerifier.with_fetched_collateral(
+            _raw_quote(_PROVIDER_SLUG), collateral_provider=_Provider()
+        )
+
+
+def test_provider_supplies_collateral_per_quote() -> None:
+    provider = _Provider(_PROVIDER_SLUG)
+    att, _nonce = _build_attestation(_PROVIDER_SLUG)
+    verifier = DcapTdxVerifier(collateral_provider=provider, now_secs=CAPTURE_EPOCH)
+
+    assert verifier.verify(att) is True
+
+    assert len(provider.calls) == 1
+    key = provider.calls[0][0]
+    assert key.fmspc == "90C06F000000"
+    assert key == CollateralKey.from_quote(_raw_quote(_PROVIDER_SLUG))
+    assert verifier.last_result is not None
+    assert verifier.last_result["collateral_key"] == key
+    assert verifier.last_result["checks"]["signature_chain"] is True
+
+
+def test_provider_routes_two_fmspcs_without_mutating_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _Provider(_PROVIDER_SLUG, _OTHER_FMSPC)
+    verifier = DcapTdxVerifier(collateral_provider=provider)
+    seen: list[CollateralKey] = []
+
+    for slug, epoch in ((_PROVIDER_SLUG, CAPTURE_EPOCH), (_OTHER_FMSPC, EVIDENCE_CAPTURE_EPOCH)):
+        monkeypatch.setattr(verify_mod.time, "time", lambda epoch=epoch: float(epoch))
+        att, _nonce = _build_attestation(slug)
+        assert verifier.verify(att) is True
+        assert verifier.last_result is not None
+        assert verifier.last_result["checks"]["signature_chain"] is True
+        seen.append(verifier.last_result["collateral_key"])
+        assert verifier._collateral is None
+
+    assert seen[0] != seen[1]
+    assert seen[0].fmspc != seen[1].fmspc
+    assert [call[0] for call in provider.calls] == seen
+    assert [call[1] for call in provider.calls] == [CAPTURE_EPOCH, EVIDENCE_CAPTURE_EPOCH]
+
+
+def test_provider_receives_verifier_clock() -> None:
+    provider = _Provider(_PROVIDER_SLUG)
+    att, _nonce = _build_attestation(_PROVIDER_SLUG)
+
+    DcapTdxVerifier(collateral_provider=provider, now_secs=CAPTURE_EPOCH).verify(att)
+
+    assert provider.calls[0][1] == CAPTURE_EPOCH
+
+
+def test_store_key_matches_miss_key() -> None:
+    att, _nonce = _build_attestation(_PROVIDER_SLUG)
+    raw = bytes.fromhex(att.intel_quote)
+    verifier = DcapTdxVerifier(collateral_provider=lambda _k, _n: None, now_secs=CAPTURE_EPOCH)
+
+    with pytest.raises(TeeCollateralUnavailableError) as excinfo:
+        verifier.verify(att)
+
+    assert CollateralKey.from_quote(raw) == excinfo.value.key
+    assert CollateralKey.from_quote(excinfo.value.raw_quote) == excinfo.value.key
+
+
+def test_provider_cache_miss_raises_unavailable() -> None:
+    att, _nonce = _build_attestation(_PROVIDER_SLUG)
+    verifier = DcapTdxVerifier(collateral_provider=_Provider(), now_secs=CAPTURE_EPOCH)
+
+    with pytest.raises(TeeCollateralUnavailableError) as excinfo:
+        verifier.verify(att)
+
+    err = excinfo.value
+    assert isinstance(err, TeeAttestationError)
+    assert err.key.fmspc == "90C06F000000"
+    assert err.raw_quote == bytes.fromhex(att.intel_quote)
+    assert verifier.last_result is None
+
+
+def test_provider_wrong_collateral_raises_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    def must_not_run(*_args: Any) -> None:
+        pytest.fail("verified with collateral for another FMSPC")
+
+    monkeypatch.setattr(verify_mod.dcap_qvl, "verify_with_root_ca", must_not_run)
+    wrong = _collateral(_OTHER_FMSPC)
+    att, _nonce = _build_attestation(_PROVIDER_SLUG)
+    verifier = DcapTdxVerifier(collateral_provider=lambda _k, _n: wrong, now_secs=CAPTURE_EPOCH)
+
+    with pytest.raises(TeeCollateralMismatchError) as excinfo:
+        verifier.verify(att)
+
+    assert excinfo.value.reason == "fmspc"
+    assert excinfo.value.quote_key == CollateralKey.from_quote(bytes.fromhex(att.intel_quote))
+
+
+def test_provider_arbitrary_exception_fails_closed() -> None:
+    def broken(_key: CollateralKey, _now: int) -> Any:
+        raise KeyError("cache backend down")
+
+    raw = load_attestation(_PROVIDER_SLUG)
+    att = TeeAttestation.model_validate(raw["attestation"])
+    verifier = DcapTdxVerifier(collateral_provider=broken, now_secs=CAPTURE_EPOCH)
+
+    with pytest.raises(KeyError):
+        verifier.verify(att)
+
+    with pytest.raises(TeeAttestationError) as excinfo:
+        verify_attestation(att, raw["_client_nonce"], verifier=verifier)
+    assert isinstance(excinfo.value.__cause__, KeyError)
+
+
+def test_provider_quote_without_chain_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _NoChainQuote(_FakeQuote):
+        def fmspc(self) -> str:
+            raise ValueError("no embedded PCK chain")
+
+    def must_not_call(_key: CollateralKey, _now: int) -> Any:
+        pytest.fail("collateral_provider called without a key")
+
+    slug = "gemma_3_27b_p"
+    att, _ = _build_attestation(slug)
+    report = _real_report(slug)
+    _stub_crypto(monkeypatch, report)
+    monkeypatch.setattr(verify_mod.dcap_qvl, "parse_quote", lambda raw: _NoChainQuote(report))
+    verifier = DcapTdxVerifier(collateral_provider=must_not_call, now_secs=CAPTURE_EPOCH)
+
+    with pytest.raises(TeeAttestationError, match="collateral_provider"):
+        verifier.verify(att)
+
+
+def test_provider_quote_with_unreadable_chain_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BadChainQuote(_FakeQuote):
+        def cert_chain_pem_bytes(self) -> bytes:
+            return b"-----BEGIN CERTIFICATE-----!!!-----END CERTIFICATE-----" * 2
+
+        def fmspc(self) -> str:
+            return "90c06f000000"
+
+    def must_not_call(_key: CollateralKey, _now: int) -> Any:
+        pytest.fail("collateral_provider called without a key")
+
+    slug = "gemma_3_27b_p"
+    att, _ = _build_attestation(slug)
+    report = _real_report(slug)
+    _stub_crypto(monkeypatch, report)
+    monkeypatch.setattr(verify_mod.dcap_qvl, "parse_quote", lambda raw: _BadChainQuote(report))
+    verifier = DcapTdxVerifier(collateral_provider=must_not_call, now_secs=CAPTURE_EPOCH)
+
+    with pytest.raises(TeeAttestationError, match="collateral_provider"):
+        verifier.verify(att)
+
+
+def test_static_collateral_records_collateral_key() -> None:
+    att, _nonce = _build_attestation(_MACHINE_B)
+    verifier = _verifier(_MACHINE_A)
+
+    assert verifier.verify(att) is True
+
+    assert verifier.last_result is not None
+    assert verifier.last_result["collateral_key"] == CollateralKey.from_quote(
+        bytes.fromhex(att.intel_quote)
+    )
+
+
+def test_neither_collateral_nor_provider_keeps_refusal_message() -> None:
+    att, _nonce = _build_attestation(_PROVIDER_SLUG)
+    with pytest.raises(TeeError, match="No Intel-signed collateral available"):
+        DcapTdxVerifier(now_secs=CAPTURE_EPOCH).verify(att)
+
+
+def _must_not_verify(monkeypatch: pytest.MonkeyPatch) -> None:
+    def must_not_run(*_args: Any) -> None:
+        pytest.fail("reached the crypto gate")
+
+    monkeypatch.setattr(verify_mod.dcap_qvl, "verify_with_root_ca", must_not_run)
+
+
+def _swapped_pck_ca_collateral(slug: str) -> Any:
+    stored = json.loads(load_collateral_json(slug))
+    other = json.loads(load_collateral_json(_OTHER_FMSPC))
+    swapped = _PEM_CERTIFICATE.findall(other["tcb_info_issuer_chain"])[0]
+    rest = _PEM_CERTIFICATE.findall(stored["pck_crl_issuer_chain"])[1:]
+    stored["pck_crl_issuer_chain"] = "".join(
+        f"-----BEGIN CERTIFICATE-----{body}-----END CERTIFICATE-----\n" for body in [swapped, *rest]
+    )
+    return dcap_qvl.QuoteCollateralV3.from_json(json.dumps(stored))
+
+
+def test_provider_wrong_pck_ca_raises_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    _must_not_verify(monkeypatch)
+    wrong = _swapped_pck_ca_collateral(_PROVIDER_SLUG)
+    att, _nonce = _build_attestation(_PROVIDER_SLUG)
+    verifier = DcapTdxVerifier(collateral_provider=lambda _k, _n: wrong, now_secs=CAPTURE_EPOCH)
+
+    with pytest.raises(TeeCollateralMismatchError) as excinfo:
+        verifier.verify(att)
+
+    err = excinfo.value
+    assert err.reason == "pck_ca"
+    assert err.quote_key == CollateralKey.from_quote(bytes.fromhex(att.intel_quote))
+    assert err.collateral_key.fmspc == err.quote_key.fmspc
+    assert err.collateral_key.pck_ca_sha256 != err.quote_key.pck_ca_sha256
+
+
+@pytest.mark.parametrize(
+    ("wrong", "reason"),
+    [
+        (lambda: _collateral(_OTHER_FMSPC), "fmspc"),
+        (lambda: _swapped_pck_ca_collateral(_PROVIDER_SLUG), "pck_ca"),
+    ],
+)
+def test_provider_mismatch_hint_points_at_the_store(
+    monkeypatch: pytest.MonkeyPatch, wrong: Any, reason: str
+) -> None:
+    _must_not_verify(monkeypatch)
+    collateral = wrong()
+    att, _nonce = _build_attestation(_PROVIDER_SLUG)
+    verifier = DcapTdxVerifier(
+        collateral_provider=lambda _k, _n: collateral, now_secs=CAPTURE_EPOCH
+    )
+
+    with pytest.raises(TeeCollateralMismatchError) as excinfo:
+        verifier.verify(att)
+
+    message = str(excinfo.value)
+    assert excinfo.value.reason == reason
+    assert "collateral_provider returned collateral that does not match the key" in message
+    assert "check how its store is keyed" in message
+    assert "with_fetched_collateral" not in message
+
+
+def test_static_mismatch_hint_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    _must_not_verify(monkeypatch)
+    att, _nonce = _build_attestation(_OTHER_FMSPC)
+
+    with pytest.raises(TeeCollateralMismatchError) as excinfo:
+        _verifier(_MACHINE_A).verify(att)
+
+    assert str(excinfo.value).endswith(
+        "Build a verifier for it with DcapTdxVerifier.with_fetched_collateral(...) (fail-closed)."
+    )
+    assert "collateral_provider" not in str(excinfo.value)
+
+
+class _HasToJson:
+    def to_json(self) -> str:
+        return "{}"
+
+
+@pytest.mark.parametrize("returned", [object(), {"tcb_info": "{}"}, "collateral", _HasToJson()])
+def test_provider_non_collateral_return_refused(
+    monkeypatch: pytest.MonkeyPatch, returned: Any
+) -> None:
+    _must_not_verify(monkeypatch)
+    att, _nonce = _build_attestation(_PROVIDER_SLUG)
+    verifier = DcapTdxVerifier(collateral_provider=lambda _k, _n: returned, now_secs=CAPTURE_EPOCH)
+
+    with pytest.raises(TeeAttestationError, match="QuoteCollateralV3"):
+        verifier.verify(att)
+    assert verifier.last_result is None
+
+
+def test_provider_leaf_only_chain_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    att, _nonce = _build_attestation(_PROVIDER_SLUG)
+    real = dcap_qvl.parse_quote(bytes.fromhex(att.intel_quote))
+    leaf = _PEM_CERTIFICATE.findall(real.cert_chain_pem_bytes().decode("ascii"))[0]
+
+    class _LeafOnlyQuote(_FakeQuote):
+        def cert_chain_pem_bytes(self) -> bytes:
+            return f"-----BEGIN CERTIFICATE-----{leaf}-----END CERTIFICATE-----\n".encode()
+
+        def fmspc(self) -> str:
+            return real.fmspc()
+
+    def must_not_call(_key: CollateralKey, _now: int) -> Any:
+        pytest.fail("collateral_provider called without a key")
+
+    report = _real_report(_PROVIDER_SLUG)
+    _stub_crypto(monkeypatch, report)
+    monkeypatch.setattr(verify_mod.dcap_qvl, "parse_quote", lambda raw: _LeafOnlyQuote(report))
+    verifier = DcapTdxVerifier(collateral_provider=must_not_call, now_secs=CAPTURE_EPOCH)
+
+    with pytest.raises(TeeAttestationError, match="no PCK CA certificate in its embedded chain"):
+        verifier.verify(att)
+
+
+class _FmspcBrokenQuote:
+    """A real parsed quote whose ``fmspc()`` raises something other than ``ValueError``."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def fmspc(self) -> str:
+        raise RuntimeError("fmspc unavailable")
+
+
+def test_static_key_failure_still_raises_tee_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    att, _nonce = _build_attestation(_MACHINE_A)
+    real_parse = dcap_qvl.parse_quote
+    monkeypatch.setattr(
+        verify_mod.dcap_qvl, "parse_quote", lambda raw: _FmspcBrokenQuote(real_parse(raw))
+    )
+
+    with pytest.raises(TeeError, match="could not be read"):
+        _verifier(_MACHINE_A).verify(att)
+
+
+def test_provider_key_failure_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    att, _nonce = _build_attestation(_PROVIDER_SLUG)
+    real_parse = dcap_qvl.parse_quote
+    monkeypatch.setattr(
+        verify_mod.dcap_qvl, "parse_quote", lambda raw: _FmspcBrokenQuote(real_parse(raw))
+    )
+
+    def must_not_call(_key: CollateralKey, _now: int) -> Any:
+        pytest.fail("collateral_provider called without a key")
+
+    verifier = DcapTdxVerifier(collateral_provider=must_not_call, now_secs=CAPTURE_EPOCH)
+    with pytest.raises(TeeAttestationError, match="could not be read") as excinfo:
+        verifier.verify(att)
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+# --------------------------------------------------------------------------- #
+# Expired collateral
+# --------------------------------------------------------------------------- #
+
+_EXPIRY_SLUG = "glm_5_1"
+
+
+def _fixture_next_updates() -> dict[str, datetime]:
+    from cryptography import x509
+
+    stored = json.loads(load_collateral_json(_EXPIRY_SLUG))
+    out: dict[str, datetime] = {}
+    for item in ("tcb_info", "qe_identity"):
+        text = json.loads(stored[item])["nextUpdate"]
+        out[item] = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    for item in ("pck_crl", "root_ca_crl"):
+        crl = x509.load_der_x509_crl(bytes.fromhex(stored[item]))
+        out[item] = crl.next_update_utc
+    return out
+
+
+def test_expired_collateral_is_typed() -> None:
+    next_updates = _fixture_next_updates()
+    att, _nonce = _build_attestation(_EXPIRY_SLUG)
+    now = int(next_updates["pck_crl"].timestamp()) + 1
+
+    with pytest.raises(TeeCollateralExpiredError) as excinfo:
+        _verifier(_EXPIRY_SLUG, now_secs=now).verify(att)
+
+    err = excinfo.value
+    assert err.item == "pck_crl"
+    assert err.next_update == next_updates["pck_crl"]
+    assert err.key is not None
+    assert err.key.fmspc == "90C06F000000"
+    assert err.raw_quote
+
+
+def test_expired_reports_earliest_item() -> None:
+    next_updates = _fixture_next_updates()
+    att, _nonce = _build_attestation(_EXPIRY_SLUG)
+    now = int(datetime(2026, 7, 4, 0, 30, tzinfo=UTC).timestamp())
+    assert next_updates["pck_crl"] < next_updates["qe_identity"]
+    assert next_updates["qe_identity"].timestamp() < now
+
+    with pytest.raises(TeeCollateralExpiredError) as excinfo:
+        _verifier(_EXPIRY_SLUG, now_secs=now).verify(att)
+
+    assert excinfo.value.item == "pck_crl"
+
+
+def test_expired_check_uses_provider_collateral() -> None:
+    next_updates = _fixture_next_updates()
+    att, _nonce = _build_attestation(_EXPIRY_SLUG)
+    now = int(next_updates["pck_crl"].timestamp()) + 1
+    verifier = DcapTdxVerifier(
+        collateral_provider=lambda _key, _now: _collateral(_EXPIRY_SLUG), now_secs=now
+    )
+
+    with pytest.raises(TeeCollateralExpiredError) as excinfo:
+        verifier.verify(att)
+
+    assert excinfo.value.item == "pck_crl"
+    assert excinfo.value.key is not None
+
+
+def test_collateral_within_window_verifies() -> None:
+    att, _nonce = _build_attestation(_EXPIRY_SLUG)
+
+    assert _verifier(_EXPIRY_SLUG).verify(att) is True
+
+
+def test_unparseable_collateral_dates_skip_typed_expiry() -> None:
+    att, _nonce = _build_attestation(_EXPIRY_SLUG)
+    stored = json.loads(load_collateral_json(_EXPIRY_SLUG))
+    tcb_info = json.loads(stored["tcb_info"])
+    tcb_info["nextUpdate"] = "garbage"
+    stored["tcb_info"] = json.dumps(tcb_info)
+    collateral = dcap_qvl.QuoteCollateralV3.from_json(json.dumps(stored))
+
+    with pytest.raises(TeeError) as excinfo:
+        DcapTdxVerifier(collateral=collateral, now_secs=CAPTURE_EPOCH).verify(att)
+
+    assert not isinstance(excinfo.value, TeeCollateralExpiredError)
+
+
+def test_root_ca_crl_expiry_is_reported() -> None:
+    next_updates = _fixture_next_updates()
+    att, _nonce = _build_attestation(_EXPIRY_SLUG)
+    stored = json.loads(load_collateral_json(_EXPIRY_SLUG))
+    stored["pck_crl"] = "00"
+    for item in ("tcb_info", "qe_identity"):
+        body = json.loads(stored[item])
+        body["nextUpdate"] = "2099-01-01T00:00:00Z"
+        stored[item] = json.dumps(body)
+    collateral = dcap_qvl.QuoteCollateralV3.from_json(json.dumps(stored))
+    now = int(next_updates["root_ca_crl"].timestamp()) + 1
+
+    with pytest.raises(TeeCollateralExpiredError) as excinfo:
+        DcapTdxVerifier(collateral=collateral, now_secs=now).verify(att)
+
+    assert excinfo.value.item == "root_ca_crl"
+    assert excinfo.value.next_update == next_updates["root_ca_crl"]
+
+
+def test_crl_is_expired_at_its_exact_next_update() -> None:
+    next_updates = _fixture_next_updates()
+    att, _nonce = _build_attestation(_EXPIRY_SLUG)
+    now = int(next_updates["pck_crl"].timestamp())
+
+    with pytest.raises(TeeCollateralExpiredError) as excinfo:
+        _verifier(_EXPIRY_SLUG, now_secs=now).verify(att)
+
+    assert excinfo.value.item == "pck_crl"
+
+
+@pytest.mark.parametrize("item", ["tcb_info", "qe_identity"])
+def test_json_item_is_not_typed_expired_at_its_exact_next_update(item: str) -> None:
+    next_updates = _fixture_next_updates()
+    att, _nonce = _build_attestation(_EXPIRY_SLUG)
+    stored = json.loads(load_collateral_json(_EXPIRY_SLUG))
+    earliest = next_updates["pck_crl"] - timedelta(days=1)
+    for name in ("tcb_info", "qe_identity"):
+        body = json.loads(stored[name])
+        body["nextUpdate"] = (
+            earliest.strftime("%Y-%m-%dT%H:%M:%SZ") if name == item else "2099-01-01T00:00:00Z"
+        )
+        stored[name] = json.dumps(body)
+    collateral = dcap_qvl.QuoteCollateralV3.from_json(json.dumps(stored))
+
+    # The edited JSON breaks its Intel signature, so dcap refuses; only the typed
+    # expiry must stay out at the exact second.
+    with pytest.raises(TeeError) as excinfo:
+        DcapTdxVerifier(collateral=collateral, now_secs=int(earliest.timestamp())).verify(att)
+
+    assert not isinstance(excinfo.value, TeeCollateralExpiredError)
+
+
+def test_json_item_expiry_is_still_typed_when_crl_parsing_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryptography import x509
+
+    next_updates = _fixture_next_updates()
+    att, _nonce = _build_attestation(_EXPIRY_SLUG)
+    now = int(datetime(2026, 7, 4, 0, 30, tzinfo=UTC).timestamp())
+    assert next_updates["pck_crl"] < next_updates["qe_identity"]
+
+    def boom(_data: bytes) -> Any:
+        raise ValueError("CRL parsing unavailable")
+
+    monkeypatch.setattr(x509, "load_der_x509_crl", boom)
+
+    with pytest.raises(TeeCollateralExpiredError) as excinfo:
+        _verifier(_EXPIRY_SLUG, now_secs=now).verify(att)
+
+    json_items = {k: v for k, v in next_updates.items() if k in ("tcb_info", "qe_identity")}
+    expected = min(json_items, key=lambda k: json_items[k])
+    assert excinfo.value.item == expected
+    assert excinfo.value.next_update == json_items[expected]
