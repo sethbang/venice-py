@@ -775,3 +775,5 @@ MIT License — see [`LICENSE`](https://github.com/sethbang/venice-py/blob/main/
 An unofficial community SDK for Venice.ai
 
 </div>
+
+| [alpha_syndicate x402 Gateway](https://pfq-opencode-wr96rj6p4xwwh59v-8001.app.github.dev/.well-known/x402.json) | 11 pay-per-call USDC endpoints for AI agents | Remote |
