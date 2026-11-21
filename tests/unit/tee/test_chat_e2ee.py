@@ -1436,3 +1436,35 @@ def test_e2ee_takes_part_in_response_equality() -> None:
     with_trust._e2ee = _trust()
     assert plain.model_dump() == with_trust.model_dump()
     assert plain != with_trust
+
+
+@pytest.mark.asyncio
+async def test_e2ee_create_surfaces_typed_verifier_error() -> None:
+    import json
+    from pathlib import Path
+
+    from venice_ai.exceptions import TeeTcbStatusError
+    from venice_ai.resources.tee import Tee
+    from venice_ai.tee.types import TeeAttestation
+
+    raw = json.loads((Path(__file__).parent / "fixtures" / "attestation_gemma.json").read_text())
+    raised = TeeTcbStatusError("x", status="OutOfDate", advisory_ids=[], policy="reject")
+
+    class _Verifier:
+        def verify(self, attestation: TeeAttestation) -> bool:
+            raise raised
+
+    session, _ = _build_session()
+    comp = _make_completions(session, {})
+    client = comp._client
+    client.get = AsyncMock(return_value=TeeAttestation.model_validate(raw))
+    client.tee = Tee(client)
+
+    with pytest.raises(TeeTcbStatusError) as excinfo:
+        await comp.create(
+            model=_E2EE_MODEL,
+            messages=_messages(),
+            e2ee=TeeOptions(nonce=raw["request_nonce"], verifier=_Verifier()),
+        )
+    assert excinfo.value is raised
+    client._stream_request.assert_not_called()

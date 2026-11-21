@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from venice_ai.exceptions import TeeAttestationError
+from venice_ai.exceptions import TeeAttestationError, TeeTcbStatusError
 from venice_ai.tee._attestation import (
     FullQuoteVerifier,
     preflight_nonce,
@@ -274,3 +274,55 @@ def test_full_quote_verifier_not_run_when_baseline_fails(
         warnings.simplefilter("ignore")
         verify_attestation(att, sent_nonce, fail_closed=False, verifier=v)
     assert _Verifier.called is False
+
+
+def _tcb_error() -> TeeTcbStatusError:
+    return TeeTcbStatusError("x", status="OutOfDate", advisory_ids=[], policy="reject")
+
+
+def test_typed_verifier_error_propagates_unwrapped(
+    raw_attestation: dict[str, Any], sent_nonce: str
+) -> None:
+    raised = _tcb_error()
+
+    class _Verifier:
+        def verify(self, attestation: TeeAttestation) -> bool:
+            raise raised
+
+    att = _build(raw_attestation)
+    with pytest.raises(TeeTcbStatusError) as excinfo:
+        verify_attestation(att, sent_nonce, verifier=_Verifier())
+    assert excinfo.value is raised
+    assert excinfo.value.status == "OutOfDate"
+
+
+def test_untyped_verifier_error_still_wrapped(
+    raw_attestation: dict[str, Any], sent_nonce: str
+) -> None:
+    boom = ValueError("boom")
+
+    class _Verifier:
+        def verify(self, attestation: TeeAttestation) -> bool:
+            raise boom
+
+    att = _build(raw_attestation)
+    with pytest.raises(TeeAttestationError) as excinfo:
+        verify_attestation(att, sent_nonce, verifier=_Verifier())
+    assert type(excinfo.value) is TeeAttestationError
+    assert str(excinfo.value).startswith("TEE full-quote verifier raised:")
+    assert excinfo.value.__cause__ is boom
+
+
+def test_typed_error_not_raised_when_not_fail_closed(
+    raw_attestation: dict[str, Any], sent_nonce: str
+) -> None:
+    class _Verifier:
+        def verify(self, attestation: TeeAttestation) -> bool:
+            raise _tcb_error()
+
+    att = _build(raw_attestation)
+    with pytest.warns(UserWarning):
+        result = verify_attestation(att, sent_nonce, fail_closed=False, verifier=_Verifier())
+    assert result.ok is False
+    assert result.checks["full_quote"] is False
+    assert any("Full-quote verifier raised" in f for f in result.failures)

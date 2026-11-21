@@ -107,7 +107,9 @@ class Tee(APIResource["VeniceClient"]):
         Raises:
             TeeAttestationError: If ``fail_closed`` and verification fails (or the
                 supplied ``nonce`` is malformed), including when
-                ``signing_public_key`` does not derive to ``signing_address``.
+                ``signing_public_key`` does not derive to ``signing_address``. A
+                typed ``TeeAttestationError`` subclass raised by ``verifier`` is
+                propagated unchanged.
             ImportError: If the attestation carries a model key and
                 ``pycryptodome`` (the ``[e2ee]`` extra) is not installed.
             APIError: For HTTP-level failures.
@@ -179,7 +181,8 @@ class Tee(APIResource["VeniceClient"]):
         Raises:
             TeeAttestationError: If verification fails (always fail-closed here),
                 including when ``signing_public_key`` does not derive to the
-                attested ``signing_address``.
+                attested ``signing_address``. A typed ``TeeAttestationError``
+                subclass raised by ``verifier`` is propagated unchanged.
             TeeEncryptionError: If the verified attestation publishes no model
                 public key (``signing_public_key``) to encrypt to.
             ImportError: If the ``[e2ee]`` extra is not installed.

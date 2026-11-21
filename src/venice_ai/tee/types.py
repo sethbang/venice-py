@@ -8,16 +8,85 @@ keys may appear; ``extra='allow'`` preserves them on ``model_extra``.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import ConfigDict, Field
 
 from ..core.models.base import VeniceBaseModel
-from ..exceptions import TeeEncryptionError
+from ..exceptions import TeeAttestationError, TeeEncryptionError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ._attestation import FullQuoteVerifier
+
+#: One PEM certificate's base64 body.
+_PEM_CERTIFICATE = re.compile(
+    r"-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----", re.DOTALL
+)
+
+
+def _key_from_pem_chain(
+    chain_pem: str | bytes, fmspc: str, *, ca_index: int
+) -> CollateralKey | None:
+    """The one rule that turns a PEM chain and an FMSPC into a :class:`CollateralKey`.
+
+    The PCK CA is the certificate at ``ca_index`` of the chain (index 1 of a quote's
+    PCK chain, index 0 of a collateral's CRL issuer chain). Returns ``None`` when the
+    chain has no certificate there.
+    """
+    text = chain_pem.decode("ascii", "replace") if isinstance(chain_pem, bytes) else chain_pem
+    certificates = _PEM_CERTIFICATE.findall(text)
+    if len(certificates) <= ca_index:
+        return None
+    der = base64.b64decode("".join(certificates[ca_index].split()), validate=True)
+    return CollateralKey(fmspc=fmspc.upper(), pck_ca_sha256=hashlib.sha256(der).hexdigest())
+
+
+@dataclass(frozen=True, slots=True)
+class CollateralKey:
+    """Identifies which Intel collateral a quote needs: its FMSPC and PCK CA.
+
+    Collateral (TCB info, QE identity, CRLs) is per platform family (``fmspc``) and
+    per PCK CA, so this pair is the natural cache key for an application that
+    stores collateral. Build it with :meth:`from_quote`; that is the only rule the
+    verifier uses too, so a key made by the application always matches.
+
+    Attributes:
+        fmspc: Upper-case hex FMSPC, e.g. ``"90C06F000000"``.
+        pck_ca_sha256: Lower-case hex SHA-256 of the PCK CA certificate's DER.
+    """
+
+    fmspc: str
+    pck_ca_sha256: str
+
+    @classmethod
+    def from_quote(cls, raw_quote: bytes | str) -> CollateralKey:
+        """Compute the key for a raw TDX quote (bytes, or a hex string).
+
+        Raises:
+            TeeError: ``dcap-qvl`` is not installed (the ``[e2ee-verify]`` extra).
+            TeeAttestationError: The quote cannot be parsed or embeds no PCK chain.
+        """
+        from ._verify import _require_dcap  # noqa: PLC0415  (optional dep; avoids a cycle)
+
+        dcap = _require_dcap()
+        try:
+            raw = bytes.fromhex(raw_quote) if isinstance(raw_quote, str) else bytes(raw_quote)
+            quote = dcap.parse_quote(raw)
+            chain = quote.cert_chain_pem_bytes()
+            if not chain:
+                raise TeeAttestationError(
+                    "TEE quote embeds no PCK certificate chain (fail-closed)."
+                )
+            key = _key_from_pem_chain(chain, quote.fmspc(), ca_index=1)
+        except (ValueError, TypeError) as exc:
+            raise TeeAttestationError(f"TEE quote could not be read: {exc}") from exc
+        if key is None:
+            raise TeeAttestationError("TEE quote embeds no PCK CA certificate (fail-closed).")
+        return key
 
 
 @dataclass(frozen=True, slots=True)

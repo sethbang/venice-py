@@ -181,3 +181,19 @@ def test_require_crypto_raises_helpful_importerror_when_missing(
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(ImportError, match=r"venice-py\[e2ee\]"):
         tee._require_crypto()
+
+
+def test_tee_exports_typed_errors() -> None:
+    import venice_ai.exceptions as exc_mod
+
+    for name in (
+        "TeeTcbStatusError",
+        "TeeCollateralMismatchError",
+        "TeeCollateralExpiredError",
+        "TeeCollateralUnavailableError",
+    ):
+        cls = getattr(tee, name)
+        assert cls is getattr(exc_mod, name)
+        assert name in exc_mod.__all__
+        assert issubclass(cls, TeeAttestationError)
+    assert tee.CollateralKey.__name__ == "CollateralKey"

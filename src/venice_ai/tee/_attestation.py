@@ -284,7 +284,11 @@ def verify_attestation(
 
     Raises:
         TeeAttestationError: When ``fail_closed`` and any check fails, including
-            a missing/malformed field that a check depends on.
+            a missing/malformed field that a check depends on. A
+            :class:`~venice_ai.exceptions.TeeAttestationError` (or subclass, such
+            as :class:`~venice_ai.exceptions.TeeTcbStatusError`) raised by the
+            full-quote ``verifier`` is re-raised as the same object; any other
+            verifier exception is wrapped in a ``TeeAttestationError``.
         ImportError: If the attestation carries a ``signing_public_key`` and
             ``pycryptodome`` (the ``[e2ee]`` extra) is not installed.
     """
@@ -399,6 +403,11 @@ def verify_attestation(
     if verifier is not None and not failures:
         try:
             ok = verifier.verify(attestation)
+        except TeeAttestationError as exc:
+            checks["full_quote"] = False
+            failures.append(f"Full-quote verifier raised: {exc!r}")
+            if fail_closed:
+                raise
         except Exception as exc:  # noqa: BLE001 - any verifier failure is fatal
             checks["full_quote"] = False
             failures.append(f"Full-quote verifier raised: {exc!r}")
