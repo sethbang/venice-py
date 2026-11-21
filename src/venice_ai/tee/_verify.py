@@ -4,10 +4,16 @@ The baseline verifier (:mod:`venice_ai.tee._attestation`) trusts Venice's
 server-side ``verified`` claim. :class:`DcapTdxVerifier` closes that gap: it
 verifies the raw Intel TDX quote's ECDSA signature and PCK certificate chain to
 a **pinned** Intel SGX Root CA, evaluates the FMSPC TCB status against
-Intel-signed collateral, confirms the enclave is non-debug, that the E2EE
-signing key is bound into REPORTDATA, that the event log replays to the quoted
-RTMRs, and that the dstack ``app_compose`` hashes into the quoted
+Intel-signed collateral, confirms the enclave is non-debug, that the signing
+address and nonce are bound into REPORTDATA, that the event log replays to the
+quoted RTMRs, and that the dstack ``app_compose`` hashes into the quoted
 ``mr_config_id`` — all OFFLINE.
+
+REPORTDATA does not contain the E2EE encryption key itself. The key is tied to
+the enclave by :func:`venice_ai.tee._attestation.verify_attestation`, which
+checks that ``signing_public_key`` derives (Keccak-256) to ``signing_address``
+before any full-quote verifier runs; this verifier binds the same top-level
+``signing_address`` into REPORTDATA.
 
 **Security tier.** By default this proves the model runs on a *genuine,
 non-debug Intel TDX enclave* running a *self-consistent dstack workload* (Tier
@@ -23,7 +29,8 @@ image/app unless the caller supplies ``expected_measurements`` /
 established from the attestation alone; ``last_result["checks"]
 ["compose_binding"]`` is then the string ``"unavailable"`` rather than
 ``True``. Tier B on that wire therefore proves genuine non-debug TDX
-hardware, a signing key bound into the enclave, and an event log consistent
+hardware, a signing address bound into the enclave (and, through the key
+binding, the encryption key that derives to it), and an event log consistent
 with the quoted RTMRs — but not that the workload matches a given compose.
 Pin ``expected_measurements["mr_config_id"]`` for that dimension. Because a
 check value may be a string, test results with ``is True``, never for
@@ -255,7 +262,7 @@ class DcapTdxVerifier:
         checks: dict[str, bool | str] = {}
 
         # (0) NORMALIZE — read schema-independent inputs. Uses intel_quote (NOT
-        # quote): only intel_quote's REPORTDATA binds the signing key.
+        # quote): only intel_quote's REPORTDATA binds the signing address.
         evidence = normalize(attestation)
         raw_quote = evidence.raw_quote
 
@@ -297,7 +304,7 @@ class DcapTdxVerifier:
         self._check_debug_bit(report)
         checks["debug_bit"] = True
 
-        # (5) REPORTDATA key binding.
+        # (5) REPORTDATA binding of the signing address and nonce.
         self._check_reportdata(report, evidence)
         checks["reportdata_binding"] = True
 

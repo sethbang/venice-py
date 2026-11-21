@@ -17,7 +17,7 @@ examples/
 │   ├── _helpers.py              # Shared helpers: grounding checks (an answer states the tool's signed value with its unit)
 │   ├── simple_chat.py           # Basic chat completions: stop, n, top_p, penalties, seed, logprobs
 │   ├── streaming_chat.py        # Real-time streaming: text_deltas, reasoning_summary
-│   ├── tee_e2ee.py              # TEE confidential-compute client-side E2EE chat: get_signature, open_session
+│   ├── tee_e2ee.py              # TEE confidential-compute client-side E2EE chat: streaming and non-streaming, multi-turn recall, the `response.e2ee` trust level, get_signature, open_session
 │   ├── tool_calling.py          # Hand-driven tool round trip, parallel calls, tool_choice, tool errors, tool_from_model, parse_as; answers checked against the tool output
 │   ├── streaming_tools.py       # Stream with tools=: read assembled calls from final_response, complete the round trip; answer checked against the tool output
 │   ├── video_audio_input.py     # Video by public URL and audio as base64 in chat; catalog filtered on supportsVideoInput/supportsAudioInput; billed

@@ -8,8 +8,9 @@ and (via the sync proxy) the :class:`~venice_ai._sync_client.SyncVeniceClient`.
 Two entry points:
 
 * :meth:`Tee.get_attestation` — fetch and **baseline-verify** an attestation
-  (fail-closed). Network + ``bytes.fromhex`` only; does **not** require the
-  ``[e2ee]`` extra, so a bare install can still attest.
+  (fail-closed). An attestation that publishes a model key is also checked for
+  key binding, which needs Keccak-256 from ``pycryptodome`` (the ``[e2ee]``
+  extra); an attestation without a key verifies on a bare install.
 * :meth:`Tee.open_session` — :meth:`get_attestation` then build a
   :class:`TeeSession` (generates the SESSION keypair). The keypair generation
   needs ``cryptography``; the lazy import + actionable ``ImportError`` (the
@@ -37,7 +38,7 @@ from ..tee._attestation import (
     verify_attestation,
 )
 from ..tee._session import TeeSession
-from ..tee.types import TeeAttestation, TeeSignatureResponse
+from ..tee.types import TeeAttestation, TeeSignatureResponse, TeeTrust
 
 if TYPE_CHECKING:
     from .._client import VeniceClient  # noqa: F401
@@ -78,12 +79,14 @@ class Tee(APIResource["VeniceClient"]):
 
         Calls ``GET /tee/attestation?model=&nonce=`` (a free endpoint), verifies
         the response fail-closed against the client-generated nonce (server
-        ``verified`` claim, nonce echo, report-data binding, TDX debug-flag), and
-        records the sent nonce on the returned attestation.
+        ``verified`` claim, nonce echo, report-data binding, TDX debug-flag, and
+        that ``signing_public_key`` derives to ``signing_address``), and records
+        the sent nonce on the returned attestation.
 
-        This path uses only the network + ``bytes.fromhex`` / integer operations;
-        it does **not** require the ``[e2ee]`` extra. A bare install can attest a
-        model even though it cannot open an encrypting session.
+        REPORTDATA binds the signing address and the nonce, not the model key, so
+        the key-binding check is what ties the encryption key to the attested
+        enclave. It needs Keccak-256 from ``pycryptodome`` (the ``[e2ee]`` extra)
+        and runs whenever the attestation carries a key.
 
         Args:
             model: The ``e2ee-*`` model id to attest (e.g. ``"e2ee-gemma-3-27b-p"``).
@@ -103,7 +106,10 @@ class Tee(APIResource["VeniceClient"]):
 
         Raises:
             TeeAttestationError: If ``fail_closed`` and verification fails (or the
-                supplied ``nonce`` is malformed).
+                supplied ``nonce`` is malformed), including when
+                ``signing_public_key`` does not derive to ``signing_address``.
+            ImportError: If the attestation carries a model key and
+                ``pycryptodome`` (the ``[e2ee]`` extra) is not installed.
             APIError: For HTTP-level failures.
         """
         sent_nonce = preflight_nonce(nonce) if nonce is not None else _generate_nonce()
@@ -113,7 +119,7 @@ class Tee(APIResource["VeniceClient"]):
             cast_to=TeeAttestation,
         )
         # Populate sent_nonce BEFORE verification so a FullQuoteVerifier reading
-        # attestation.sent_nonce (REPORTDATA key binding) sees the real nonce
+        # attestation.sent_nonce (REPORTDATA binding) sees the real nonce
         # rather than None. Baseline equality already uses the local sent_nonce.
         attestation.sent_nonce = sent_nonce
         verify_attestation(
@@ -171,7 +177,11 @@ class Tee(APIResource["VeniceClient"]):
             its SESSION private key is dropped on exit.
 
         Raises:
-            TeeAttestationError: If verification fails (always fail-closed here).
+            TeeAttestationError: If verification fails (always fail-closed here),
+                including when ``signing_public_key`` does not derive to the
+                attested ``signing_address``.
+            TeeEncryptionError: If the verified attestation publishes no model
+                public key (``signing_public_key``) to encrypt to.
             ImportError: If the ``[e2ee]`` extra is not installed.
             APIError: For HTTP-level failures.
         """
@@ -181,4 +191,5 @@ class Tee(APIResource["VeniceClient"]):
             fail_closed=True,
             verifier=verifier,
         )
-        return TeeSession.from_attestation(attestation)
+        trust = TeeTrust.from_attestation(attestation, model=model, verifier=verifier)
+        return TeeSession.from_attestation(attestation, trust=trust)

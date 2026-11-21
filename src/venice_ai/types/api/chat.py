@@ -33,6 +33,7 @@ from ..identifiers import ModelId
 from .common import CompletionTokensDetails, PromptTokensDetails, WebSearchCitation
 
 if TYPE_CHECKING:
+    from ...tee.types import TeeTrust
     from .models import LLMModelPricing
 
 _T = TypeVar("_T", bound=BaseModel)
@@ -515,6 +516,8 @@ class ChatCompletionResponse(VeniceBaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    _e2ee: "TeeTrust | None" = PrivateAttr(default=None)
+
     id: str = Field(..., description="The ID of the request")
     object: str = Field(
         ..., description='The type of object returned, normally ``"chat.completion"``'
@@ -552,6 +555,18 @@ class ChatCompletionResponse(VeniceBaseModel):
     cost: ChatCost | None = Field(
         default=None, description="Request cost split by billing currency"
     )
+
+    @property
+    def e2ee(self) -> "TeeTrust | None":
+        """The E2EE attestation trust level, or ``None`` for a non-E2EE response.
+
+        Kept out of the serialized response and out of each message. It is a
+        private attribute, and pydantic's ``==`` compares private attributes,
+        so a response with ``.e2ee`` set does not compare equal to an otherwise
+        identical response without it; compare ``model_dump()`` output to
+        compare content only.
+        """
+        return self._e2ee
 
     # ── Content accessors ─────────────────────────────────────────────
 

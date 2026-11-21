@@ -11,9 +11,7 @@ emitted. The baseline paths must still warn.
 from __future__ import annotations
 
 import warnings
-from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -25,7 +23,8 @@ ec = pytest.importorskip(
 from venice_ai.resources.chat.completions import ChatCompletions  # noqa: E402
 from venice_ai.tee import TeeOptions, _crypto  # noqa: E402
 from venice_ai.tee._session import TeeSession  # noqa: E402
-from venice_ai.types.api.streaming import ChatCompletionChunk  # noqa: E402
+
+from .test_chat_e2ee import _make_completions  # noqa: E402
 
 _E2EE_MODEL = "e2ee-gemma-3-27b-p"
 
@@ -51,44 +50,8 @@ def _session() -> TeeSession:
 
 
 def _completions(session: TeeSession) -> ChatCompletions:
-    client = MagicMock()
-    client.tee.open_session = AsyncMock(return_value=session)
-    session_pub = session.session_public_key_hex
-
-    def _stream_request(**_kw: Any) -> AsyncIterator[ChatCompletionChunk]:
-        async def _gen() -> AsyncIterator[ChatCompletionChunk]:
-            base = {
-                "id": "chatcmpl-x",
-                "object": "chat.completion.chunk",
-                "created": 1,
-                "model": _E2EE_MODEL,
-            }
-            yield ChatCompletionChunk.model_validate(
-                {**base, "choices": [{"index": 0, "delta": {"role": "assistant"}}]}
-            )
-            yield ChatCompletionChunk.model_validate(
-                {
-                    **base,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": _crypto.encrypt_message(session_pub, "ok")},
-                        }
-                    ],
-                }
-            )
-            yield ChatCompletionChunk.model_validate(
-                {
-                    **base,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-                }
-            )
-
-        return _gen()
-
-    client._stream_request = MagicMock(side_effect=_stream_request)
-    return ChatCompletions(client)
+    """A ChatCompletions streaming the live-shaped E2EE chunks of ``_make_completions``."""
+    return _make_completions(session, {})
 
 
 async def _baseline_trust_warnings(e2ee: Any, *, stream: bool = False) -> list[str]:

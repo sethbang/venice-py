@@ -339,6 +339,7 @@ To catch these patterns automatically in user code, run **`venice-py lint <path>
 - `references/structured-output.md` — nested models, validation failures, manual JSON Schema
 - `references/headers-and-metadata.md` — full table of `_response` properties
 - `references/migration-v1-to-v2.md` — full v2 breaking-change list with rationale
+- `references/e2ee.md` — client-side end-to-end encrypted chat: `e2ee=True`, multi-turn, refusals, `TeeEncryptionError`, TEE-only mode
 - `references/responses-api.md` — beta `client.responses` (OpenAI Responses format)
 - `references/characters-and-augment.md` — `client.characters`, `client.augment.search/scrape/parse_text`
 - `references/response-shapes.md` — where fields actually live (`model_spec` per type, billing balance nesting, augment results, audio response, etc.)

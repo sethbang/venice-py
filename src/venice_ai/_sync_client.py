@@ -28,7 +28,7 @@ import sys
 import threading
 from collections.abc import AsyncIterable, Callable, Collection, Coroutine, Iterator
 from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._client import VeniceClient
 from ._pagination import Paginator
@@ -40,6 +40,9 @@ from .resources.music import MusicJob
 from .resources.video import VideoJob
 from .resources.voice_changer import VoiceChangerJob
 from .streaming import Stream
+
+if TYPE_CHECKING:
+    from .tee.types import TeeTrust
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +133,11 @@ class _SyncStreamProxy:
 
     def __exit__(self, *args: object) -> None:
         self._run(self._stream.__aexit__(*args))
+
+    @property
+    def e2ee(self) -> TeeTrust | None:
+        """The E2EE attestation trust level of the wrapped stream, if any."""
+        return getattr(self._stream, "e2ee", None)
 
     def close(self) -> None:
         """Close the underlying async stream."""

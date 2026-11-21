@@ -11,7 +11,7 @@ Venice serves each request in one of two modes. Most OpenAI models are forwarded
 | You want a managed tool loop (`run_with_tools`) | Your client already speaks the Responses format (Codex-style agents) |
 | You want `parse()` to return a validated pydantic model | You want OpenAI models served natively, with encrypted reasoning replay |
 | You need streaming with `ChatStream` helpers | You need custom (freeform-input) tools or client-executed `tool_search` |
-| You're targeting an E2EE-capable model | (Responses doesn't support E2EE models — use chat.completions with E2EE headers) |
+| You're targeting an E2EE-capable model | (Responses doesn't support E2EE models — use `chat.completions.create(..., e2ee=True)`; `venice_parameters` `enable_e2ee` other than `False` raises `InvalidRequestError`) |
 
 For most use cases, `client.chat.completions` is the right call.
 

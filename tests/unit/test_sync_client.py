@@ -193,6 +193,34 @@ def test_sync_stream_proxy_iteration():
         client.close()
 
 
+def test_sync_stream_proxy_exposes_e2ee():
+    """The sync proxy surfaces ``ChatStream.e2ee`` (None for a plain Stream)."""
+    from venice_ai.streaming import ChatStream, Stream
+    from venice_ai.tee.types import TeeTrust
+
+    async def _agen():
+        return
+        yield
+
+    trust = TeeTrust(
+        model="e2ee-x",
+        verification="baseline",
+        verifier=None,
+        server_verified=True,
+        nonce="cd" * 32,
+        model_public_key="04" + "ab" * 64,
+        signing_address="0x" + "ab" * 20,
+    )
+    with patch("venice_ai._sync_client.VeniceClient", return_value=Mock(close=AsyncMock())):
+        client = SyncVeniceClient()
+    try:
+        chat_stream = ChatStream(_agen(), client=Mock(), e2ee=trust)
+        assert _SyncStreamProxy(chat_stream, client._run).e2ee is trust
+        assert _SyncStreamProxy(Stream(_agen(), client=Mock()), client._run).e2ee is None
+    finally:
+        client.close()
+
+
 def test_sync_stream_proxy_close_invokes_underlying_close():
     """``_SyncStreamProxy.close()`` must run the underlying async stream's close()."""
     closed = []

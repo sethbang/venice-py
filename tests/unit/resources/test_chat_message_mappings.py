@@ -15,7 +15,7 @@ from venice_ai.exceptions import InvalidRequestError
 from venice_ai.resources.chat.completions import (
     ChatCompletions,
     _coerce_messages,
-    _validate_e2ee_request,
+    _validate_e2ee_messages,
 )
 from venice_ai.types.api import (
     AssistantMessage,
@@ -47,6 +47,30 @@ _FAKE_CHAT_MODEL = "fake-chat-test-model"
 
 
 class TestCoerceMessages:
+    def test_response_message_keeps_round_trip_extras_and_drops_cache_control(self):
+        message = ChatMessage.model_validate(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}],
+                "reasoning_content": "thought",
+                "thought_signature": "sig",
+                "reasoning_details": [{"type": "x"}],
+                "cache_control": {"type": "ephemeral"},
+                "some_future_field": 7,
+            }
+        )
+
+        (coerced,) = _coerce_messages([message])
+        dumped = coerced.model_dump(exclude_none=True)
+
+        assert isinstance(coerced, AssistantMessage)
+        assert "cache_control" not in dumped
+        assert dumped["content"] == [{"type": "text", "text": "hi"}]
+        assert dumped["reasoning_content"] == "thought"
+        assert dumped["thought_signature"] == "sig"
+        assert dumped["reasoning_details"] == [{"type": "x"}]
+        assert dumped["some_future_field"] == 7
+
     @pytest.mark.parametrize(
         ("mapping", "expected"),
         [
@@ -122,28 +146,30 @@ class TestCoerceMessages:
 
 
 class TestE2EEGuardSeesMappings:
-    """The E2EE pre-flight guard inspects the caller's raw sequence.
+    """The E2EE message guard runs on the dumped request body.
 
-    It must reject an E2EE-incompatible message whichever shape it arrives in,
-    since a mapping reaches the guard before any coercion happens.
+    A mapping and a typed message model both reach it as a plain dict, so
+    both shapes are refused or accepted identically.
     """
 
     def test_multimodal_mapping_rejected_under_e2ee(self):
-        with pytest.raises(InvalidRequestError, match="Multimodal"):
-            _validate_e2ee_request(
-                model="e2ee-fake-model",
-                messages=[{"role": "user", "content": [{"type": "text", "text": "describe"}]}],
-                tools=None,
-                venice_parameters=None,
+        with pytest.raises(InvalidRequestError, match="multimodal"):
+            _validate_e2ee_messages(
+                [{"role": "user", "content": [{"type": "text", "text": "describe"}]}]
             )
 
     def test_text_mapping_allowed_under_e2ee(self):
-        _validate_e2ee_request(
-            model="e2ee-fake-model",
-            messages=[{"role": "user", "content": "plain text"}],
-            tools=None,
-            venice_parameters=None,
-        )
+        _validate_e2ee_messages([{"role": "user", "content": "plain text"}])
+
+    @pytest.mark.asyncio
+    async def test_message_model_refused_through_create(self):
+        client = MagicMock()
+        client.tee.open_session = AsyncMock()
+        comp = ChatCompletions(client)
+        message = ChatMessage(role="user", content=[{"type": "text", "text": "describe"}])
+        with pytest.raises(InvalidRequestError, match="multimodal"):
+            await comp.create(model="e2ee-fake-model", messages=[message], e2ee=True)
+        client.tee.open_session.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

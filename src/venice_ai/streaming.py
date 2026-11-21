@@ -60,6 +60,7 @@ from typing import (
 
 if TYPE_CHECKING:
     from ._client import VeniceClient
+    from .tee.types import TeeTrust
     from .types.api.chat import ChatCompletionResponse
     from .types.api.streaming import ChatCompletionChunk  # noqa: F401
 
@@ -523,10 +524,21 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         iterator: AsyncIterator[ChatCompletionChunk],
         *,
         client: VeniceClient,
+        e2ee: TeeTrust | None = None,
     ):
         super().__init__(iterator, client=client)
+        self._e2ee = e2ee
         self._final_response: ChatCompletionResponse | None = None
         self._reasoning_summary: str | None = None
+
+    @property
+    def e2ee(self) -> TeeTrust | None:
+        """The E2EE attestation trust level, or ``None`` for a non-E2EE stream.
+
+        Readable before iteration. It is also set on the response that
+        :meth:`collect` and :meth:`collect_with_deltas` assemble.
+        """
+        return self._e2ee
 
     @property
     def final_response(self) -> ChatCompletionResponse | None:
@@ -678,6 +690,7 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         if usage is not None:
             payload["usage"] = usage.model_dump()
         response = ChatCompletionResponse.model_validate(payload)
+        response._e2ee = self._e2ee
         self._reasoning_summary = (
             "".join(reasoning_summary_parts) if reasoning_summary_parts else None
         )
@@ -814,7 +827,9 @@ class ChatStream(Stream["ChatCompletionChunk"]):
         self._reasoning_summary = (
             "".join(reasoning_summary_parts) if reasoning_summary_parts else None
         )
-        self._final_response = ChatCompletionResponse.model_validate(payload)
+        response = ChatCompletionResponse.model_validate(payload)
+        response._e2ee = self._e2ee
+        self._final_response = response
 
 
 class BytesResponse:
