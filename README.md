@@ -257,12 +257,15 @@ Advanced body fields on `submit()` (all optional):
 `reference_audio_urls` (up to 10 each), `image_references` /
 `video_references` (references as objects, each with a role, prompt name or
 voice), `elements` (up to 4 Kling-O3 structured characters),
-`scene_image_urls` (up to 4), and `draft=True` for a Seedance 2.5 draft that
-`upgrade_draft()` turns into the HD version. For the dedicated
+`scene_image_urls` (up to 4), `hdr=True` for HDR output on models and
+resolutions that support it (`constraints.supports_hdr` and
+`.hdr_resolutions`; `resolve_video(require_hdr=True)` finds one), and
+`draft=True` for a Seedance 2.5 draft that `upgrade_draft()` turns into the
+HD version. For the dedicated
 `topaz-video-upscale` model, pass `video_url` + `upscale_factor` (1/2/4)
 instead of `resolution`. `quote()` accepts only the pricing-relevant
 subset (`model`, `duration_seconds`, `aspect_ratio`, `resolution`, `upscale_factor`,
-`audio`, `video_url`, plus the enhancement, frame-rate and draft fields) per
+`audio`, `hdr`, `video_url`, plus the enhancement, frame-rate and draft fields) per
 the API spec. Prompt text and reference images don't affect price; the
 image-to-video `image_url` does when `aspect_ratio="auto"`, so pass it there.
 

@@ -273,6 +273,11 @@ class TestGetCapabilitiesVideo:
         assert constraints.supports_hdr is True
         assert constraints.hdr_resolutions == ["1080p", "4k"]
         assert "supportsHdr" not in (constraints.model_extra or {})
+        dumped = constraints.model_dump()
+        assert dumped["supportsHdr"] is True
+        assert dumped["hdrResolutions"] == ["1080p", "4k"]
+        assert "supports_hdr" not in dumped
+        assert VideoModelConstraints(model_type="t", supports_hdr=True).supports_hdr is True
         resource, _ = _build_models(
             _model(id="fake-test-video-hdr", type="video", constraints=constraints),
         )

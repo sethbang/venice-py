@@ -322,9 +322,12 @@ class VideoModelConstraints(BaseModel):
     ``prompt_character_limit``, a real swagger field the class does not
     explicitly declare, and any other server-side keys observed on video
     models) on ``model_extra`` instead of dropping them.
+
+    The HDR fields take their Python names or their wire keys, and
+    ``model_dump()`` writes the wire keys, as the API sends them.
     """
 
-    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    model_config = ConfigDict(extra="allow", populate_by_name=True, serialize_by_alias=True)
 
     model_type: str = Field(
         ...,

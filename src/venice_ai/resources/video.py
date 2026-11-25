@@ -1084,6 +1084,7 @@ class Video(APIResource["VeniceClient"]):
         duration_seconds: int | str,
         aspect_ratio: str | None = None,
         resolution: str | None = None,
+        hdr: bool | None = None,
         consents: VideoConsents | dict | None = None,
     ) -> VideoQueueResponse:
         """Queue the HD version of a Seedance 2.5 draft.
@@ -1109,6 +1110,8 @@ class Video(APIResource["VeniceClient"]):
             text-to-video models.
         :param resolution: Target resolution (e.g. ``"1080p"``). Omit for the
             server default.
+        :param hdr: Upgrade to HDR output, as for :meth:`submit`. The API
+            returns 400 when the model or resolution does not support HDR.
         :param consents: Provider consent attestations, as for :meth:`submit`.
 
         :return: Queue response for the upgrade job; poll it like any other.
@@ -1138,6 +1141,7 @@ class Video(APIResource["VeniceClient"]):
             duration_seconds=duration_seconds,
             aspect_ratio=aspect_ratio,
             resolution=resolution,
+            hdr=hdr,
             consents=consents,
         )
 

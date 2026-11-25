@@ -43,6 +43,7 @@ await client.video.run(
     negative_prompt=None,                       # str | None — what to avoid
     resolution=None,                            # str | None — "720p", "1080p", "4k"
     audio=None,                                 # bool | None — include audio track
+    hdr=None,                                   # bool | None — HDR output; model and resolution must support it (see "HDR")
     aspect_ratio=None,                          # str | None — "16:9", "9:16", "1:1", "2:1"
     image_url=None,                             # str | None — seed frame for image-to-video
     image_strength=None,                        # float | None — 0-1, how strongly image_url guides the clip (queue-only)
@@ -178,6 +179,28 @@ job = await client.video.submit(model=result.model, prompt="...", **result.reque
 Each candidate is quoted at its own cheapest valid request (shortest listed duration, lowest listed resolution, 16:9 when listed, `audio=False` where configurable), so models without a 5-second clip are still compared. Pass `duration=` or `resolution=` to pin one; models that don't list it are skipped. `result.all_quotes` maps every quoted model to its USD price and `result.skipped` says why any candidate was left out. `cheapest_video_params(constraints)` from `venice_ai.models.selection` builds the same request for a model you picked yourself.
 
 `resolve_cheapest_video` issues one quote call per candidate (at most 8 at once). Quotes are free, but cache the result rather than calling it in a loop.
+
+## HDR
+
+`hdr=True` on `submit()`, `run()`, `quote()` and `upgrade_draft()` asks for HDR
+output. Only some models support it, and only at some resolutions: the API
+answers anything else with a 400. The catalog says which, on
+`model.model_spec.constraints.supports_hdr` and `.hdr_resolutions`, and on
+`(await client.models.get_capabilities(model_id)).supports_hdr`. HDR adds a per
+output second surcharge that `/models` does not publish, so quote it:
+
+```python
+result = await client.models.resolve_cheapest_video(hdr=True, video_type="text-to-video")
+# HDR models only, each quoted with hdr=True at its lowest HDR resolution
+job = await client.video.submit(model=result.model, prompt="...", **result.request_params)
+
+model = await client.models.resolve_video(require_hdr=True, require_resolution="4k")
+```
+
+Pass `resolution=` to `resolve_cheapest_video` (or `require_resolution=` to
+`resolve_video`) to pin a tier; it must be one of the model's HDR resolutions.
+On the CLI: `venice-py video generate ... --hdr` and
+`venice-py models resolve --type cheapest-video --hdr`.
 
 ## Drafts (Seedance 2.5)
 

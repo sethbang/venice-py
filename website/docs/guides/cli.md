@@ -716,6 +716,7 @@ venice-py video generate <PROMPT> [OPTIONS]
 | `--aspect-ratio` | | `16:9` | Aspect ratio (e.g., `16:9`, `9:16`, `1:1`) |
 | `--negative-prompt` | | — | Content to avoid in the video |
 | `--audio / --no-audio` | | — | Generate audio if the model supports it (omitted from the request unless set) |
+| `--hdr / --no-hdr` | | — | Generate HDR output on models and resolutions that support it (omitted from the request unless set) |
 | `--reference-image-urls` | | — | Reference image URL for character/style consistency (repeatable, up to 30) |
 | `--reference-video-urls` | | — | Reference video URL for R2V models (repeatable, up to 10) |
 | `--reference-audio-urls` | | — | Reference audio donor URL for R2V models (repeatable, up to 10) |
@@ -766,6 +767,7 @@ venice-py video from-image <INPUT_FILE> [OPTIONS]
 | `--duration` | | `5s` | Duration (e.g., `5s`, `10s`) |
 | `--resolution` | | — | Output resolution |
 | `--audio / --no-audio` | | — | Generate audio if the model supports it (omitted from the request unless set) |
+| `--hdr / --no-hdr` | | — | Generate HDR output on models and resolutions that support it (omitted from the request unless set) |
 | `--reference-image-urls` | | — | Reference image URL for character/style consistency (repeatable, up to 30) |
 | `--reference-video-urls` | | — | Reference video URL for R2V models (repeatable, up to 10) |
 | `--reference-audio-urls` | | — | Reference audio donor URL for R2V models (repeatable, up to 10) |
@@ -1151,11 +1153,15 @@ venice-py models resolve --type music --music-only --force-instrumental
 `--type cheapest-video` quotes every candidate (free `POST /video/quote`
 calls) at its own shortest duration and lowest resolution, silent where
 audio is configurable, and prints the winner with the parameters it was
-quoted with. `--duration` and `--resolution` pin a value instead.
+quoted with. `--duration` and `--resolution` pin a value instead. `--hdr`
+keeps only models that support HDR and quotes each with HDR on, at its lowest
+HDR resolution (a pinned `--resolution` must be an HDR one). With
+`--type video`, `--hdr` filters the same way without quoting.
 
 ```bash
 venice-py models resolve --type cheapest-video --video-type text-to-video
 venice-py models resolve --type cheapest-video --duration 5s --json
+venice-py models resolve --type cheapest-video --hdr --resolution 4k
 ```
 
 ### `venice-py models get`

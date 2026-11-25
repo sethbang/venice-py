@@ -547,6 +547,25 @@ class TestResolvePreferAndNewFilters:
         payload = json.loads(echo.call_args[0][0])
         assert payload["request_params"] == {"duration_seconds": "4s"}
 
+    @pytest.mark.parametrize("hdr", [True, False])
+    def test_hdr_flag_parsed(self, hdr):
+        from venice_ai.cli.cli import cli
+
+        argv = ["models", "resolve", "--type", "video", *(["--hdr"] if hdr else [])]
+        with patch(
+            "venice_ai.cli.commands.models.resolve._resolve_async", new_callable=AsyncMock
+        ) as mock_async:
+            result = CliRunner().invoke(cli, argv)
+        assert result.exit_code == 0, result.output
+        assert mock_async.await_args.kwargs["hdr"] is hdr
+
+    @pytest.mark.asyncio
+    async def test_hdr_forwarded(self):
+        client, _ = await _run_resolve("video", hdr=True)
+        assert client.models.resolve.await_args.kwargs["require_hdr"] is True
+        client, _ = await _run_resolve("cheapest-video", hdr=True)
+        assert client.models.resolve_cheapest_video.await_args.kwargs["hdr"] is True
+
     @pytest.mark.asyncio
     async def test_input_mode_forwarded(self):
         client, _ = await _run_resolve("video", input_mode="reference")
