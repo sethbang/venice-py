@@ -33,6 +33,7 @@ model_id: str = await client.models.resolve(
     min_duration=None,                   # e.g. "5s", "10s"
     require_duration=None,               # exact: 5 | "5" | "5s"
     require_audio_configurable=False,
+    require_hdr=False,                   # accepts hdr=True (at require_resolution, if given)
     # Image / inpaint / video tiers
     require_quality=None,                # image and inpaint: e.g. "high"
     require_resolution=None,             # inpaint and video: e.g. "2K", "720p"
@@ -188,6 +189,7 @@ model = await client.models.resolve_video(
     require_duration=None,               # exact: must be in constraints.durations
     require_resolution=None,             # exact: must be in constraints.resolutions
     require_audio_configurable=False,    # accepts an explicit audio=True/False
+    require_hdr=False,                   # accepts hdr=True; a required resolution must be an HDR one
     preferred_models=None,
     exclude_models=None,
     exclude_beta=True,
@@ -278,6 +280,7 @@ result = await client.models.resolve_cheapest_video(
     audio=False,                         # sent where configurable; True also requires audio; None = model default
     aspect_ratio=None,                   # None prefers 16:9
     require_audio_configurable=False,
+    hdr=False,                           # True: HDR models only, quoted with hdr=True at an HDR resolution
     exclude_models=None,
     exclude_beta=True,
     max_concurrency=8,                   # quote requests in flight; no extra retries beyond the client's policy
@@ -364,6 +367,7 @@ If neither preferred model is available (deprecation, region restrictions, etc.)
 | `require_force_instrumental` (music only) | Model supports `force_instrumental` | Instrumental tracks |
 | `require_audio` (video only) | Video model includes audio track | Cinematic outputs |
 | `require_audio_configurable` (video only) | Video model accepts an explicit `audio=True/False` | Silent clips |
+| `require_hdr` (video only) | Constraints set `supportsHdr`; `require_resolution` / `min_resolution` are checked against `hdrResolutions` | `video.submit(hdr=True, resolution="4k")` |
 | `min_resolution` (video only) | Video model supports ≥ this resolution | High-quality video output |
 | `require_resolution` (inpaint, video) | Tier is listed in `constraints.resolutions` | `edit(resolution="2K")`, `video.create(resolution="720p")` |
 | `require_duration` (video only) | Exact duration is listed in `constraints.durations` | `duration_seconds=5` |

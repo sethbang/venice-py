@@ -328,6 +328,12 @@ def _determine_output_path(output: str | None, save_dir: str, ext: str = "mp4") 
     help="Generate audio if the model supports it (omitted unless set)",
 )
 @click.option(
+    "--hdr/--no-hdr",
+    "hdr",
+    default=None,
+    help="Generate HDR output on models and resolutions that support it (omitted unless set)",
+)
+@click.option(
     "--reference-image-urls",
     multiple=True,
     help="Reference image URL for character/style consistency (repeatable, up to 30)",
@@ -382,6 +388,7 @@ def generate(
     aspect_ratio,
     negative_prompt,
     audio,
+    hdr,
     reference_image_urls,
     reference_video_urls,
     reference_audio_urls,
@@ -417,6 +424,7 @@ def generate(
             no_poll=no_poll,
             auto_open=auto_open,
             audio=audio,
+            hdr=hdr,
             reference_image_urls=reference_image_urls,
             reference_video_urls=reference_video_urls,
             reference_audio_urls=reference_audio_urls,
@@ -439,6 +447,7 @@ async def _generate_async(
     no_poll,
     auto_open,
     audio=None,
+    hdr=None,
     reference_image_urls=None,
     reference_video_urls=None,
     reference_audio_urls=None,
@@ -475,6 +484,8 @@ async def _generate_async(
             queue_kwargs["negative_prompt"] = negative_prompt
         if audio is not None:
             queue_kwargs["audio"] = audio
+        if hdr is not None:
+            queue_kwargs["hdr"] = hdr
         if reference_image_urls:
             queue_kwargs["reference_image_urls"] = list(reference_image_urls)
         if reference_video_urls:
@@ -550,6 +561,12 @@ async def _generate_async(
     help="Generate audio if the model supports it (omitted unless set)",
 )
 @click.option(
+    "--hdr/--no-hdr",
+    "hdr",
+    default=None,
+    help="Generate HDR output on models and resolutions that support it (omitted unless set)",
+)
+@click.option(
     "--reference-image-urls",
     multiple=True,
     help="Reference image URL for character/style consistency (repeatable, up to 30)",
@@ -612,6 +629,7 @@ def from_image(
     duration,
     resolution,
     audio,
+    hdr,
     reference_image_urls,
     reference_video_urls,
     reference_audio_urls,
@@ -654,6 +672,7 @@ def from_image(
             no_poll=no_poll,
             auto_open=auto_open,
             audio=audio,
+            hdr=hdr,
             reference_image_urls=reference_image_urls,
             reference_video_urls=reference_video_urls,
             reference_audio_urls=reference_audio_urls,
@@ -676,6 +695,7 @@ async def _from_image_async(
     no_poll,
     auto_open,
     audio=None,
+    hdr=None,
     reference_image_urls=None,
     reference_video_urls=None,
     reference_audio_urls=None,
@@ -716,6 +736,8 @@ async def _from_image_async(
             queue_kwargs["resolution"] = resolution
         if audio is not None:
             queue_kwargs["audio"] = audio
+        if hdr is not None:
+            queue_kwargs["hdr"] = hdr
         if reference_image_urls:
             queue_kwargs["reference_image_urls"] = list(reference_image_urls)
         if reference_video_urls:

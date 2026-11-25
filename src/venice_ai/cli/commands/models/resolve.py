@@ -125,6 +125,11 @@ _TYPE_CHOICES = [
     is_flag=True,
     help="Require models that accept an explicit audio on/off (video, cheapest-video).",
 )
+@click.option(
+    "--hdr",
+    is_flag=True,
+    help="Require HDR support (video). For cheapest-video, also quote with HDR on.",
+)
 @click.option("--min-resolution", default=None, help="Minimum video resolution (e.g. 720p).")
 @click.option("--min-duration", default=None, help="Minimum video duration (e.g. 5s).")
 # cheapest-video extras
@@ -193,6 +198,7 @@ def resolve(
     input_mode: str | None,
     audio: bool,
     audio_configurable: bool,
+    hdr: bool,
     min_resolution: str | None,
     min_duration: str | None,
     duration: str | None,
@@ -214,6 +220,7 @@ def resolve(
       venice-py models resolve --type chat --function-calling --prefer cheapest
       venice-py models resolve --type chat --exclude-e2ee
       venice-py models resolve --type video --audio --min-resolution 720p
+      venice-py models resolve --type cheapest-video --hdr --resolution 1080p
       venice-py models resolve --type image --transparent-background
       venice-py models resolve --type cheapest-video --video-type text-to-video
       venice-py models resolve --type cheapest-music --duration 10
@@ -246,6 +253,7 @@ def resolve(
             input_mode=input_mode.lower() if input_mode else None,
             audio=audio,
             audio_configurable=audio_configurable,
+            hdr=hdr,
             min_resolution=min_resolution,
             min_duration=min_duration,
             duration=duration,
@@ -296,6 +304,7 @@ async def _resolve_async(
     force_instrumental: bool = False,
     audio_configurable: bool = False,
     input_mode: str | None = None,
+    hdr: bool = False,
 ) -> None:
     from venice_ai import VeniceClient
 
@@ -313,6 +322,7 @@ async def _resolve_async(
                 audio=audio,
                 aspect_ratio=aspect_ratio,
                 require_audio_configurable=audio_configurable,
+                hdr=hdr,
                 exclude_models=exclude_models,
                 exclude_beta=exclude_beta,
             )
@@ -375,6 +385,7 @@ async def _resolve_async(
                 min_resolution=min_resolution,
                 min_duration=min_duration,
                 require_audio_configurable=audio_configurable,
+                require_hdr=hdr,
             )
         elif model_type == "image":
             kwargs.update(

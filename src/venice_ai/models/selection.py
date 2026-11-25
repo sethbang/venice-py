@@ -695,6 +695,18 @@ def _video_constraints(model_data: dict[str, Any]) -> dict[str, Any]:
     return constraints if isinstance(constraints, dict) else {}
 
 
+def _hdr_support(constraints: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """Whether a video model accepts ``hdr``, and the resolutions that do.
+
+    Reads the wire keys (``supportsHdr`` / ``hdrResolutions``) and falls back
+    to the Python field names, so a dict from either spelling works.
+    """
+    supported = constraints.get("supportsHdr", constraints.get("supports_hdr")) is True
+    listed = constraints.get("hdrResolutions", constraints.get("hdr_resolutions"))
+    resolutions = [r for r in listed if isinstance(r, str)] if isinstance(listed, list) else []
+    return supported, resolutions
+
+
 def _fixed_duration_seconds(tier: Any) -> int | None:
     """``"4s"`` / ``"4"`` -> ``4``; ``None`` for non-numeric tiers such as ``"Auto"``."""
     if not isinstance(tier, str):
@@ -710,6 +722,7 @@ def cheapest_video_params(
     resolution: str | None = None,
     aspect_ratio: str | None = None,
     audio: bool | None = False,
+    hdr: bool = False,
 ) -> dict[str, Any]:
     """Return the cheapest valid ``video.quote`` / ``video.submit`` arguments for a model.
 
@@ -726,6 +739,8 @@ def cheapest_video_params(
     - ``audio``: *audio*, sent only when the model's ``audio_configurable`` is
       set. ``False`` (default) asks for the cheaper silent clip; ``None``
       leaves it to the model.
+    - ``hdr``: ``True`` only when *hdr* is set. The resolution is then picked
+      from the model's HDR resolutions.
 
     Args:
         constraints: A :class:`~venice_ai.types.api.models.VideoModelConstraints`
@@ -734,11 +749,14 @@ def cheapest_video_params(
         resolution: Resolution tier to use instead of the lowest.
         aspect_ratio: Aspect ratio to use instead of the 16:9 preference.
         audio: Audio setting for models that make it configurable.
+        hdr: Ask for HDR output, at the lowest HDR resolution unless
+            *resolution* is given.
 
     Raises:
         ValueError: If the model lists no fixed duration, or does not list a
-            requested *duration*, *resolution* or *aspect_ratio*, or cannot
-            produce audio when ``audio=True``.
+            requested *duration*, *resolution* or *aspect_ratio*, cannot
+            produce audio when ``audio=True``, or cannot produce HDR (at
+            *resolution*, when given) when ``hdr=True``.
     """
     data: Mapping[str, Any] = (
         constraints.model_dump() if isinstance(constraints, VideoModelConstraints) else constraints
@@ -758,6 +776,21 @@ def cheapest_video_params(
         raise ValueError(f"no fixed durations listed: {data.get('durations')}")
 
     resolutions = [r for r in data.get("resolutions") or [] if isinstance(r, str)]
+    if hdr:
+        supports_hdr, hdr_resolutions = _hdr_support(data)
+        if not supports_hdr:
+            raise ValueError("model does not support HDR")
+        if not hdr_resolutions:
+            raise ValueError("model lists no HDR resolutions")
+        if resolution is not None and not _offers(hdr_resolutions, resolution):
+            raise ValueError(
+                f"resolution {resolution!r} does not support HDR; HDR resolutions: "
+                f"{hdr_resolutions}"
+            )
+        # Keep the catalog's spelling of each tier where it lists one.
+        listed = {r.strip().lower(): r for r in resolutions}
+        resolutions = [listed.get(r.strip().lower(), r) for r in hdr_resolutions]
+        params["hdr"] = True
     if resolution is not None:
         match = [r for r in resolutions if r.strip().lower() == resolution.strip().lower()]
         if not match:
@@ -838,6 +871,7 @@ def _filter_video_candidates(
     require_duration: int | str | None = None,
     require_resolution: str | None = None,
     require_audio_configurable: bool = False,
+    require_hdr: bool = False,
     exclude_beta: bool = False,
     input_mode: VideoInputMode | None = None,
 ) -> list[str]:
@@ -900,6 +934,17 @@ def _filter_video_candidates(
         # Filter by whether audio can be switched on/off per request
         if require_audio_configurable and not constraints.get("audio_configurable", False):
             continue
+
+        # Filter by HDR support. A resolution asked for must accept HDR too,
+        # since the API answers hdr=True at any other resolution with a 400.
+        if require_hdr:
+            supports_hdr, hdr_resolutions = _hdr_support(constraints)
+            if not supports_hdr:
+                continue
+            if require_resolution is not None and not _offers(hdr_resolutions, require_resolution):
+                continue
+            if min_resolution and not _meets_resolution(hdr_resolutions, min_resolution):
+                continue
 
         # Filter by beta status
         if exclude_beta and model_data.get("beta", False):
@@ -1132,6 +1177,8 @@ class DynamicModelSelector:
                                         "audio",
                                         "audio_configurable",
                                         "video_input",
+                                        "supports_hdr",
+                                        "hdr_resolutions",
                                         "promptCharacterLimit",
                                         "steps",
                                         "widthHeightDivisor",
@@ -2095,6 +2142,7 @@ class DynamicModelSelector:
         require_resolution: str | None = None,
         require_audio_configurable: bool = False,
         input_mode: VideoInputMode | None = None,
+        require_hdr: bool = False,
     ) -> str:
         """
         Select a suitable video generation model.
@@ -2124,6 +2172,9 @@ class DynamicModelSelector:
                 :data:`VideoInputMode` and :func:`video_input_mode`), e.g.
                 ``"reference"`` for reference-to-video. Implies
                 ``model_type="image-to-video"``.
+            require_hdr: If True, only select models that accept ``hdr=True``.
+                With *require_resolution* or *min_resolution*, the resolution
+                must also be one of the model's HDR resolutions.
 
         Returns:
             Selected model ID
@@ -2154,6 +2205,7 @@ class DynamicModelSelector:
             require_duration=require_duration,
             require_resolution=require_resolution,
             require_audio_configurable=require_audio_configurable,
+            require_hdr=require_hdr,
             exclude_beta=exclude_beta,
             input_mode=input_mode,
         )
@@ -2169,6 +2221,7 @@ class DynamicModelSelector:
                 f"require_duration={exact_duration!r}, "
                 f"require_resolution={require_resolution!r}, "
                 f"require_audio_configurable={require_audio_configurable}, "
+                f"require_hdr={require_hdr}, "
                 f"exclude_beta={exclude_beta}, input_mode={input_mode!r}",
                 resource_type="video",
             )
@@ -2209,6 +2262,7 @@ class DynamicModelSelector:
         exclude_beta: bool = True,
         max_concurrency: int = 8,
         input_mode: VideoInputMode | None = None,
+        hdr: bool = False,
     ) -> CheapestVideoResult:
         """
         Select the cheapest video model by quoting every viable candidate.
@@ -2246,6 +2300,10 @@ class DynamicModelSelector:
                 ``False`` (default) quotes the silent, cheaper variant;
                 ``True`` also requires audio support; ``None`` omits the
                 parameter so each model uses its own default.
+            hdr: Quote HDR output. Only models that accept ``hdr`` are
+                considered, each quoted at its lowest HDR resolution (or at
+                *resolution*, which must then accept HDR), so the ranking
+                includes the HDR surcharge.
             aspect_ratio: Aspect ratio to quote; models listing other ratios
                 only are filtered out. ``None`` prefers 16:9.
             require_audio: Only consider models that support audio.
@@ -2304,6 +2362,7 @@ class DynamicModelSelector:
             require_duration=duration,
             require_resolution=resolution,
             require_audio_configurable=require_audio_configurable,
+            require_hdr=hdr,
             exclude_beta=exclude_beta,
             input_mode=input_mode,
         )
@@ -2332,6 +2391,7 @@ class DynamicModelSelector:
                 f"duration={duration!r}, resolution={resolution!r}, "
                 f"aspect_ratio={aspect_ratio!r}, "
                 f"require_audio_configurable={require_audio_configurable}, "
+                f"hdr={hdr}, "
                 f"exclude_beta={exclude_beta}",
                 resource_type="video",
             )
@@ -2347,6 +2407,7 @@ class DynamicModelSelector:
                     resolution=resolution,
                     aspect_ratio=aspect_ratio,
                     audio=audio,
+                    hdr=hdr,
                 )
             except ValueError as exc:
                 skipped[mid] = str(exc)
@@ -2357,7 +2418,7 @@ class DynamicModelSelector:
             raise NoMatchingModelError(
                 f"None of the {len(filtered)} candidate video models can serve "
                 f"duration={duration!r}, resolution={resolution!r}, "
-                f"aspect_ratio={aspect_ratio!r}, audio={audio}. Skipped: {skipped}",
+                f"aspect_ratio={aspect_ratio!r}, audio={audio}, hdr={hdr}. Skipped: {skipped}",
                 resource_type="video",
                 skipped=skipped,
             )

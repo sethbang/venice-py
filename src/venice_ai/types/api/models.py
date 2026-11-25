@@ -315,14 +315,19 @@ class VideoModelConstraints(BaseModel):
         audio: Whether the model supports audio generation
         audio_configurable: Whether audio can be toggled on/off
         video_input: Whether model accepts video input
+        supports_hdr: Whether the model accepts ``hdr`` (wire key ``supportsHdr``)
+        hdr_resolutions: Resolutions that accept ``hdr`` (wire key ``hdrResolutions``)
 
     ``extra='allow'`` preserves live constraint keys not yet modeled (e.g.
     ``prompt_character_limit``, a real swagger field the class does not
     explicitly declare, and any other server-side keys observed on video
     models) on ``model_extra`` instead of dropping them.
+
+    The HDR fields take their Python names or their wire keys, and
+    ``model_dump()`` writes the wire keys, as the API sends them.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", populate_by_name=True, serialize_by_alias=True)
 
     model_type: str = Field(
         ...,
@@ -354,6 +359,19 @@ class VideoModelConstraints(BaseModel):
             "Whether each entry of ``image_references`` / ``video_references`` can "
             "carry its own ``audio_url`` voice."
         ),
+    )
+    supports_hdr: bool | None = Field(
+        default=None,
+        alias="supportsHdr",
+        description=(
+            "Whether ``submit`` / ``quote`` accept ``hdr=True``. Absent (None) on "
+            "models without HDR. The HDR rate is not published here; use ``quote``."
+        ),
+    )
+    hdr_resolutions: list[str] | None = Field(
+        default=None,
+        alias="hdrResolutions",
+        description="Resolutions that accept ``hdr=True``. Present when ``supports_hdr`` is.",
     )
 
 

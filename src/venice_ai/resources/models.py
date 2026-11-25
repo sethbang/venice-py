@@ -457,6 +457,8 @@ class Models(APIResource["VeniceClient"]):
                 resolutions=builtins.list(constraints.resolutions),
                 durations=builtins.list(constraints.durations),
                 aspect_ratios=builtins.list(constraints.aspect_ratios),
+                supports_hdr=bool(constraints.supports_hdr),
+                hdr_resolutions=builtins.list(constraints.hdr_resolutions or ()),
             )
 
         if entry.type == "inpaint":
@@ -512,6 +514,7 @@ class Models(APIResource["VeniceClient"]):
         min_duration: str | None = None,
         require_duration: int | str | None = None,
         require_audio_configurable: bool = False,
+        require_hdr: bool = False,
         # Image / inpaint / video tiers
         require_quality: str | None = None,
         require_resolution: str | None = None,
@@ -596,6 +599,10 @@ class Models(APIResource["VeniceClient"]):
             (``5``, ``"5"`` or ``"5s"``); a model offering only longer clips is rejected.
         :param require_audio_configurable: Video only. Only consider models that
             accept an explicit ``audio=True/False`` (``audio_configurable``).
+        :param require_hdr: Video only. Only consider models that accept
+            ``hdr=True`` (``supports_hdr``). With ``require_resolution`` or
+            ``min_resolution``, that resolution must accept HDR as well. With
+            ``prefer="cheapest"``, models are quoted with HDR on.
         :param require_quality: Image and inpaint. Quality tier the model must list
             in its ``qualities`` constraint (e.g. ``"high"``).
         :param require_resolution: Inpaint and video. Resolution tier the model
@@ -673,6 +680,7 @@ class Models(APIResource["VeniceClient"]):
                     require_duration=require_duration,
                     require_resolution=require_resolution,
                     require_audio_configurable=require_audio_configurable,
+                    require_hdr=require_hdr,
                     preferred_models=preferred_models,
                     exclude_models=exclude_models,
                     exclude_beta=exclude_beta,
@@ -740,6 +748,7 @@ class Models(APIResource["VeniceClient"]):
                     require_duration=require_duration,
                     require_resolution=require_resolution,
                     require_audio_configurable=require_audio_configurable,
+                    require_hdr=require_hdr,
                     preferred_models=preferred_models,
                     exclude_models=exclude_set,
                     selector=strategy,
@@ -802,6 +811,7 @@ class Models(APIResource["VeniceClient"]):
         exclude_beta: bool = True,
         max_concurrency: int = 8,
         input_mode: VideoInputMode | None = None,
+        hdr: bool = False,
     ) -> CheapestVideoResult:
         """Resolve the cheapest video model by quoting every candidate.
 
@@ -826,6 +836,10 @@ class Models(APIResource["VeniceClient"]):
         :param audio: Sent to models with configurable audio. ``False`` (default)
             quotes the silent variant, ``True`` also requires audio support,
             ``None`` lets each model use its default.
+        :param hdr: Quote HDR output. Only models that accept ``hdr`` are
+            considered, each at its lowest HDR resolution (or at ``resolution``,
+            which must then accept HDR), so the ranking includes the HDR
+            surcharge and ``request_params`` carries ``hdr=True``.
         :param aspect_ratio: Aspect ratio to quote. ``None`` prefers 16:9.
         :param require_audio: Only consider models that support audio.
         :param require_audio_configurable: Only consider models that accept an
@@ -860,6 +874,7 @@ class Models(APIResource["VeniceClient"]):
             exclude_beta=exclude_beta,
             max_concurrency=max_concurrency,
             input_mode=input_mode,
+            hdr=hdr,
         )
 
     async def resolve_cheapest_music(
@@ -952,6 +967,7 @@ class Models(APIResource["VeniceClient"]):
         require_duration: int | str | None,
         require_resolution: str | None,
         require_audio_configurable: bool,
+        require_hdr: bool,
         preferred_models: builtins.list[str] | None,
         exclude_models: builtins.list[str] | None,
         exclude_beta: bool,
@@ -970,6 +986,7 @@ class Models(APIResource["VeniceClient"]):
                 require_duration=require_duration,
                 require_resolution=require_resolution,
                 require_audio_configurable=require_audio_configurable,
+                require_hdr=require_hdr,
                 preferred_models=preferred_models,
                 exclude_models=exclude_set,
                 exclude_beta=exclude_beta,
@@ -984,6 +1001,7 @@ class Models(APIResource["VeniceClient"]):
             audio=require_audio,
             require_audio=require_audio,
             require_audio_configurable=require_audio_configurable,
+            hdr=require_hdr,
             min_resolution=min_resolution,
             min_duration=min_duration,
             exclude_models=exclude_set,
@@ -1135,6 +1153,7 @@ class Models(APIResource["VeniceClient"]):
         require_duration: int | str | None = None,
         require_resolution: str | None = None,
         require_audio_configurable: bool = False,
+        require_hdr: bool = False,
         preferred_models: builtins.list[str] | None = None,
         exclude_models: builtins.list[str] | None = None,
         exclude_beta: bool = True,
@@ -1156,6 +1175,8 @@ class Models(APIResource["VeniceClient"]):
             (e.g. ``"720p"``; case-insensitive).
         :param require_audio_configurable: Only consider models that accept an
             explicit ``audio=True/False`` (``audio_configurable``).
+        :param require_hdr: Only consider models that accept ``hdr=True``; see
+            :meth:`resolve`.
         :param preferred_models: Preferred model IDs in priority order.
         :param exclude_models: Model IDs to exclude.
         :param exclude_beta: Exclude beta models (default ``True``).
@@ -1172,6 +1193,7 @@ class Models(APIResource["VeniceClient"]):
             require_duration=require_duration,
             require_resolution=require_resolution,
             require_audio_configurable=require_audio_configurable,
+            require_hdr=require_hdr,
             preferred_models=preferred_models,
             exclude_models=exclude_models,
             exclude_beta=exclude_beta,

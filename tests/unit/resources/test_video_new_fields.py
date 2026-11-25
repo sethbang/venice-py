@@ -321,3 +321,64 @@ async def test_queue_rejects_out_of_range_enhancement_value(video_resource: Vide
             duration_seconds=5,
             grain=0.5,  # spec caps grain at 0.1
         )
+
+
+# ---------------------------------------------------------------------------
+# hdr — on /video/queue and /video/quote.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hdr", [True, False])
+async def test_queue_forwards_hdr(video_resource: Video, hdr: bool) -> None:
+    post = _post_mock(video_resource)
+    await video_resource.submit(
+        model="fake-hdr-video", prompt="A neon city", duration_seconds=5, hdr=hdr
+    )
+    assert post.call_args[1]["json_data"]["hdr"] is hdr
+
+
+@pytest.mark.asyncio
+async def test_image_to_video_forwards_hdr(video_resource: Video) -> None:
+    post = _post_mock(video_resource)
+    await video_resource.submit(
+        model="fake-hdr-video",
+        prompt="Animate it",
+        duration_seconds=5,
+        image_url="https://example.com/still.png",
+        hdr=True,
+    )
+    assert post.call_args[1]["json_data"]["hdr"] is True
+
+
+@pytest.mark.asyncio
+async def test_queue_omits_hdr_when_unset(video_resource: Video) -> None:
+    post = _post_mock(video_resource)
+    await video_resource.submit(model="fake-hdr-video", prompt="A neon city", duration_seconds=5)
+    assert "hdr" not in post.call_args[1]["json_data"]
+
+
+@pytest.mark.asyncio
+async def test_run_forwards_hdr(video_resource: Video) -> None:
+    post = _post_mock(video_resource)
+    await video_resource.run(
+        model="fake-hdr-video", prompt="A neon city", duration_seconds=5, hdr=True
+    )
+    assert post.call_args[1]["json_data"]["hdr"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hdr", [True, False])
+async def test_quote_forwards_hdr(video_resource: Video, hdr: bool) -> None:
+    post = _post_mock(video_resource)
+    post.return_value = VideoQuoteResponse(quote=1.23)
+    await video_resource.quote(model="fake-hdr-video", duration_seconds=5, hdr=hdr)
+    assert post.call_args[1]["json_data"]["hdr"] is hdr
+
+
+@pytest.mark.asyncio
+async def test_quote_omits_hdr_when_unset(video_resource: Video) -> None:
+    post = _post_mock(video_resource)
+    post.return_value = VideoQuoteResponse(quote=1.23)
+    await video_resource.quote(model="fake-hdr-video", duration_seconds=5)
+    assert "hdr" not in post.call_args[1]["json_data"]

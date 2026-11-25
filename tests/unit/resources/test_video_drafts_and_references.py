@@ -176,6 +176,18 @@ class TestUpgradeDraft:
             "duration": "5s",
         }
 
+    @pytest.mark.asyncio
+    async def test_hdr_is_forwarded_and_omitted_unless_set(self) -> None:
+        client = _video_client()
+        await Video(client).upgrade_draft(
+            model=MODEL, draft_task_id=DRAFT_ID, prompt="p", duration_seconds=5, hdr=True
+        )
+        assert _body(client)["hdr"] is True
+        await Video(client).upgrade_draft(
+            model=MODEL, draft_task_id=DRAFT_ID, prompt="p", duration_seconds=5
+        )
+        assert "hdr" not in _body(client)
+
     def test_media_inputs_are_not_parameters(self) -> None:
         """The upgrade follows the draft, so it takes no image or video input."""
         params = inspect.signature(Video.upgrade_draft).parameters

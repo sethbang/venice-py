@@ -127,6 +127,8 @@ class VideoCapabilities(BaseModel):
     resolutions: list[str] = Field(default_factory=list)
     durations: list[str] = Field(default_factory=list)
     aspect_ratios: list[str] = Field(default_factory=list)
+    supports_hdr: bool = False
+    hdr_resolutions: list[str] = Field(default_factory=list)
 
 
 class InpaintCapabilities(BaseModel):
