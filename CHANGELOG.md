@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-11-24
+
+HDR video: generate it, quote it, and find the models that support it. Nothing is removed and nothing existing changes behavior. See **Added**.
+
 ### Added
 
 - **`hdr` on video generation and quotes.** `video.submit()`, `video.run()`, `video.upgrade_draft()` and `video.quote()` accept `hdr=True` to generate, or price, HDR output. The API returns 400 when the model does not support HDR or the resolution is not one of its HDR resolutions, and the quote includes the per output second HDR surcharge. `venice-py video generate` and `video from-image` take `--hdr/--no-hdr`; without `--model` or a saved default, `--hdr` picks a model that supports HDR, at `--resolution` when given. Left unset, nothing is sent.
@@ -1500,7 +1504,7 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.12.0...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.15.0...HEAD
 [2.12.0]: https://github.com/sethbang/venice-py/compare/v2.11.0...v2.12.0
 [2.11.0]: https://github.com/sethbang/venice-py/compare/v2.10.0...v2.11.0
 [2.10.0]: https://github.com/sethbang/venice-py/compare/v2.9.0...v2.10.0
