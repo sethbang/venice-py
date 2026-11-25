@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-11-24
+
+HDR video: generate it, quote it, and find the models that support it. Nothing is removed and nothing existing changes behavior. See **Added**.
+
 ### Added
 
-- **`hdr` on video generation and quotes.** `video.submit()`, `video.run()`, `video.upgrade_draft()` and `video.quote()` accept `hdr=True` to generate, or price, HDR output. The API returns 400 when the model does not support HDR or the resolution is not one of its HDR resolutions, and the quote includes the per output second HDR surcharge. `venice-py video generate` and `video from-image` take `--hdr/--no-hdr`. Left unset, nothing is sent.
+- **`hdr` on video generation and quotes.** `video.submit()`, `video.run()`, `video.upgrade_draft()` and `video.quote()` accept `hdr=True` to generate, or price, HDR output. The API returns 400 when the model does not support HDR or the resolution is not one of its HDR resolutions, and the quote includes the per output second HDR surcharge. `venice-py video generate` and `video from-image` take `--hdr/--no-hdr`; without `--model` or a saved default, `--hdr` picks a model that supports HDR, at `--resolution` when given. Left unset, nothing is sent.
 - **`VideoModelConstraints.supports_hdr` and `.hdr_resolutions`**, typed from the `supportsHdr` and `hdrResolutions` keys on `GET /models`, and `VideoCapabilities.supports_hdr` / `.hdr_resolutions` from `models.get_capabilities()`. `VideoModelConstraints` also accepts them by their Python names, and `model_dump()` writes them under the wire keys, as before.
 - **HDR in model selection.** `models.resolve(type="video", require_hdr=True)` and `resolve_video(require_hdr=True)` keep only models that accept `hdr`; a `require_resolution` or `min_resolution` must then be one of the model's HDR resolutions. `resolve_cheapest_video(hdr=True)`, and `resolve(..., require_hdr=True, prefer="cheapest")`, quote each HDR model with `hdr=True` at its lowest HDR resolution, so the ranking includes the HDR surcharge and `request_params` carries `hdr`. `cheapest_video_params(constraints, hdr=True)` builds that request for one model. `venice-py models resolve --hdr` does the same for `--type video` and `--type cheapest-video`.
 
@@ -1500,7 +1504,7 @@ _Initial public release. No retroactive release notes documented._
 
 **Note**: This changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format. For detailed technical information about any changes, please refer to the git commit history or the linked source files.
 
-[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.12.0...HEAD
+[Unreleased]: https://github.com/sethbang/venice-py/compare/v2.15.0...HEAD
 [2.12.0]: https://github.com/sethbang/venice-py/compare/v2.11.0...v2.12.0
 [2.11.0]: https://github.com/sethbang/venice-py/compare/v2.10.0...v2.11.0
 [2.10.0]: https://github.com/sethbang/venice-py/compare/v2.9.0...v2.10.0

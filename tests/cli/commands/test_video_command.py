@@ -2047,8 +2047,28 @@ class TestGenerateCLINewFlags:
     def test_cli_hdr_omitted_unless_set(self, tmp_path, command):
         assert "hdr" not in self._invoke_with(tmp_path, command, [])
 
+    @pytest.mark.parametrize(
+        ("command", "video_type"),
+        [("generate", "text-to-video"), ("from-image", "image-to-video")],
+    )
+    @pytest.mark.parametrize(
+        ("flags", "expected"),
+        [
+            (["--hdr"], {"require_hdr": True}),
+            (["--hdr", "--resolution", "4k"], {"require_hdr": True, "require_resolution": "4k"}),
+            (["--no-hdr"], {}),
+            ([], {}),
+        ],
+    )
+    def test_cli_hdr_default_model_supports_hdr(
+        self, tmp_path, command, video_type, flags, expected
+    ):
+        """Without --model, --hdr resolves a default that accepts hdr (at --resolution)."""
+        resolve_kwargs = self._invoke_with(tmp_path, command, flags, model=None)
+        assert resolve_kwargs == {"type": "video", "video_type": video_type, **expected}
+
     @staticmethod
-    def _invoke_with(tmp_path, command, flags):
+    def _invoke_with(tmp_path, command, flags, model="fake-hdr-video"):
         from venice_ai.cli.cli import cli
 
         mock_client = AsyncMock()
@@ -2065,12 +2085,15 @@ class TestGenerateCLINewFlags:
             patch("venice_ai.cli.config.ensure_api_key", return_value="test-key"),
             patch("os.makedirs"),
         ):
+            mock_client.models.resolve = AsyncMock(return_value="resolved-hdr-video")
             _setup_client_patch(MockClient, mock_client)
-            result = CliRunner().invoke(
-                cli, [*args, "--model", "fake-hdr-video", *flags, "--no-poll"]
-            )
+            model_args = ["--model", model] if model else []
+            result = CliRunner().invoke(cli, [*args, *model_args, *flags, "--no-poll"])
 
         assert result.exit_code == 0, result.output
+        if model is None:
+            assert mock_client.video.submit.call_args[1]["model"] == "resolved-hdr-video"
+            return mock_client.models.resolve.await_args.kwargs
         return mock_client.video.submit.call_args[1]
 
 

@@ -31,6 +31,7 @@ async def resolve_default_model(
     config: dict[str, Any],
     kind: str,
     explicit: str | None = None,
+    requirements: dict[str, Any] | None = None,
 ) -> str:
     """Resolve the model ID a CLI command should use.
 
@@ -44,6 +45,10 @@ async def resolve_default_model(
     :param kind: One of ``chat, image, tts, stt, embedding, decision, video_t2v,
         video_i2v``.
     :param explicit: A model ID the user passed via ``--model`` (or ``None``).
+    :param requirements: Extra ``client.models.resolve`` filters the request
+        needs (e.g. ``{"require_hdr": True}``). They narrow only the API
+        resolution: an explicit or saved model is the user's choice and is
+        used as is.
     """
     if explicit:
         return explicit
@@ -53,7 +58,7 @@ async def resolve_default_model(
         return configured
 
     try:
-        kwargs = _RESOLVE_KWARGS[kind]
+        kwargs = {**_RESOLVE_KWARGS[kind], **(requirements or {})}
     except KeyError as exc:
         raise ValueError(f"Unknown model kind: {kind!r}") from exc
 

@@ -716,7 +716,7 @@ venice-py video generate <PROMPT> [OPTIONS]
 | `--aspect-ratio` | | `16:9` | Aspect ratio (e.g., `16:9`, `9:16`, `1:1`) |
 | `--negative-prompt` | | — | Content to avoid in the video |
 | `--audio / --no-audio` | | — | Generate audio if the model supports it (omitted from the request unless set) |
-| `--hdr / --no-hdr` | | — | Generate HDR output on models and resolutions that support it (omitted from the request unless set) |
+| `--hdr / --no-hdr` | | — | Generate HDR output on models and resolutions that support it (omitted from the request unless set). Without `--model` or a saved default, `--hdr` picks a model that supports HDR, at `--resolution` when given |
 | `--reference-image-urls` | | — | Reference image URL for character/style consistency (repeatable, up to 30) |
 | `--reference-video-urls` | | — | Reference video URL for R2V models (repeatable, up to 10) |
 | `--reference-audio-urls` | | — | Reference audio donor URL for R2V models (repeatable, up to 10) |
@@ -767,7 +767,7 @@ venice-py video from-image <INPUT_FILE> [OPTIONS]
 | `--duration` | | `5s` | Duration (e.g., `5s`, `10s`) |
 | `--resolution` | | — | Output resolution |
 | `--audio / --no-audio` | | — | Generate audio if the model supports it (omitted from the request unless set) |
-| `--hdr / --no-hdr` | | — | Generate HDR output on models and resolutions that support it (omitted from the request unless set) |
+| `--hdr / --no-hdr` | | — | Generate HDR output on models and resolutions that support it (omitted from the request unless set). Without `--model` or a saved default, `--hdr` picks a model that supports HDR, at `--resolution` when given |
 | `--reference-image-urls` | | — | Reference image URL for character/style consistency (repeatable, up to 30) |
 | `--reference-video-urls` | | — | Reference video URL for R2V models (repeatable, up to 10) |
 | `--reference-audio-urls` | | — | Reference audio donor URL for R2V models (repeatable, up to 10) |

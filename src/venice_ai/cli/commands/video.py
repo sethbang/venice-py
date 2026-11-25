@@ -36,6 +36,20 @@ def video():
 # ---------------------------------------------------------------------------
 
 
+def _hdr_requirements(hdr: bool | None, resolution: str | None) -> dict[str, Any] | None:
+    """Filters a default video model needs to serve ``--hdr``, or ``None``.
+
+    The API answers ``hdr=True`` with a 400 on a model without HDR or at a
+    resolution it does not offer in HDR, so the default must support both.
+    """
+    if not hdr:
+        return None
+    requirements: dict[str, Any] = {"require_hdr": True}
+    if resolution:
+        requirements["require_resolution"] = resolution
+    return requirements
+
+
 async def _image_file_to_data_uri(path: str) -> str:
     """Read a local image file and return it as a base64 data URI."""
     file_path = Path(path)
@@ -464,7 +478,13 @@ async def _generate_async(
         enable_plain_mode()
 
     async with VeniceClient(**get_client_kwargs()) as client:
-        model = await resolve_default_model(client, config, "video_t2v", explicit=model)
+        model = await resolve_default_model(
+            client,
+            config,
+            "video_t2v",
+            explicit=model,
+            requirements=_hdr_requirements(hdr, resolution),
+        )
 
         OutputManager.info(f"Queuing video generation with {model}...")
         OutputManager.echo(f"Prompt: {prompt[:80]}{'...' if len(prompt) > 80 else ''}")
@@ -721,7 +741,13 @@ async def _from_image_async(
     image_url = await _image_file_to_data_uri(input_file)
 
     async with VeniceClient(**get_client_kwargs()) as client:
-        model = await resolve_default_model(client, config, "video_i2v", explicit=model)
+        model = await resolve_default_model(
+            client,
+            config,
+            "video_i2v",
+            explicit=model,
+            requirements=_hdr_requirements(hdr, resolution),
+        )
 
         OutputManager.info(f"Preparing image-to-video with {model}...")
         effective_prompt = prompt if prompt else "Animate this image with natural motion"
