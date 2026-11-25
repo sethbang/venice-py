@@ -14,9 +14,12 @@ Covers:
 - _status_async() - check video job status
 """
 
+import asyncio
 import base64
 import os
+import socket
 import stat
+import struct
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -2406,6 +2409,29 @@ async def _server(handler: Handler) -> AsyncIterator[str]:
         await runner.cleanup()
 
 
+@asynccontextmanager
+async def _resetting_host() -> AsyncIterator[str]:
+    """A host that resets every connection for as long as the block runs.
+
+    It keeps its port, so no other server can be handed it. A port freed by
+    shutting a server down gives no such guarantee: the OS can give it to the
+    next server that binds port 0, and a link to it then reaches that server.
+    """
+
+    def reset(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Linger 0 makes the close send a reset rather than a clean shutdown.
+        sock = writer.get_extra_info("socket")
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        writer.transport.abort()
+
+    server = await asyncio.start_server(reset, "127.0.0.1", 0)
+    try:
+        yield f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
 class _Storage:
     """A storage host: answers the given statuses in turn, then serves the file."""
 
@@ -2664,18 +2690,18 @@ class TestPollAndSaveDownloads:
     async def test_transport_failure_keeps_a_queue_only_link(
         self, video_home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        async with _server(_Storage(200)) as storage:
+        async with _resetting_host() as storage:
             dead_link = f"{storage}{LINK_TAIL}"
-        async with _server(_Api({"status": "COMPLETED"})) as api, _real_client(api) as client:
-            with pytest.raises(VeniceError):
-                await _poll_and_save(
-                    client,
-                    model="m",
-                    queue_id="q",
-                    output_path=str(tmp_path / "video.mp4"),
-                    plain=True,
-                    download_url=dead_link,
-                )
+            async with _server(_Api({"status": "COMPLETED"})) as api, _real_client(api) as client:
+                with pytest.raises(VeniceError):
+                    await _poll_and_save(
+                        client,
+                        model="m",
+                        queue_id="q",
+                        output_path=str(tmp_path / "video.mp4"),
+                        plain=True,
+                        download_url=dead_link,
+                    )
 
         out = capsys.readouterr()
         _assert_no_link(out.out, out.err)
