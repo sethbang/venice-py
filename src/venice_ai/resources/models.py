@@ -457,6 +457,8 @@ class Models(APIResource["VeniceClient"]):
                 resolutions=builtins.list(constraints.resolutions),
                 durations=builtins.list(constraints.durations),
                 aspect_ratios=builtins.list(constraints.aspect_ratios),
+                supports_hdr=bool(constraints.supports_hdr),
+                hdr_resolutions=builtins.list(constraints.hdr_resolutions or ()),
             )
 
         if entry.type == "inpaint":

@@ -568,6 +568,15 @@ class VideoRequestBase(BaseModel):
             "``/video/quote`` does not accept it."
         ),
     )
+    hdr: bool | None = Field(
+        default=None,
+        description=(
+            "Generate HDR output. The API defaults to false and returns 400 when "
+            "the model does not support HDR (``constraints.supports_hdr``) or the "
+            "resolution is not in ``constraints.hdr_resolutions``. Adds a per "
+            "output second surcharge; price it with ``/video/quote``."
+        ),
+    )
     consents: VideoConsents | None = Field(
         default=None,
         description=(
@@ -706,6 +715,14 @@ class VideoQuoteRequest(BaseModel):
     audio: bool | None = Field(
         default=None,
         description="Generate audio if the model supports it.",
+    )
+    hdr: bool | None = Field(
+        default=None,
+        description=(
+            "Quote HDR output, which adds a per output second surcharge (not "
+            "applied to input seconds). The API returns 400 when the model or "
+            "resolution does not support HDR."
+        ),
     )
     video_url: str | None = Field(
         default=None,

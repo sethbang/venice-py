@@ -736,6 +736,7 @@ class Video(APIResource["VeniceClient"]):
         target_fps: int | None = None,
         slowdown_factor: Literal[1, 2, 4, 8] | None = None,
         bitrate_mode: Literal["standard", "high"] | None = None,
+        hdr: bool | None = None,
         consents: VideoConsents | dict | None = None,
         draft: bool | None = None,
         draft_task_id: str | None = None,
@@ -837,6 +838,11 @@ class Video(APIResource["VeniceClient"]):
             Omitting it is equivalent to ``"standard"``. Does not affect price,
             and :meth:`quote` does not accept it.
         :type bitrate_mode: Optional[str]
+        :param hdr: Generate HDR output, on models whose
+            ``constraints.supports_hdr`` is true and at a resolution in
+            ``constraints.hdr_resolutions``; the API returns 400 otherwise.
+            Adds a per output second surcharge, which :meth:`quote` prices.
+        :type hdr: Optional[bool]
         :param image_references: Up to 30 reference images as
             :class:`~venice_ai.types.VideoImageReference` objects (or dicts),
             for when a reference needs a role (``"subject"`` or
@@ -940,6 +946,7 @@ class Video(APIResource["VeniceClient"]):
             "target_fps": target_fps,
             "slowdown_factor": slowdown_factor,
             "bitrate_mode": bitrate_mode,
+            "hdr": hdr,
             "consents": consents,
             "draft": draft,
             "draft_task_id": draft_task_id,
@@ -972,6 +979,7 @@ class Video(APIResource["VeniceClient"]):
         resolution: str | None = None,
         upscale_factor: Literal[1, 2, 4] | None = None,
         audio: bool | None = None,
+        hdr: bool | None = None,
         video_url: str | None = None,
         reference_video_total_duration: float | None = None,
         enhancement_model: str | None = None,
@@ -1003,6 +1011,9 @@ class Video(APIResource["VeniceClient"]):
         :param upscale_factor: For upscale models: ``1`` = quality enhancement,
             ``2`` = double resolution, ``4`` = quadruple.
         :param audio: Generate audio if the model supports it.
+        :param hdr: Quote HDR output, which adds a per output second
+            surcharge (input seconds are not surcharged). The API returns 400
+            when the model or resolution does not support HDR.
         :param video_url: Source video for video-to-video / upscale quotes
             (MP4/MOV/WebM — HTTP URL or ``data:`` URI).
         :param reference_video_total_duration: For R2V models (e.g. Seedance
@@ -1046,6 +1057,7 @@ class Video(APIResource["VeniceClient"]):
             resolution=resolution,
             upscale_factor=upscale_factor,
             audio=audio,
+            hdr=hdr,
             video_url=video_url,
             reference_video_total_duration=reference_video_total_duration,
             enhancement_model=enhancement_model,
@@ -1385,6 +1397,7 @@ class Video(APIResource["VeniceClient"]):
         target_fps: int | None = None,
         slowdown_factor: Literal[1, 2, 4, 8] | None = None,
         bitrate_mode: Literal["standard", "high"] | None = None,
+        hdr: bool | None = None,
         consents: VideoConsents | dict | None = None,
         draft: bool | None = None,
         draft_task_id: str | None = None,
@@ -1442,6 +1455,7 @@ class Video(APIResource["VeniceClient"]):
             target_fps=target_fps,
             slowdown_factor=slowdown_factor,
             bitrate_mode=bitrate_mode,
+            hdr=hdr,
             consents=consents,
             draft=draft,
             draft_task_id=draft_task_id,

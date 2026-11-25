@@ -2037,6 +2037,42 @@ class TestGenerateCLINewFlags:
         call_kwargs = mock_client.video.submit.call_args[1]
         assert call_kwargs["audio"] is False
 
+    @pytest.mark.parametrize(("flags", "expected"), [(["--hdr"], True), (["--no-hdr"], False)])
+    @pytest.mark.parametrize("command", ["generate", "from-image"])
+    def test_cli_hdr_flag_forwarded(self, tmp_path, command, flags, expected):
+        """--hdr / --no-hdr reach submit() as hdr=True / hdr=False."""
+        assert self._invoke_with(tmp_path, command, flags)["hdr"] is expected
+
+    @pytest.mark.parametrize("command", ["generate", "from-image"])
+    def test_cli_hdr_omitted_unless_set(self, tmp_path, command):
+        assert "hdr" not in self._invoke_with(tmp_path, command, [])
+
+    @staticmethod
+    def _invoke_with(tmp_path, command, flags):
+        from venice_ai.cli.cli import cli
+
+        mock_client = AsyncMock()
+        mock_client.video.submit = AsyncMock(return_value=_make_queue_response("job-hdr"))
+        if command == "generate":
+            args = ["video", "generate", "A sunset"]
+        else:
+            img = tmp_path / "still.png"
+            img.write_bytes(b"fake png data")
+            args = ["video", "from-image", str(img), "--prompt", "Animate it"]
+
+        with (
+            patch("venice_ai.VeniceClient") as MockClient,
+            patch("venice_ai.cli.config.ensure_api_key", return_value="test-key"),
+            patch("os.makedirs"),
+        ):
+            _setup_client_patch(MockClient, mock_client)
+            result = CliRunner().invoke(
+                cli, [*args, "--model", "fake-hdr-video", *flags, "--no-poll"]
+            )
+
+        assert result.exit_code == 0, result.output
+        return mock_client.video.submit.call_args[1]
+
 
 class TestFromImageAsyncNewFlags:
     """Tests for the new from-image() flags wired to submit()."""

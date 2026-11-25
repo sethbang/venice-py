@@ -261,6 +261,40 @@ class TestGetCapabilitiesVideo:
         assert caps.aspect_ratios == ["16:9", "9:16"]
 
     @pytest.mark.asyncio
+    async def test_hdr_constraints_parse_from_wire_keys(self):
+        constraints = VideoModelConstraints.model_validate(
+            {
+                "model_type": "text-to-video",
+                "resolutions": ["720p", "1080p", "4k"],
+                "supportsHdr": True,
+                "hdrResolutions": ["1080p", "4k"],
+            }
+        )
+        assert constraints.supports_hdr is True
+        assert constraints.hdr_resolutions == ["1080p", "4k"]
+        assert "supportsHdr" not in (constraints.model_extra or {})
+        resource, _ = _build_models(
+            _model(id="fake-test-video-hdr", type="video", constraints=constraints),
+        )
+        caps = await resource.get_capabilities("fake-test-video-hdr")
+        assert isinstance(caps, VideoCapabilities)
+        assert caps.supports_hdr is True
+        assert caps.hdr_resolutions == ["1080p", "4k"]
+
+    @pytest.mark.asyncio
+    async def test_hdr_absent_means_unsupported(self):
+        constraints = VideoModelConstraints(model_type="text-to-video")
+        assert constraints.supports_hdr is None
+        assert constraints.hdr_resolutions is None
+        resource, _ = _build_models(
+            _model(id="fake-test-video-sdr", type="video", constraints=constraints),
+        )
+        caps = await resource.get_capabilities("fake-test-video-sdr")
+        assert isinstance(caps, VideoCapabilities)
+        assert caps.supports_hdr is False
+        assert caps.hdr_resolutions == []
+
+    @pytest.mark.asyncio
     async def test_video_without_constraints_raises(self):
         resource, _ = _build_models(
             _model(id="fake-test-video-broken", type="video", constraints=None),

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`hdr` on video generation and quotes.** `video.submit()`, `video.run()` and `video.quote()` accept `hdr=True` to generate, or price, HDR output. The API returns 400 when the model does not support HDR or the resolution is not one of its HDR resolutions, and the quote includes the per output second HDR surcharge. `venice-py video generate` and `video from-image` take `--hdr/--no-hdr`. Left unset, nothing is sent.
+- **`VideoModelConstraints.supports_hdr` and `.hdr_resolutions`**, typed from the `supportsHdr` and `hdrResolutions` keys on `GET /models`, and `VideoCapabilities.supports_hdr` / `.hdr_resolutions` from `models.get_capabilities()`. `VideoModelConstraints` now also accepts these fields by their Python names.
+
 ## [2.14.0] - 2026-11-21
 
 Full-quote attestation failures are now typed, and `DcapTdxVerifier` can look collateral up per quote. Nothing is removed, and every existing `except TeeError` and `except TeeAttestationError` keeps catching what it caught. See **Added** and **Changed**.
