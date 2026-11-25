@@ -24,8 +24,9 @@ class _StopAfterResolve(Exception):
 
 
 def _capturing_resolve(captured: dict):
-    async def _fake(client, config, kind, explicit=None):
+    async def _fake(client, config, kind, explicit=None, requirements=None):
         captured["kind"] = kind
+        captured["requirements"] = requirements
         raise _StopAfterResolve
 
     return _fake
@@ -96,6 +97,17 @@ def test_audio_transcribe_resolves_stt_kind(runner, tmp_path):
 def test_video_generate_resolves_video_t2v_kind(runner):
     captured = _invoke_capture(runner, _SRC, ["video", "generate", "a cat surfing"])
     assert captured.get("kind") == "video_t2v"
+
+
+def test_video_generate_hdr_resolves_an_hdr_default(runner):
+    captured = _invoke_capture(
+        runner, _SRC, ["video", "generate", "a cat surfing", "--hdr", "--resolution", "4k"]
+    )
+    assert captured == {
+        "kind": "video_t2v",
+        "requirements": {"require_hdr": True, "require_resolution": "4k"},
+    }
+    assert _invoke_capture(runner, _SRC, ["video", "generate", "a cat"])["requirements"] is None
 
 
 def test_video_from_image_resolves_video_i2v_kind(runner, tmp_path):

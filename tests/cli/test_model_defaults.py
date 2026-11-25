@@ -70,3 +70,28 @@ async def test_offline_raises_clickexception():
         await resolve_default_model(client, {"defaults": {}}, "chat", explicit=None)
     assert "--model" in str(exc.value)
     assert "venice-py configure" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_requirements_narrow_the_api_resolution():
+    client = MagicMock()
+    client.models.resolve = AsyncMock(return_value="hdr-model")
+    result = await resolve_default_model(
+        client, {"defaults": {}}, "video_t2v", requirements={"require_hdr": True}
+    )
+    assert result == "hdr-model"
+    client.models.resolve.assert_awaited_once_with(
+        type="video", video_type="text-to-video", require_hdr=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_requirements_leave_a_saved_default_alone():
+    client = MagicMock()
+    client.models.resolve = AsyncMock(return_value="api-model")
+    config = {"defaults": {"video_t2v_model": "saved-model"}}
+    result = await resolve_default_model(
+        client, config, "video_t2v", requirements={"require_hdr": True}
+    )
+    assert result == "saved-model"
+    client.models.resolve.assert_not_called()
